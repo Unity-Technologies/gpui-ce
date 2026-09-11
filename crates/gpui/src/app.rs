@@ -200,6 +200,17 @@ impl Application {
         this
     }
 
+    /// Build every window's accessibility tree every frame, even when no
+    /// assistive technology is connected.
+    ///
+    /// For automation and tree inspection: [`crate::Window::debug_a11y_tree_json`]
+    /// otherwise reports nothing until a screen reader activates the platform
+    /// adapter. [`Application::new_inaccessible`] still wins when both are set.
+    pub fn with_accessibility_forced(self) -> Self {
+        self.0.borrow_mut().accessibility_forced = true;
+        self
+    }
+
     /// Assigns the source of assets for the application.
     pub fn with_assets(self, asset_source: impl AssetSource) -> Self {
         let mut context_lock = self.0.borrow_mut();
@@ -792,6 +803,9 @@ pub struct App {
     /// Whether the app was created by [`Application::new_inaccessible`]. No
     /// accesskit APIs will be called when this flag is set.
     pub(crate) accessibility_force_disabled: bool,
+    /// Whether windows build their accessibility tree every frame without an
+    /// assistive-technology client. See [`Application::with_accessibility_forced`].
+    pub(crate) accessibility_forced: bool,
     flushing_effects: bool,
     pending_updates: usize,
     quit_mode: QuitMode,
@@ -893,6 +907,7 @@ impl App {
                 reduce_motion: false,
                 synced_animation_epoch,
                 accessibility_force_disabled: false,
+                accessibility_forced: false,
 
                 #[cfg(any(test, feature = "test-support", debug_assertions))]
                 name: None,
