@@ -19,7 +19,12 @@ use gpui_render::{
         surface::SurfaceUniforms,
     },
 };
-#[cfg(any(test, feature = "bench-support", feature = "test-support"))]
+#[cfg(any(
+    test,
+    feature = "bench-support",
+    feature = "test-support",
+    feature = "render-to-image"
+))]
 use image::RgbaImage;
 
 use core_foundation::base::TCFType;
@@ -278,7 +283,12 @@ impl MetalRenderer {
         layer.set_opaque(!transparent);
         layer.set_maximum_drawable_count(3);
         // Allow texture reading for visual tests (captures screenshots without ScreenCaptureKit)
-        #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
+        #[cfg(any(
+            test,
+            feature = "bench-support",
+            feature = "test-support",
+            feature = "render-to-image"
+        ))]
         layer.set_framebuffer_only(false);
         // `metal::MetalLayer` is a CAMetalLayer retained by the Metal crate.
         // Reborrow its Objective-C object as the generated objc2 class to keep
@@ -694,7 +704,12 @@ impl MetalRenderer {
     ///
     /// Note: This requires a layer-backed renderer. For headless rendering,
     /// use `render_scene_to_image()` instead.
-    #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
+    #[cfg(any(
+        test,
+        feature = "bench-support",
+        feature = "test-support",
+        feature = "render-to-image"
+    ))]
     pub fn render_to_image(&mut self, scene: &Scene) -> Result<RgbaImage> {
         let layer = self
             .layer
