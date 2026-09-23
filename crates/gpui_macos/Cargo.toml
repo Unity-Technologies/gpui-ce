@@ -20,6 +20,7 @@ test-support = [
   "gpui_apple/test-support",
   "gpui_wgpu?/test-support",
 ]
+render-to-image = ["gpui/render-to-image", "gpui_apple/render-to-image"]
 font-kit = []
 screen-capture = ["gpui/screen-capture", "dep:core-video"]
 # Draw windows with the WGPU renderer instead of Metal, so applications can
