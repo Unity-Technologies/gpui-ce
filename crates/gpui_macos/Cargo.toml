@@ -16,6 +16,7 @@ path = "src/gpui_macos.rs"
 default = ["gpui/default"]
 bench-support = ["gpui/bench-support", "gpui_apple/bench-support"]
 test-support = ["gpui/test-support", "gpui_apple/test-support"]
+render-to-image = ["gpui/render-to-image", "gpui_apple/render-to-image"]
 font-kit = ["dep:font-kit"]
 screen-capture = ["gpui/screen-capture", "dep:core-video"]
 

@@ -17,6 +17,7 @@ path = "src/gpui_apple.rs"
 default = []
 bench-support = ["gpui/bench-support"]
 test-support = ["gpui/test-support"]
+render-to-image = ["gpui/render-to-image"]
 
 [dependencies]
 gpui.workspace = true

@@ -29,6 +29,9 @@ test-support = [
   "x11",
   "proptest",
 ]
+# Exposes `Window::render_to_image` without the rest of `test-support`, which
+# also changes how windows schedule and draw frames.
+render-to-image = []
 bench-support = ["profiler", "dep:criterion"]
 # Preserve the published feature name while consumers migrate to `bench-support`.
 bench = ["bench-support"]
