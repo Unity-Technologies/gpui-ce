@@ -26,6 +26,12 @@ test-support = [
   "gpui_macos/test-support",
   "gpui_windows/test-support",
 ]
+render-to-image = [
+  "gpui/render-to-image",
+  "gpui_apple/render-to-image",
+  "gpui_macos/render-to-image",
+  "gpui_windows/render-to-image",
+]
 screen-capture = [
   "gpui/screen-capture",
   "gpui_macos/screen-capture",
