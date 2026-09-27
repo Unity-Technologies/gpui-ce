@@ -29,7 +29,7 @@ wgsl-rs.workspace = true
 windows.workspace = true
 
 [build-dependencies]
-naga = { version = "29.0.4", features = [
+naga = { version = "30.0.1", features = [
   "glsl-out",
   "hlsl-out",
   "msl-out",
@@ -48,7 +48,11 @@ unicode-segmentation.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 gpui_parley = { workspace = true, features = ["test-support"] }
 gpui_fonts = { path = "../gpui_ce_fonts", version = "0.4.0", package = "gpui-ce-fonts" }
-naga = { version = "29.0.4", features = ["wgsl-in"] }
+naga = { version = "30.0.1", features = ["wgsl-in"] }
+# The `#[wgsl]` modules' generated `#[cfg(test)]` validation tests call
+# `Source::validate`, which only exists with this feature. Enabling it here
+# keeps those tests while leaving naga out of wgsl-rs's normal builds.
+wgsl-rs = { workspace = true, features = ["validation"] }
 
 [[bench]]
 name = "glyph_rasterization"
