@@ -135,14 +135,14 @@ impl windows_capture::capture::GraphicsCaptureApiHandler for CaptureHandler {
         frame: &mut windows_capture::frame::Frame,
         _control: windows_capture::graphics_capture_api::InternalCaptureControl,
     ) -> std::result::Result<(), Self::Error> {
-        let texture = unsafe { frame.as_raw_texture() }.clone();
+        let texture = frame.as_raw_texture().clone();
         let frame = WindowsScreenCaptureFrame::new(
             texture,
             crate::size(
                 DevicePixels(frame.width() as i32),
                 DevicePixels(frame.height() as i32),
             ),
-            frame.timestamp().Duration.max(0) as u64,
+            frame.timestamp()?.Duration.max(0) as u64,
         );
         (self.frame_callback)(ScreenCaptureFrame(frame));
         Ok(())

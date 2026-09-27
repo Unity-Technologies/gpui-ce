@@ -21,5 +21,6 @@ metal.workspace = true
 core-video.workspace = true
 objc.workspace = true
 
-[build-dependencies]
+# build.rs only generates bindings on macOS.
+[target.'cfg(target_os = "macos")'.build-dependencies]
 bindgen = "0.72"

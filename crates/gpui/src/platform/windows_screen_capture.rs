@@ -1,6 +1,6 @@
 use crate::{DevicePixels, Size};
 use std::sync::Arc;
-use windows_061::Win32::Graphics::Direct3D11::ID3D11Texture2D;
+use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 
 /// A Windows Graphics Capture frame backed by its native D3D11 texture.
 #[derive(Clone)]
