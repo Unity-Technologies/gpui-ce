@@ -2455,7 +2455,6 @@ dependencies = [
  "async-channel",
  "async-task",
  "backtrace",
- "bindgen",
  "bitflags 2.13.1",
  "chrono",
  "core-text",
@@ -2527,7 +2526,6 @@ dependencies = [
  "wasm-bindgen",
  "web-sys",
  "web-time",
- "windows 0.61.3",
  "windows 0.62.2",
  "windows-capture",
  "zed-font-kit",
@@ -2867,7 +2865,6 @@ dependencies = [
  "web-sys",
  "wgpu",
  "wgsl-rs",
- "windows 0.61.3",
  "windows 0.62.2",
  "zed-font-kit",
 ]
@@ -2895,7 +2892,6 @@ dependencies = [
  "smallvec",
  "uuid",
  "wgsl-rs",
- "windows 0.61.3",
  "windows 0.62.2",
  "windows-core 0.62.2",
  "windows-numerics 0.3.1",
@@ -3271,10 +3267,8 @@ dependencies = [
  "moxcms",
  "num-traits",
  "png",
- "qoi",
  "ravif",
  "rayon",
- "rgb",
  "tiff",
  "zune-core",
  "zune-jpeg",
@@ -5047,15 +5041,6 @@ name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
-
-[[package]]
-name = "qoi"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f6d64c71eb498fe9eae14ce4ec935c555749aef511cca85b5568910d6e48001"
-dependencies = [
- "bytemuck",
-]
 
 [[package]]
 name = "quick-error"
@@ -7306,15 +7291,15 @@ dependencies = [
 
 [[package]]
 name = "windows-capture"
-version = "1.5.0"
+version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a4df73e95feddb9ec1a7e9c2ca6323b8c97d5eeeff78d28f1eccdf19c882b24"
+checksum = "09046acbe9b6d039cde50e8c8178d95bb0f9b33ed7feccc4465dadc5404b31b4"
 dependencies = [
  "parking_lot",
  "rayon",
  "thiserror 2.0.20",
- "windows 0.61.3",
- "windows-future 0.2.1",
+ "windows 0.62.2",
+ "windows-future 0.3.2",
 ]
 
 [[package]]
