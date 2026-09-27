@@ -2,11 +2,11 @@ use super::{
     capture_size, capture_texture_descriptor, source_descriptor, validate_capture_descriptor,
 };
 use anyhow::{Context as _, Result};
-use windows_061::Win32::Graphics::Direct3D11::ID3D11Texture2D;
+use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
 
 pub(super) struct UploadedTexture {
     pub(super) size: wgpu::Extent3d,
-    context: windows_061::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
+    context: windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
     staging: ID3D11Texture2D,
     pixels: Vec<u8>,
     texture: wgpu::Texture,
@@ -17,9 +17,7 @@ impl UploadedTexture {
         device: &wgpu::Device,
         source: &ID3D11Texture2D,
     ) -> Result<(Self, wgpu::Texture)> {
-        use windows_061::Win32::Graphics::Direct3D11::{
-            D3D11_CPU_ACCESS_READ, D3D11_USAGE_STAGING,
-        };
+        use windows::Win32::Graphics::Direct3D11::{D3D11_CPU_ACCESS_READ, D3D11_USAGE_STAGING};
 
         let mut descriptor = source_descriptor(source);
         validate_capture_descriptor(&descriptor)?;
@@ -80,17 +78,17 @@ impl UploadedTexture {
 }
 
 struct MappedTexture<'a> {
-    context: &'a windows_061::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
+    context: &'a windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
     texture: &'a ID3D11Texture2D,
-    mapped: windows_061::Win32::Graphics::Direct3D11::D3D11_MAPPED_SUBRESOURCE,
+    mapped: windows::Win32::Graphics::Direct3D11::D3D11_MAPPED_SUBRESOURCE,
 }
 
 impl<'a> MappedTexture<'a> {
     fn new(
-        context: &'a windows_061::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
+        context: &'a windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext,
         texture: &'a ID3D11Texture2D,
     ) -> Result<Self> {
-        use windows_061::Win32::Graphics::Direct3D11::{D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE};
+        use windows::Win32::Graphics::Direct3D11::{D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE};
 
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         unsafe { context.Map(texture, 0, D3D11_MAP_READ, 0, Some(&mut mapped)) }
