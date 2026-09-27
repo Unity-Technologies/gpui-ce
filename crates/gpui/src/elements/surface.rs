@@ -5,7 +5,9 @@ use crate::{
     IntoElement, LayoutId, ObjectFit, Pixels, Size, Style, StyleRefinement, Styled, Window,
 };
 #[cfg(target_os = "macos")]
-use core_video::pixel_buffer::CVPixelBuffer;
+use objc2_core_foundation::CFRetained;
+#[cfg(target_os = "macos")]
+use objc2_core_video::CVPixelBuffer;
 use refineable::Refineable;
 
 /// A source of a surface's content.
@@ -13,7 +15,7 @@ use refineable::Refineable;
 pub enum SurfaceSource {
     /// A macOS image buffer from CoreVideo
     #[cfg(target_os = "macos")]
-    Surface(CVPixelBuffer),
+    Surface(CFRetained<CVPixelBuffer>),
     /// A GPU texture handle (type-erased to avoid depending on wgpu)
     #[cfg(any(
         target_os = "linux",
@@ -65,9 +67,10 @@ impl SurfaceSource {
     fn size(&self) -> Size<DevicePixels> {
         match self {
             #[cfg(target_os = "macos")]
-            SurfaceSource::Surface(buffer) => {
-                crate::size(buffer.get_width().into(), buffer.get_height().into())
-            }
+            SurfaceSource::Surface(buffer) => crate::size(
+                objc2_core_video::CVPixelBufferGetWidth(buffer).into(),
+                objc2_core_video::CVPixelBufferGetHeight(buffer).into(),
+            ),
             #[cfg(any(
                 target_os = "linux",
                 target_os = "freebsd",
@@ -82,8 +85,8 @@ impl SurfaceSource {
 }
 
 #[cfg(target_os = "macos")]
-impl From<CVPixelBuffer> for SurfaceSource {
-    fn from(value: CVPixelBuffer) -> Self {
+impl From<CFRetained<CVPixelBuffer>> for SurfaceSource {
+    fn from(value: CFRetained<CVPixelBuffer>) -> Self {
         SurfaceSource::Surface(value)
     }
 }

@@ -119,17 +119,14 @@ url = "2.2"
 uuid = { version = "1.1.2", features = ["v4", "v5", "v7", "serde"] }
 web-time = "1.1.0"
 skrifa = "0.46.2"
-block = "0.1"
 block2 = "0.6"
 cbindgen = { version = "0.28.0", default-features = false }
 core-foundation = "0.10"
 core-foundation-sys = "0.8.6"
 core-graphics = "0.24"
 core-text = "21"
-core-video = { version = "0.5.2", features = ["metal"] }
 foreign-types = "0.5"
 media = { path = "crates/gpui_media", version = "0.2.2", package = "gpui_ce_media" }
-objc = "0.2"
 objc2 = "0.6"
 objc2-foundation = { version = "=0.3.2", default-features = false, features = [
   "NSArray",
@@ -161,8 +158,25 @@ objc2-foundation = { version = "=0.3.2", default-features = false, features = [
   "std",
 ] }
 objc2-user-notifications = "0.3"
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+  "std",
+  "CFCGTypes",
+  "CFDictionary",
+] }
+objc2-core-video = { version = "0.3", default-features = false, features = [
+  "std",
+  "CVBase",
+  "CVBuffer",
+  "CVImageBuffer",
+  "CVMetalTexture",
+  "CVMetalTextureCache",
+  "CVPixelBuffer",
+  "CVReturn",
+  "objc2",
+  "objc2-metal",
+] }
+objc2-metal = "0.3"
 mach2 = "0.5"
-metal = "0.33"
 windows-capture = "2.0.1"
 env_logger = "0.11"
 unicode-segmentation = "1.10"
@@ -231,10 +245,13 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
 objc2-core-media = { version = "0.3", default-features = false, features = [
   "CMSampleBuffer",
   "objc2",
+  "objc2-core-video",
 ] }
 objc2-quartz-core = { version = "0.3", default-features = false, features = [
   "CALayer",
   "CAMetalLayer",
+  "objc2-core-foundation",
+  "objc2-metal",
 ] }
 objc2-screen-capture-kit = { version = "0.3", default-features = false, features = [
   "std",

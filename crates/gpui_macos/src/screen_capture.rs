@@ -2,23 +2,21 @@ use crate::display::screen_id;
 use anyhow::{Result, anyhow};
 use block2::RcBlock;
 use collections::HashMap;
-use core_foundation::base::TCFType;
 use core_graphics::display::{
     CGDirectDisplayID, CGDisplayCopyDisplayMode, CGDisplayModeGetPixelHeight,
     CGDisplayModeGetPixelWidth, CGDisplayModeRelease,
 };
-use core_video::pixel_buffer::kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
 use futures::channel::oneshot;
 use gpui::{
     DevicePixels, ForegroundExecutor, ScreenCaptureFrame, ScreenCaptureSource, ScreenCaptureStream,
     SharedString, SourceMetadata, size,
 };
-use media::core_media::{CMSampleBuffer, CMSampleBufferRef};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{AnyThread, DefinedClass, MainThreadMarker, define_class, msg_send};
 use objc2_app_kit::NSScreen;
 use objc2_core_media::CMSampleBuffer as ObjcCMSampleBuffer;
+use objc2_core_video::kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
 use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCDisplay, SCShareableContent, SCStream, SCStreamConfiguration,
@@ -296,13 +294,10 @@ define_class!(
                 return;
             }
 
-            // ScreenCaptureKit's CMSampleBuffer and gpui-media's CoreMedia
-            // wrapper are both the same opaque CoreMedia reference. Keep the
-            // conversion at this boundary while using the generated typed
-            // ScreenCaptureKit protocol method above.
-            let sample_buffer = sample_buffer as *const ObjcCMSampleBuffer as CMSampleBufferRef;
-            let sample_buffer = unsafe { CMSampleBuffer::wrap_under_get_rule(sample_buffer) };
-            if let Some(buffer) = sample_buffer.image_buffer() {
+            // SAFETY: `sample_buffer` is the live CMSampleBuffer ScreenCaptureKit hands this
+            // callback. CMSampleBufferGetImageBuffer follows the get rule and the generated
+            // binding retains the result, so the image buffer outlives the sample buffer.
+            if let Some(buffer) = unsafe { sample_buffer.image_buffer() } {
                 (self.ivars().callback)(ScreenCaptureFrame(buffer));
             }
         }

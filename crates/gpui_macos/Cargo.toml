@@ -18,7 +18,7 @@ bench-support = ["gpui/bench-support", "gpui_apple/bench-support"]
 test-support = ["gpui/test-support", "gpui_apple/test-support"]
 render-to-image = ["gpui/render-to-image", "gpui_apple/render-to-image"]
 font-kit = ["dep:font-kit"]
-screen-capture = ["gpui/screen-capture", "dep:core-video"]
+screen-capture = ["gpui/screen-capture", "dep:objc2-core-video"]
 
 [dependencies]
 gpui.workspace = true
@@ -28,14 +28,12 @@ accesskit.workspace = true
 accesskit_macos.workspace = true
 anyhow.workspace = true
 async-task.workspace = true
-block.workspace = true
 block2.workspace = true
 collections.workspace = true
 core-foundation.workspace = true
 core-foundation-sys.workspace = true
 core-graphics.workspace = true
 core-text.workspace = true
-core-video = { workspace = true, optional = true }
 ctor.workspace = true
 dispatch2 = "0.3.1"
 etagere.workspace = true
@@ -49,12 +47,11 @@ itertools.workspace = true
 libc.workspace = true
 log.workspace = true
 mach2.workspace = true
-media.workspace = true
-metal.workspace = true
 objc2.workspace = true
 objc2-app-kit.workspace = true
 objc2-foundation.workspace = true
 objc2-core-media.workspace = true
+objc2-core-video = { workspace = true, optional = true }
 objc2-screen-capture-kit.workspace = true
 objc2-user-notifications.workspace = true
 palette.workspace = true
