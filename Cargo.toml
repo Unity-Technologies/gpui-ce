@@ -39,11 +39,11 @@ homepage = "https://gpui-ce.github.io/"
 readme = "README.md"
 
 [workspace.dependencies]
-accesskit = { version = "0.24.0", features = ["enumn"] }
-accesskit_consumer = "0.38.0"
-accesskit_macos = "0.26.0"
-accesskit_unix = "0.22.0"
-accesskit_windows = "0.33.1"
+accesskit = { version = "0.25.1", features = ["enumn"] }
+accesskit_consumer = "0.39.1"
+accesskit_macos = "0.27.1"
+accesskit_unix = "0.24.0"
+accesskit_windows = "0.35.1"
 anyhow = "1.0.86"
 async-task = "4.7"
 backtrace = "0.3"
@@ -193,10 +193,14 @@ ashpd = { version = "0.13", default-features = false, features = [
 libc = "0.2"
 smol = "2.0"
 util = { path = "crates/gpui_zed_util", version = "0.2.2", package = "gpui_ce_zed_util" }
-wgpu = "29.0.3"
-wgsl-rs = { git = "https://github.com/schell/wgsl-rs", rev = "b2de16a1b81e67d76bc265c296184f882864badb", default-features = false, features = [
-  "validation",
-] }
+wgpu = "30.0.1"
+# No `validation` here: it only backs the `#[cfg(test)]` validation tests the
+# `#[wgsl]` macro generates, and it links wgsl-rs's own naga (29, behind this
+# workspace's), so enabling it workspace-wide put a second naga into every
+# consumer's normal build. gpui_render, the one crate with `#[wgsl]` modules,
+# enables it as a dev-dependency instead, and its build.rs already validates
+# every pipeline's WGSL with this workspace's naga on every build.
+wgsl-rs = { git = "https://github.com/schell/wgsl-rs", rev = "b2de16a1b81e67d76bc265c296184f882864badb", default-features = false }
 criterion = { version = "0.5", features = ["html_reports"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = [
   "objc2-core-foundation",
