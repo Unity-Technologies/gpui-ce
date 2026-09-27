@@ -126,7 +126,8 @@ uuid = { workspace = true, features = ["js"] }
 
 
 [target.'cfg(target_os = "macos")'.dependencies]
-core-video.workspace = true
+objc2-core-foundation.workspace = true
+objc2-core-video.workspace = true
 core-text = "21"
 font-kit = { version = "0.14.1-zed", package = "zed-font-kit", optional = true }
 foreign-types = "0.5"

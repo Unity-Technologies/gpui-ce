@@ -24,7 +24,6 @@ use core_foundation_sys::base::CFEqual;
 use core_foundation_sys::number::{CFBooleanGetValue, CFBooleanRef};
 use core_graphics::display::CGDirectDisplayID;
 use ctor::ctor;
-use foreign_types::ForeignTypeRef;
 use futures::channel::oneshot;
 use gpui_util::ResultExt;
 use objc2::{
@@ -3081,12 +3080,7 @@ fn update_window_scale_factor(window_state: &Arc<Mutex<MacWindowState>>) {
     let size = lock.content_size();
     let drawable_size = size.to_device_pixels(scale_factor);
     if let Some(layer) = lock.renderer.layer() {
-        unsafe {
-            let _: () = msg_send![
-                layer.as_ptr() as ObjcId,
-                setContentsScale: scale_factor as f64
-            ];
-        }
+        layer.setContentsScale(scale_factor as f64);
     }
 
     lock.renderer.update_drawable_size(drawable_size);

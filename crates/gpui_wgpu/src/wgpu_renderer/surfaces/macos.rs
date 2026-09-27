@@ -1,26 +1,51 @@
 use super::*;
 use collections::FxHashMap;
+use objc2_core_foundation::CFRetained;
+use objc2_core_video::{
+    CVMetalTexture, CVMetalTextureCache, CVMetalTextureGetTexture, CVPixelBuffer,
+    CVPixelBufferGetHeightOfPlane, CVPixelBufferGetPixelFormatType, CVPixelBufferGetWidthOfPlane,
+    kCVReturnSuccess,
+};
+use std::{
+    ffi::c_void,
+    ptr::{self, NonNull},
+};
+
+// Declared here rather than through objc2-core-video's binding, which would need the
+// IOSurface framework crate only to name a return value this renderer uses as a cache key.
+#[link(name = "CoreVideo", kind = "framework")]
+unsafe extern "C" {
+    fn CVPixelBufferGetIOSurface(pixel_buffer: &CVPixelBuffer) -> *const c_void;
+}
 
 pub(in crate::wgpu_renderer) struct SurfaceCache {
-    texture_cache: core_video::metal_texture_cache::CVMetalTextureCache,
+    texture_cache: CFRetained<CVMetalTextureCache>,
     surfaces: FxHashMap<usize, CachedSurface>,
 }
 
 impl SurfaceCache {
     pub(in crate::wgpu_renderer) fn new(device: &wgpu::Device) -> anyhow::Result<Self> {
-        use metal::foreign_types::ForeignTypeRef as _;
-
         let hal_device = unsafe { device.as_hal::<wgpu::hal::api::Metal>() }
             .ok_or_else(|| anyhow::anyhow!("macOS WGPU device did not expose the Metal HAL"))?;
-        let raw_device = objc2::rc::Retained::as_ptr(hal_device.raw_device())
-            .cast_mut()
-            .cast();
-        let metal_device = unsafe { metal::DeviceRef::from_ptr(raw_device) }.to_owned();
-        let texture_cache =
-            core_video::metal_texture_cache::CVMetalTextureCache::new(None, metal_device, None)
-                .map_err(|error| {
-                    anyhow::anyhow!("failed to create CoreVideo Metal texture cache: {error}")
-                })?;
+        let mut texture_cache: *mut CVMetalTextureCache = ptr::null_mut();
+        // SAFETY: the HAL device is a live MTLDevice, and `texture_cache` is a valid out
+        // pointer. CVMetalTextureCacheCreate retains the device for the cache's lifetime.
+        let result = unsafe {
+            CVMetalTextureCache::create(
+                None,
+                None,
+                hal_device.raw_device(),
+                None,
+                NonNull::from(&mut texture_cache),
+            )
+        };
+        let texture_cache = NonNull::new(texture_cache)
+            .filter(|_| result == kCVReturnSuccess)
+            .ok_or_else(|| {
+                anyhow::anyhow!("failed to create CoreVideo Metal texture cache: code {result}")
+            })?;
+        // SAFETY: CVMetalTextureCacheCreate returns a +1 reference (create rule).
+        let texture_cache = unsafe { CFRetained::from_raw(texture_cache) };
         Ok(Self {
             texture_cache,
             surfaces: FxHashMap::default(),
@@ -58,7 +83,7 @@ pub(super) fn draw_surfaces(
     opacities: &[f32],
     pass: &mut wgpu::RenderPass<'_>,
 ) -> frame::DrawResult {
-    use core_video::pixel_buffer::kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+    use objc2_core_video::kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
 
     let mut keyed_surfaces = smallvec::SmallVec::<[(&PaintSurface, usize, f32); 4]>::new();
     for (index, surface) in surfaces.iter().enumerate() {
@@ -66,7 +91,9 @@ pub(super) fn draw_surfaces(
             log::error!("surface source cannot be imported by the macOS renderer");
             return Err(frame::DrawError::ExternalSurface);
         };
-        if image_buffer.get_pixel_format() != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange {
+        if CVPixelBufferGetPixelFormatType(image_buffer)
+            != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+        {
             log::error!("unsupported CoreVideo surface pixel format");
             return Err(frame::DrawError::ExternalSurface);
         }
@@ -85,7 +112,7 @@ pub(super) fn draw_surfaces(
             return Err(frame::DrawError::ExternalSurface);
         };
         let mut imported = cache.surfaces.remove(&key).map(Ok).unwrap_or_else(|| {
-            create_core_video_surface(renderer, &cache.texture_cache, &image_buffer)
+            create_core_video_surface(renderer, &cache.texture_cache, image_buffer)
         })?;
         renderer.draw_surface_binding(
             surface,
@@ -99,16 +126,10 @@ pub(super) fn draw_surfaces(
     Ok(())
 }
 
-fn core_video_surface_key(
-    image_buffer: &core_video::pixel_buffer::CVPixelBuffer,
-) -> Result<usize, frame::DrawError> {
-    use core_foundation::base::TCFType as _;
-
-    let io_surface = unsafe {
-        core_video::pixel_buffer_io_surface::CVPixelBufferGetIOSurface(
-            image_buffer.as_concrete_TypeRef(),
-        )
-    };
+fn core_video_surface_key(image_buffer: &CVPixelBuffer) -> Result<usize, frame::DrawError> {
+    // SAFETY: `image_buffer` is a live CVPixelBuffer. The returned IOSurface is borrowed (get
+    // rule) and only its address is kept, as the surface's identity.
+    let io_surface = unsafe { CVPixelBufferGetIOSurface(image_buffer) };
     if io_surface.is_null() {
         log::error!(
             "CoreVideo surface is not IOSurface-backed; allocate it with \
@@ -120,45 +141,66 @@ fn core_video_surface_key(
     Ok(io_surface as usize)
 }
 
+/// Wraps `CVMetalTextureCacheCreateTextureFromImage` for one plane of `image_buffer`.
+fn create_plane_texture(
+    texture_cache: &CVMetalTextureCache,
+    image_buffer: &CVPixelBuffer,
+    pixel_format: objc2_metal::MTLPixelFormat,
+    plane: usize,
+) -> Result<CFRetained<CVMetalTexture>, i32> {
+    let mut texture: *mut CVMetalTexture = ptr::null_mut();
+    // SAFETY: the cache and image buffer are live CoreVideo objects, the plane index and size
+    // come from the image buffer itself, and `texture` is a valid out pointer.
+    let result = unsafe {
+        CVMetalTextureCache::create_texture_from_image(
+            None,
+            texture_cache,
+            image_buffer,
+            None,
+            pixel_format,
+            CVPixelBufferGetWidthOfPlane(image_buffer, plane),
+            CVPixelBufferGetHeightOfPlane(image_buffer, plane),
+            plane,
+            NonNull::from(&mut texture),
+        )
+    };
+    match NonNull::new(texture) {
+        // SAFETY: CVMetalTextureCacheCreateTextureFromImage returns a +1 reference.
+        Some(texture) if result == kCVReturnSuccess => Ok(unsafe { CFRetained::from_raw(texture) }),
+        _ => Err(result),
+    }
+}
+
 fn create_core_video_surface(
     renderer: &WgpuRenderer,
-    texture_cache: &core_video::metal_texture_cache::CVMetalTextureCache,
-    image_buffer: &core_video::pixel_buffer::CVPixelBuffer,
+    texture_cache: &CVMetalTextureCache,
+    image_buffer: &CVPixelBuffer,
 ) -> Result<CachedSurface, frame::DrawError> {
-    use core_foundation::base::TCFType as _;
-    use core_video::metal_texture::CVMetalTextureGetTexture;
-
     let resources = renderer.resources();
-    let luma = texture_cache
-        .create_texture_from_image(
-            image_buffer.as_concrete_TypeRef(),
-            None,
-            metal::MTLPixelFormat::R8Unorm,
-            image_buffer.get_width_of_plane(0),
-            image_buffer.get_height_of_plane(0),
-            0,
-        )
-        .map_err(|error| {
-            log::error!("failed to create CoreVideo luma texture: {error}");
-            frame::DrawError::ExternalSurface
-        })?;
-    let chroma = texture_cache
-        .create_texture_from_image(
-            image_buffer.as_concrete_TypeRef(),
-            None,
-            metal::MTLPixelFormat::RG8Unorm,
-            image_buffer.get_width_of_plane(1),
-            image_buffer.get_height_of_plane(1),
-            1,
-        )
-        .map_err(|error| {
-            log::error!("failed to create CoreVideo chroma texture: {error}");
-            frame::DrawError::ExternalSurface
-        })?;
+    let luma = create_plane_texture(
+        texture_cache,
+        image_buffer,
+        objc2_metal::MTLPixelFormat::R8Unorm,
+        0,
+    )
+    .map_err(|error| {
+        log::error!("failed to create CoreVideo luma texture: {error}");
+        frame::DrawError::ExternalSurface
+    })?;
+    let chroma = create_plane_texture(
+        texture_cache,
+        image_buffer,
+        objc2_metal::MTLPixelFormat::RG8Unorm,
+        1,
+    )
+    .map_err(|error| {
+        log::error!("failed to create CoreVideo chroma texture: {error}");
+        frame::DrawError::ExternalSurface
+    })?;
     let luma_texture = unsafe {
         import_core_video_texture(
             &resources.device,
-            CVMetalTextureGetTexture(luma.as_concrete_TypeRef()).cast(),
+            CVMetalTextureGetTexture(&luma),
             wgpu::TextureFormat::R8Unorm,
             plane_size(image_buffer, 0),
         )
@@ -167,7 +209,7 @@ fn create_core_video_surface(
     let chroma_texture = unsafe {
         import_core_video_texture(
             &resources.device,
-            CVMetalTextureGetTexture(chroma.as_concrete_TypeRef()).cast(),
+            CVMetalTextureGetTexture(&chroma),
             wgpu::TextureFormat::Rg8Unorm,
             plane_size(image_buffer, 1),
         )
@@ -182,30 +224,23 @@ fn create_core_video_surface(
     })
 }
 
-fn plane_size(
-    image_buffer: &core_video::pixel_buffer::CVPixelBuffer,
-    plane: usize,
-) -> wgpu::Extent3d {
+fn plane_size(image_buffer: &CVPixelBuffer, plane: usize) -> wgpu::Extent3d {
     wgpu::Extent3d {
-        width: image_buffer.get_width_of_plane(plane) as u32,
-        height: image_buffer.get_height_of_plane(plane) as u32,
+        width: CVPixelBufferGetWidthOfPlane(image_buffer, plane) as u32,
+        height: CVPixelBufferGetHeightOfPlane(image_buffer, plane) as u32,
         depth_or_array_layers: 1,
     }
 }
 
 unsafe fn import_core_video_texture(
     device: &wgpu::Device,
-    raw_texture: *mut objc2::runtime::AnyObject,
+    raw: Option<objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLTexture>>>,
     format: wgpu::TextureFormat,
     size: wgpu::Extent3d,
 ) -> Option<wgpu::Texture> {
-    use objc2::{rc::Retained, runtime::ProtocolObject};
-
-    // SAFETY: CoreVideo returned a live MTLTexture; the retain count transfers into the
-    // HAL texture so it outlives the CVMetalTexture wrapper.
-    let object = unsafe { Retained::retain(raw_texture) }?;
-    let raw =
-        unsafe { Retained::cast_unchecked::<ProtocolObject<dyn objc2_metal::MTLTexture>>(object) };
+    // CoreVideo returned a live MTLTexture, already retained by the binding; the retain count
+    // transfers into the HAL texture so it outlives the CVMetalTexture wrapper.
+    let raw = raw?;
     let hal_texture = unsafe {
         wgpu::hal::metal::Device::texture_from_raw(
             raw,

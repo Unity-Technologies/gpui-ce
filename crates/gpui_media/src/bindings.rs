@@ -4,7 +4,4 @@
 #![allow(unused)]
 
 #[cfg(target_os = "macos")]
-use objc::*;
-
-#[cfg(target_os = "macos")]
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
