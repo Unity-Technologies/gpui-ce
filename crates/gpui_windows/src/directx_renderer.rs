@@ -36,7 +36,6 @@ use windows::{
     },
     core::{HSTRING, Interface, PCSTR},
 };
-use windows_061::core::Interface as _;
 
 use crate::directx_renderer::shader_resources::ShaderModule;
 use crate::*;

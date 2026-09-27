@@ -1,7 +1,7 @@
 use super::*;
 use anyhow::Result;
 use collections::FxHashMap;
-use windows_061::{
+use windows::{
     Win32::Graphics::Direct3D11::{D3D11_TEXTURE2D_DESC, ID3D11Texture2D},
     core::Interface as _,
 };
@@ -221,7 +221,7 @@ fn source_size(source: &ID3D11Texture2D) -> wgpu::Extent3d {
 }
 
 fn validate_capture_descriptor(descriptor: &D3D11_TEXTURE2D_DESC) -> Result<()> {
-    use windows_061::Win32::Graphics::Dxgi::Common::{
+    use windows::Win32::Graphics::Dxgi::Common::{
         DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM_SRGB,
     };
 
