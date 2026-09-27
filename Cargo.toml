@@ -72,7 +72,7 @@ derive_more = { version = "2.1.1", features = [
 ] }
 futures = "0.3.32"
 futures-concurrency = "7.7.1"
-flume = "0.11"
+flume = "0.12"
 http = "1.3"
 # Only the formats gpui's `ImageFormat` maps, plus `rayon` for the parallel
 # JPEG decoder. The crate's default set also enables `avif`, an AVIF *encoder*
@@ -99,7 +99,7 @@ postage = { version = "0.5", features = ["futures-traits"] }
 proptest = { version = "1.10", features = ["attr-macro"] }
 chrono = { version = "0.4", features = ["serde"] }
 profiling = "1"
-rand = "0.9.4"
+rand = "0.10.3"
 regex = "1.5"
 refineable = { path = "crates/gpui_refineable", version = "0.2.2", package = "gpui_ce_refineable" }
 scheduler = { path = "crates/gpui_scheduler", version = "0.2.2", package = "gpui_ce_scheduler" }
