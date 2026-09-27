@@ -2,7 +2,7 @@ use super::{
     capture_size, capture_texture_descriptor, source_descriptor, validate_capture_descriptor,
 };
 use anyhow::{Context as _, Result};
-use windows_061::{
+use windows::{
     Win32::Graphics::Direct3D11::{ID3D11DeviceContext4, ID3D11Fence, ID3D11Texture2D},
     core::Interface as _,
 };
@@ -23,7 +23,7 @@ impl SharedTexture {
         hal_device: &wgpu::hal::dx12::Device,
         source: &ID3D11Texture2D,
     ) -> Result<(Self, wgpu::Texture)> {
-        use windows_061::Win32::{
+        use windows::Win32::{
             Foundation::GENERIC_ALL,
             Graphics::{
                 Direct3D11::{
@@ -172,7 +172,7 @@ fn open_shared_resources(
     ))
 }
 
-struct OwnedHandle(windows_061::Win32::Foundation::HANDLE);
+struct OwnedHandle(windows::Win32::Foundation::HANDLE);
 
 impl OwnedHandle {
     fn raw(&self) -> *mut std::ffi::c_void {
@@ -182,7 +182,7 @@ impl OwnedHandle {
 
 impl Drop for OwnedHandle {
     fn drop(&mut self) {
-        if let Err(error) = unsafe { windows_061::Win32::Foundation::CloseHandle(self.0) } {
+        if let Err(error) = unsafe { windows::Win32::Foundation::CloseHandle(self.0) } {
             log::error!("failed to close shared capture handle: {error}");
         }
     }
