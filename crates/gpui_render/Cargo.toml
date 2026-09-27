@@ -20,7 +20,7 @@ wgsl-rs.workspace = true
 windows.workspace = true
 
 [build-dependencies]
-naga = { version = "29.0.4", features = [
+naga = { version = "30.0.1", features = [
   "glsl-out",
   "hlsl-out",
   "msl-out",
@@ -34,4 +34,8 @@ gpui = { path = "../gpui", version = "0.2.2", package = "gpui-ce", default-featu
 wgsl-rs.workspace = true
 
 [dev-dependencies]
-naga = { version = "29.0.4", features = ["wgsl-in"] }
+naga = { version = "30.0.1", features = ["wgsl-in"] }
+# The `#[wgsl]` modules' generated `#[cfg(test)]` validation tests call
+# `Source::validate`, which only exists with this feature. Enabling it here
+# keeps those tests while leaving wgsl-rs's own naga out of normal builds.
+wgsl-rs = { workspace = true, features = ["validation"] }

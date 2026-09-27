@@ -96,6 +96,9 @@ impl RenderTarget {
                 desired_maximum_frame_latency: 2,
                 alpha_mode,
                 view_formats: Vec::new(),
+                // `Auto` is wgpu's pre-30 behavior: sRGB, or extended linear
+                // sRGB for an Rgba16Float surface.
+                color_space: wgpu::SurfaceColorSpace::Auto,
             },
             transparent_alpha_mode,
             opaque_alpha_mode,

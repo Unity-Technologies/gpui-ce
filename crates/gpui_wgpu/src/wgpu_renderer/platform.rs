@@ -118,7 +118,7 @@ impl WgpuRenderer {
             .create_view(&wgpu::TextureViewDescriptor::default());
         let rendered = self.render_to_view(scene, &view);
         if rendered {
-            frame.present();
+            self.resources().queue.present(frame);
         }
         rendered
     }
