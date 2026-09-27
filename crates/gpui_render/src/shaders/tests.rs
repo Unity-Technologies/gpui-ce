@@ -3,7 +3,14 @@ use super::*;
 #[test]
 fn validates_subpixel_shader() {
     let generated = subpixel_sprite::WGSL_SOURCE.wgsl_source().unwrap();
-    wgsl_rs::validate_wgsl_source(&format!("enable dual_source_blending;\n{generated}")).unwrap();
+    let source = format!("enable dual_source_blending;\n{generated}");
+    let module = naga::front::wgsl::parse_str(&source).unwrap();
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap();
 }
 
 #[test]
