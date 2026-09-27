@@ -28,6 +28,7 @@ test-support = [
   "wayland",
   "x11",
   "proptest",
+  "dep:postage",
 ]
 # Exposes `Window::render_to_image` without the rest of `test-support`, which
 # also changes how windows schedule and draw frames.
@@ -78,7 +79,7 @@ parking = "2.0.0"
 parking_lot.workspace = true
 palette.workspace = true
 phf.workspace = true
-postage.workspace = true
+postage = { workspace = true, optional = true }
 proptest = { workspace = true, optional = true }
 chrono.workspace = true
 profiling.workspace = true
@@ -147,10 +148,10 @@ objc2-metal = { version = "0.3", optional = true }
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true, features = [
   "Win32_Foundation",
+  "Win32_Graphics_Direct3D11",
   "Win32_System_Power",
 ] }
 windows-capture = { workspace = true, optional = true }
-windows-061 = { workspace = true, features = ["Win32_Graphics_Direct3D11"] }
 
 
 [dev-dependencies]
@@ -164,6 +165,7 @@ gpui_platform = { workspace = true, features = ["font-kit", "wayland", "x11"] }
 gpui_fonts = { path = "../gpui_ce_fonts", version = "0.2.2", package = "gpui-ce-fonts" }
 gpui_util = { workspace = true }
 lyon = { version = "1.0", features = ["extra"] }
+postage.workspace = true
 rand.workspace = true
 scheduler = { workspace = true, features = ["test-support"] }
 
@@ -177,12 +179,8 @@ web-sys = { version = "0.3", features = ["console"] }
 [build-dependencies]
 embed-resource = { version = "3.0", optional = true }
 
-[target.'cfg(target_os = "macos")'.build-dependencies]
-bindgen = "0.72"
-
 [package.metadata.cargo-shear]
 ignored = [
-  "bindgen",
   "font-kit",
   "getrandom",
   "objc2",
