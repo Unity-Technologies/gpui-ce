@@ -1624,6 +1624,14 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Set the URL this element links to (maps to the AccessKit `url`
+    /// property), the target a web page exposes for an `<a href>`. This only
+    /// describes the element to assistive technology; it does not open the URL.
+    fn aria_url(mut self, url: impl Into<SharedString>) -> Self {
+        self.interactivity().aria.url = Some(url.into());
+        self
+    }
+
     /// Set the minimum numeric value for this element.
     fn aria_min_numeric_value(mut self, value: f64) -> Self {
         self.interactivity().aria.min_numeric_value = Some(value);
@@ -2463,6 +2471,7 @@ pub(crate) struct AriaProperties {
     pub(crate) numeric_value_step: Option<f64>,
     pub(crate) value: Option<SharedString>,
     pub(crate) placeholder: Option<SharedString>,
+    pub(crate) url: Option<SharedString>,
     pub(crate) orientation: Option<accesskit::Orientation>,
     pub(crate) level: Option<usize>,
     pub(crate) position_in_set: Option<usize>,
@@ -4022,6 +4031,9 @@ impl Interactivity {
         if let Some(placeholder) = &self.aria.placeholder {
             node.set_placeholder(placeholder.to_string());
         }
+        if let Some(url) = &self.aria.url {
+            node.set_url(url.to_string());
+        }
         if let Some(orientation) = self.aria.orientation {
             node.set_orientation(orientation);
         }
@@ -5477,6 +5489,16 @@ mod tests {
         element.interactivity().write_a11y_info(&mut node);
 
         assert_eq!(node.author_id(), Some("settings.buffer-font-size"));
+    }
+
+    #[test]
+    fn test_aria_url_builder_writes_url() {
+        let mut element = div().id("docs-link").aria_url("https://example.com/docs");
+        let mut node = accesskit::Node::new(accesskit::Role::Link);
+
+        element.interactivity().write_a11y_info(&mut node);
+
+        assert_eq!(node.url(), Some("https://example.com/docs"));
     }
 
     #[test]
