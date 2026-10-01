@@ -1729,7 +1729,14 @@ impl DirectXRenderPipelines {
 impl DirectComposition {
     pub fn new(dxgi_device: &IDXGIDevice, hwnd: HWND) -> Result<Self> {
         let comp_device = get_comp_device(dxgi_device)?;
-        let comp_target = unsafe { comp_device.CreateTargetForHwnd(hwnd, true) }?;
+        // `topmost: false` composes gpui's visual tree BEHIND the window's
+        // child HWNDs. gpui creates none of its own, so this only matters to
+        // an embedder that parents a native child (a WebView2 host, a video
+        // surface): with `true`, gpui's opaque frame covers that child
+        // entirely while it still receives input and keeps running, which
+        // reads as "audio but no picture". `false` matches macOS, where a
+        // child `NSView` draws above gpui's Metal layer.
+        let comp_target = unsafe { comp_device.CreateTargetForHwnd(hwnd, false) }?;
         let comp_visual = unsafe { comp_device.CreateVisual() }?;
 
         Ok(Self {
