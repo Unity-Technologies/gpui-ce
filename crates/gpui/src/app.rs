@@ -1,16 +1,16 @@
 use crate::{
-    Action, ActionBuildError, ActionRegistry, ActivityGuard, Any, AnyView, AnyWindowHandle,
-    AppContext, Arena, ArenaBox, Asset, AssetRegistry, BackgroundExecutor, Bounds, ClipboardItem,
-    ClipboardReadError, ContrastPreference, CursorStyle, DispatchPhase, DisplayChanges,
-    DisplayEvent, DisplayId, EventEmitter, ExternalDragPayload, FocusHandle, FocusMap,
-    ForegroundExecutor, Global, HapticFeedbackStyle, KeyBinding, KeyContext, Keymap, Keystroke,
-    LayoutId, Menu, MenuItem, OwnedMenu, PathPromptOptions, Pixels, Platform, PlatformDisplay,
-    PlatformKeyboardLayout, PlatformKeyboardMapper, Point, Priority, PromptBuilder, PromptButton,
-    PromptHandle, PromptLevel, Render, RenderImage, RenderablePromptHandle, Reservation,
-    ScreenCaptureSource, SharedString, SubscriberSet, Subscription, SvgRenderer, SystemColors,
-    SystemNotification, SystemNotificationResponse, Task, TextRenderingMode, TextSystem,
-    ThermalState, Window, WindowAppearance, WindowBounds, WindowButtonLayout, WindowHandle,
-    WindowId, WindowInvalidator,
+    Action, ActionBuildError, ActionRegistry, ActivationPolicy, ActivityGuard, Any, AnyView,
+    AnyWindowHandle, AppContext, Arena, ArenaBox, Asset, AssetRegistry, BackgroundExecutor, Bounds,
+    ClipboardItem, ClipboardReadError, ContrastPreference, CursorStyle, DispatchPhase,
+    DisplayChanges, DisplayEvent, DisplayId, EventEmitter, ExternalDragPayload, FocusHandle,
+    FocusMap, ForegroundExecutor, Global, HapticFeedbackStyle, KeyBinding, KeyContext, Keymap,
+    Keystroke, LayoutId, Menu, MenuItem, OwnedMenu, PathPromptOptions, Pixels, Platform,
+    PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, Point, Priority,
+    PromptBuilder, PromptButton, PromptHandle, PromptLevel, Render, RenderImage,
+    RenderablePromptHandle, Reservation, ScreenCaptureSource, SharedString, SubscriberSet,
+    Subscription, SvgRenderer, SystemColors, SystemNotification, SystemNotificationResponse, Task,
+    TextRenderingMode, TextSystem, ThermalState, Window, WindowAppearance, WindowBounds,
+    WindowButtonLayout, WindowHandle, WindowId, WindowInvalidator, WindowingRequest,
     colors::{Colors, GlobalColors},
     hash,
     http_client::{HttpClient, NullHttpClient},
@@ -351,6 +351,17 @@ impl Application {
     /// [`App::set_quit_mode`].
     pub fn with_quit_mode(self, mode: QuitMode) -> Self {
         self.0.borrow_mut().quit_mode = mode;
+        self
+    }
+
+    /// Sets the windowing mode the app starts in. See [`App::request_windowing`].
+    ///
+    /// Defaults to windowed. On Linux, the default environment is the process's own, and the app
+    /// starts headless if that names no allowed display server. On macOS, headless means the app
+    /// starts without a Dock icon or menu bar ([`ActivationPolicy::Accessory`]). Has no effect on
+    /// other platforms.
+    pub fn with_windowing(self, request: WindowingRequest) -> Self {
+        self.0.borrow().platform.set_initial_windowing(request);
         self
     }
 
@@ -1389,6 +1400,41 @@ impl App {
     /// that happen when the last window closes.
     pub fn quit(&self) {
         self.platform.quit();
+    }
+
+    /// Switches the platform between headless and windowed modes.
+    ///
+    /// On Linux, headless means no display server: windows opened afterwards lay out and handle
+    /// input but draw nothing. Windowed, the platform connects to the display server the
+    /// environment names. On macOS, the modes set the [`ActivationPolicy`]: headless is
+    /// `Accessory` (no Dock icon or menu bar) and windowed is `Regular`. Switching to windowed
+    /// doesn't activate the app: call [`App::activate`] for that.
+    ///
+    /// The returned task resolves once the switch has been applied. It fails if the platform is
+    /// already in the requested mode (switching to another display server means going headless
+    /// first), if the platform doesn't allow the mode or can't switch at all, if any window is
+    /// open (a window belongs to the display server that opened it), or if the display server
+    /// can't be reached.
+    pub fn request_windowing(&self, request: WindowingRequest) -> Task<anyhow::Result<()>> {
+        if !self.windows.is_empty() {
+            return Task::ready(Err(anyhow::anyhow!(
+                "cannot switch windowing modes while windows are open"
+            )));
+        }
+        self.platform.request_windowing(request)
+    }
+
+    /// The environment of the display server the platform is connected to, or `None` while
+    /// headless. Its activation token is always unset, since the connection has used it.
+    ///
+    /// Programs an app launches inherit this process's environment, which may name another
+    /// graphical session, or none if the app started headless. Pass them this one with
+    /// [`GraphicalEnvironment::apply_to`](crate::GraphicalEnvironment::apply_to).
+    ///
+    /// On macOS, the environment carries nothing, and this is `None` while the activation
+    /// policy is `Accessory`. Always `None` on platforms that can't switch windowing modes.
+    pub fn graphical_environment(&self) -> Option<crate::GraphicalEnvironment> {
+        self.platform.graphical_environment()
     }
 
     /// Returns the policy that decides when GPUI hides the cursor while typing.
@@ -2500,6 +2546,18 @@ impl App {
     /// Defaults to [`QuitMode::Default`].
     pub fn set_quit_mode(&mut self, mode: QuitMode) {
         self.quit_mode = mode;
+    }
+
+    /// Sets whether the application participates in the system's foreground UI.
+    ///
+    /// Only has an effect on macOS, where [`Self::request_windowing`] normally sets it. Use this
+    /// for an accessory app that shows windows, such as a menu bar utility. It overrides the
+    /// policy until the next [`Self::request_windowing`], and the app counts as headless while
+    /// `Accessory`. After switching to [`ActivationPolicy::Regular`], activate the app yourself
+    /// with [`Self::activate`]; otherwise its menu bar may not appear until the app is
+    /// reactivated.
+    pub fn set_activation_policy(&mut self, policy: ActivationPolicy) {
+        self.platform.set_activation_policy(policy);
     }
 
     /// Returns the SVG renderer that draws the app's SVG assets.

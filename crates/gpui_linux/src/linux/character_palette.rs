@@ -1,4 +1,4 @@
-use gpui::BackgroundExecutor;
+use gpui::{BackgroundExecutor, GraphicalEnvironment};
 use smol::process::Command;
 
 type PaletteCommand<'a> = (&'a str, &'a [&'a str]);
@@ -32,14 +32,20 @@ fn palette_commands(desktop: &str) -> [PaletteCommand<'static>; 5] {
     }
 }
 
-async fn launch_palette(commands: &[PaletteCommand<'_>], activation_token: Option<&str>) -> bool {
+async fn launch_palette(
+    commands: &[PaletteCommand<'_>],
+    activation_token: Option<&str>,
+    environment: &GraphicalEnvironment,
+) -> bool {
     for (program, arguments) in commands {
-        let mut command = Command::new(program);
+        let mut command = std::process::Command::new(program);
         command.args(*arguments);
+        // The picker must open in the session this platform is connected to.
+        environment.apply_to(&mut command);
         if let Some(token) = activation_token {
             command.env("XDG_ACTIVATION_TOKEN", token);
         }
-        match command.status().await {
+        match Command::from(command).status().await {
             Ok(status) if status.success() => return true,
             Ok(status) => log::warn!("Character palette {program} exited with {status}"),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -52,11 +58,13 @@ async fn launch_palette(commands: &[PaletteCommand<'_>], activation_token: Optio
 pub(super) fn show_character_palette(
     executor: BackgroundExecutor,
     activation_token: Option<String>,
+    environment: GraphicalEnvironment,
 ) {
     let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
     executor
         .spawn(async move {
-            if !launch_palette(&palette_commands(&desktop), activation_token.as_deref()).await {
+            let commands = palette_commands(&desktop);
+            if !launch_palette(&commands, activation_token.as_deref(), &environment).await {
                 log::warn!(
                     "No character palette is available; install Plasma's Emoji Selector, IBus, \
                      GNOME Characters, or KCharSelect"
@@ -89,6 +97,7 @@ mod tests {
                 ("/bin/sh", &["-c", "exit 0"]),
             ],
             None,
+            &GraphicalEnvironment::detect(),
         )));
     }
 
@@ -100,6 +109,7 @@ mod tests {
                 ("/bin/sh", &["-c", "exit 1"]),
             ],
             None,
+            &GraphicalEnvironment::detect(),
         )));
     }
 
@@ -111,6 +121,26 @@ mod tests {
                 &["-c", "test \"$XDG_ACTIVATION_TOKEN\" = gpui-palette-test"]
             )],
             Some("gpui-palette-test"),
+            &GraphicalEnvironment::detect(),
+        )));
+    }
+
+    #[test]
+    fn runs_in_the_connected_session() {
+        let environment = GraphicalEnvironment {
+            x11_display: Some(":4242".into()),
+            ..GraphicalEnvironment::default()
+        };
+        assert!(smol::block_on(launch_palette(
+            &[(
+                "/bin/sh",
+                &[
+                    "-c",
+                    "test \"$DISPLAY\" = :4242 && test -z \"$WAYLAND_DISPLAY\""
+                ]
+            )],
+            None,
+            &environment,
         )));
     }
 }

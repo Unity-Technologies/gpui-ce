@@ -127,7 +127,9 @@ pub struct WaylandWindowState {
     outputs: HashMap<ObjectId, Output>,
     display: Option<(ObjectId, Output)>,
     globals: Globals,
-    renderer: WgpuRenderer,
+    /// Taken when the window is dropped. Its GPU objects use the Wayland connection, so they
+    /// mustn't outlive the window, which a display mode switch relies on.
+    renderer: Option<WgpuRenderer>,
     bounds: Bounds<Pixels>,
     scale: f32,
     input_handler: Option<PlatformInputHandler>,
@@ -752,7 +754,7 @@ impl WaylandWindowState {
             globals,
             outputs: HashMap::default(),
             display: None,
-            renderer,
+            renderer: Some(renderer),
             bounds: options.bounds,
             scale: 1.0,
             input_handler: None,
@@ -816,10 +818,12 @@ impl WaylandWindowState {
                 .set_min_size(f32::from(size.width) as i32, f32::from(size.height) as i32);
         }
 
-        let max_texture_size = self.renderer.max_texture_size() as i32;
-        xdg_state
-            .toplevel
-            .set_max_size(max_texture_size, max_texture_size);
+        if let Some(renderer) = &self.renderer {
+            let max_texture_size = renderer.max_texture_size() as i32;
+            xdg_state
+                .toplevel
+                .set_max_size(max_texture_size, max_texture_size);
+        }
 
         if let Some(parent) = self.parent.as_ref() {
             let parent_toplevel = parent.toplevel();
@@ -840,7 +844,9 @@ impl WaylandWindowState {
             .as_ref()
             .and_then(|(_, output)| output.subpixel)
             .is_some_and(|s| s == Subpixel::HorizontalBgr);
-        self.renderer.set_subpixel_layout(is_bgr);
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_subpixel_layout(is_bgr);
+        }
     }
 
     pub fn primary_output_scale(&mut self) -> i32 {
@@ -958,7 +964,7 @@ impl Drop for WaylandWindow {
 
         let client = state.client.clone();
 
-        state.renderer.destroy();
+        state.renderer.take();
 
         // Destroy blur first, this has no dependencies.
         if let Some(blur) = &state.kde_blur {
@@ -982,13 +988,13 @@ impl Drop for WaylandWindow {
         // The wl_surface itself should always be destroyed last.
         state.surface.destroy();
 
+        client.drop_window(&surface_id);
         let state_ptr = self.0.clone();
         state
             .globals
             .executor
             .spawn(async move {
                 state_ptr.close();
-                client.drop_window(&surface_id)
             })
             .detach();
         drop(state);
@@ -1706,7 +1712,9 @@ impl WaylandWindowStatePtr {
                 state.scale = scale;
             }
             let device_bounds = state.bounds.to_device_pixels(state.scale);
-            state.renderer.update_drawable_size(device_bounds.size);
+            if let Some(renderer) = &mut state.renderer {
+                renderer.update_drawable_size(device_bounds.size);
+            }
             (state.bounds.size, state.scale)
         };
 
@@ -1745,17 +1753,21 @@ impl WaylandWindowStatePtr {
 
     pub fn close(&self) {
         let state = self.state.borrow();
-        let client = state.client.get_client();
+        // Closing is deferred to a task, which can run after the client is dropped by a switch to
+        // headless mode. The client's window map, and so any child window, is gone with it.
+        let client = state.client.try_get_client();
         let children = state.children.keys().cloned().collect::<Vec<_>>();
         drop(state);
 
-        for child in children {
-            let mut client_state = client.borrow_mut();
-            let window = get_window(&mut client_state, &child);
-            drop(client_state);
+        if let Some(client) = client {
+            for child in children {
+                let mut client_state = client.borrow_mut();
+                let window = get_window(&mut client_state, &child);
+                drop(client_state);
 
-            if let Some(child) = window {
-                child.close();
+                if let Some(child) = window {
+                    child.close();
+                }
             }
         }
         let mut callbacks = self.callbacks.borrow_mut();
@@ -2223,7 +2235,9 @@ impl PlatformWindow for WaylandWindow {
             // The next map must wait for a new configure before presenting another buffer.
             state.pending_frame_callback.take();
             // The driver must drop its surface before the null attach (HUB-8810).
-            state.renderer.release_surface();
+            if let Some(renderer) = &mut state.renderer {
+                renderer.release_surface();
+            }
             let state = &mut *state;
             state.surface_state.unmap(&state.surface);
             state.presentation = PresentationState::Unpresented;
@@ -2323,16 +2337,20 @@ impl PlatformWindow for WaylandWindow {
 
     fn draw(&self, scene: &Scene) {
         let mut state = self.borrow_mut();
-
+        let state = &mut *state;
         if !state.visible {
             state.redraw_requested = true;
             self.0.frame_loop.set(FrameLoop::Unconfigured);
             return;
         }
 
-        if state.renderer.device_lost() {
-            let raw_window = state.raw_window();
-            match state.renderer.recover(&raw_window) {
+        let raw_window = state.raw_window();
+        let Some(renderer) = &mut state.renderer else {
+            return;
+        };
+
+        if renderer.device_lost() {
+            match renderer.recover(&raw_window) {
                 Ok(()) => {}
                 Err(err) => {
                     log::warn!("GPU recovery failed, will retry on next frame: {err}");
@@ -2344,8 +2362,7 @@ impl PlatformWindow for WaylandWindow {
         }
 
         // A hide released the surface; build a new one for this map.
-        let raw_window = state.raw_window();
-        if let Err(err) = state.renderer.restore_surface(&raw_window) {
+        if let Err(err) = renderer.restore_surface(&raw_window) {
             log::warn!("Restoring the window surface failed, will retry on next frame: {err}");
             state.redraw_requested = true;
             return;
@@ -2357,7 +2374,7 @@ impl PlatformWindow for WaylandWindow {
             let callback = state.surface.frame(&state.globals.qh, state.surface.id());
             state.pending_frame_callback = Some(callback);
         }
-        if state.renderer.draw(scene) {
+        if renderer.draw(scene) {
             state.presentation = PresentationState::Presented;
             self.0.frame_loop.set(FrameLoop::AwaitingCallback);
         } else {
@@ -2365,7 +2382,7 @@ impl PlatformWindow for WaylandWindow {
             self.0.frame_loop.set(FrameLoop::PresentationFailed);
         }
 
-        if state.renderer.needs_redraw() {
+        if renderer.needs_redraw() {
             state.redraw_requested = true;
         }
     }
@@ -2380,8 +2397,12 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
-        let state = self.borrow();
-        state.renderer.sprite_atlas().clone()
+        self.borrow()
+            .renderer
+            .as_ref()
+            .expect("the renderer is only taken when the window is dropped")
+            .sprite_atlas()
+            .clone()
     }
 
     fn show_window_menu(&self, position: Point<Pixels>) {
@@ -2540,17 +2561,18 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
-        self.borrow().renderer.gpu_specs().into()
+        self.borrow().renderer.as_ref().map(WgpuRenderer::gpu_specs)
     }
 
     fn gpu_context(&self) -> Option<Box<dyn std::any::Any>> {
-        let (device, queue) = self.borrow().renderer.gpu_context();
+        let (device, queue) = self.borrow().renderer.as_ref()?.gpu_context();
         Some(Box::new((device, queue)))
     }
 
     fn gpu_context_info(&self) -> Option<Box<dyn std::any::Any>> {
         self.borrow()
             .renderer
+            .as_ref()?
             .gpu_context_info()
             .map(|context| Box::new(context) as Box<dyn std::any::Any>)
     }
@@ -2558,7 +2580,7 @@ impl PlatformWindow for WaylandWindow {
     fn gpu_device_lost(&self) -> Option<bool> {
         // Only loads an atomic flag — safe even mid-recovery, when
         // `gpu_context` would panic on the torn-down resources.
-        Some(self.borrow().renderer.device_lost())
+        Some(self.borrow().renderer.as_ref()?.device_lost())
     }
 
     fn play_system_bell(&self) {
@@ -2759,7 +2781,9 @@ mod rounded_rect_tests {
 fn update_window(mut state: RefMut<WaylandWindowState>) {
     let opaque = !state.is_transparent();
 
-    state.renderer.update_transparency(!opaque);
+    if let Some(renderer) = &mut state.renderer {
+        renderer.update_transparency(!opaque);
+    }
 
     let area = inset_by_tiling(
         state.bounds.map_origin(|_| px(0.0)),

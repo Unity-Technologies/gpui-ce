@@ -16,11 +16,12 @@ use core_foundation::{
 use dispatch2::DispatchQueue;
 use futures::channel::oneshot;
 use gpui::{
-    Action, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem, ContrastPreference,
-    CursorStyle, ForegroundExecutor, KeyContext, Keymap, MacActivationPolicy, Menu, MenuItem,
-    OsMenu, OwnedMenu, PathPromptOptions, Platform, PlatformDisplay, PlatformKeyboardLayout,
-    PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, Result, SystemMenuType, Task,
-    ThermalState, WindowAppearance, WindowKind, WindowParams, popup::PopupNotSupportedError,
+    Action, ActivationPolicy, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem,
+    ContrastPreference, CursorStyle, ForegroundExecutor, GraphicalEnvironment, KeyContext, Keymap,
+    MacActivationPolicy, Menu, MenuItem, OsMenu, OwnedMenu, PathPromptOptions, Platform,
+    PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
+    PlatformWindow, Result, SystemMenuType, Task, ThermalState, WindowAppearance, WindowKind,
+    WindowParams, WindowingRequest, popup::PopupNotSupportedError,
 };
 use gpui_util::{ResultExt, new_std_command};
 use itertools::Itertools;
@@ -209,6 +210,8 @@ pub(crate) struct MacPlatformState {
     renderer_context: renderer::Context,
     headless: bool,
     activation_policy: Option<MacActivationPolicy>,
+    /// Whether `run` has created the shared `NSApplication`, so a policy change applies now.
+    application_created: bool,
     general_pasteboard: Option<Pasteboard>,
     find_pasteboard: Option<Pasteboard>,
     reopen: Option<Box<dyn FnMut()>>,
@@ -237,7 +240,44 @@ pub(crate) struct MacPlatformState {
     haptics: MacHaptics,
 }
 
+/// The activation policy that stands for a windowing mode: an app is headless while it has no
+/// Dock icon or menu bar.
+fn activation_policy_for(request: &WindowingRequest) -> MacActivationPolicy {
+    match request {
+        WindowingRequest::Headless => MacActivationPolicy::Accessory,
+        WindowingRequest::Windowed(_) => MacActivationPolicy::Regular,
+    }
+}
+
+fn mac_activation_policy(policy: ActivationPolicy) -> MacActivationPolicy {
+    match policy {
+        ActivationPolicy::Regular => MacActivationPolicy::Regular,
+        ActivationPolicy::Accessory => MacActivationPolicy::Accessory,
+    }
+}
+
+fn native_activation_policy(policy: MacActivationPolicy) -> NSApplicationActivationPolicy {
+    match policy {
+        MacActivationPolicy::Regular => NSApplicationActivationPolicy::Regular,
+        MacActivationPolicy::Accessory => NSApplicationActivationPolicy::Accessory,
+        MacActivationPolicy::Prohibited => NSApplicationActivationPolicy::Prohibited,
+    }
+}
+
 impl MacPlatform {
+    /// Records the activation policy, and applies it now if the application already exists.
+    /// Before that, `will_finish_launching` applies it.
+    fn apply_activation_policy(&self, policy: MacActivationPolicy) {
+        let mut state = self.0.lock();
+        state.activation_policy = Some(policy);
+        let should_apply = state.application_created && !state.headless;
+        drop(state);
+        if should_apply && let Some(marker) = crate::main_thread_marker() {
+            NSApplication::sharedApplication(marker)
+                .setActivationPolicy(native_activation_policy(policy));
+        }
+    }
+
     pub fn new(headless: bool) -> Self {
         let marker = crate::main_thread_marker().expect("Mac platform not created on main thread");
         let dispatcher = Arc::new(MacDispatcher::new());
@@ -249,6 +289,7 @@ impl MacPlatform {
 
         let state = Mutex::new(MacPlatformState {
             headless,
+            application_created: false,
             text_system,
             background_executor: BackgroundExecutor::new(dispatcher.clone()),
             foreground_executor: ForegroundExecutor::new(dispatcher),
@@ -538,7 +579,7 @@ impl Platform for MacPlatform {
     }
 
     fn set_mac_activation_policy(&self, policy: MacActivationPolicy) {
-        self.0.lock().activation_policy = Some(policy);
+        self.apply_activation_policy(policy);
     }
 
     fn run(&self, on_finish_launching: Box<dyn FnOnce()>) {
@@ -555,6 +596,7 @@ impl Platform for MacPlatform {
         unsafe {
             let app: Retained<GPUIApplication> =
                 msg_send![GPUIApplication::class(), sharedApplication];
+            self.0.lock().application_created = true;
             let app_delegate = GPUIApplicationDelegate::new();
             let app_delegate_protocol = ProtocolObject::from_ref(&*app_delegate);
             app.as_super().setDelegate(Some(&app_delegate_protocol));
@@ -571,6 +613,7 @@ impl Platform for MacPlatform {
             app.ivars().platform.set(null_mut());
             self.0.lock().app_delegate = None;
         }
+        self.0.lock().application_created = false;
     }
 
     fn quit(&self) {
@@ -647,6 +690,47 @@ impl Platform for MacPlatform {
                 app.activate();
             }
         }
+    }
+
+    fn set_activation_policy(&self, policy: ActivationPolicy) {
+        self.apply_activation_policy(mac_activation_policy(policy));
+    }
+
+    fn set_initial_windowing(&self, request: WindowingRequest) {
+        match request {
+            WindowingRequest::Headless => {
+                self.apply_activation_policy(MacActivationPolicy::Accessory)
+            }
+            // Leaves `Regular` to `did_finish_launching`: setting it before the run loop leaves
+            // the menu bar of an unbundled app launched from a terminal unclickable.
+            WindowingRequest::Windowed(_) => self.0.lock().activation_policy = None,
+        }
+    }
+
+    fn request_windowing(&self, request: WindowingRequest) -> Task<Result<()>> {
+        let state = self.0.lock();
+        if state.headless {
+            return Task::ready(Err(anyhow!(
+                "a platform created headless has no application to switch windowing modes"
+            )));
+        }
+        let policy = activation_policy_for(&request);
+        if state.activation_policy.unwrap_or_default() == policy {
+            return Task::ready(Err(match request {
+                WindowingRequest::Headless => anyhow!("already headless"),
+                WindowingRequest::Windowed(_) => anyhow!("already windowed"),
+            }));
+        }
+        drop(state);
+        self.apply_activation_policy(policy);
+        Task::ready(Ok(()))
+    }
+
+    fn graphical_environment(&self) -> Option<GraphicalEnvironment> {
+        let state = self.0.lock();
+        let policy = state.activation_policy.unwrap_or_default();
+        (!state.headless && policy == MacActivationPolicy::Regular)
+            .then(GraphicalEnvironment::detect)
     }
 
     fn hide(&self) {
@@ -1435,12 +1519,8 @@ fn will_finish_launching(this: &GPUIApplicationDelegate) {
         if let Some(policy) = state.activation_policy {
             let app: Retained<GPUIApplication> =
                 unsafe { msg_send![GPUIApplication::class(), sharedApplication] };
-            let ns_policy = match policy {
-                MacActivationPolicy::Regular => NSApplicationActivationPolicy::Regular,
-                MacActivationPolicy::Accessory => NSApplicationActivationPolicy::Accessory,
-                MacActivationPolicy::Prohibited => NSApplicationActivationPolicy::Prohibited,
-            };
-            app.as_super().setActivationPolicy(ns_policy);
+            app.as_super()
+                .setActivationPolicy(native_activation_policy(policy));
         }
     }
 }
