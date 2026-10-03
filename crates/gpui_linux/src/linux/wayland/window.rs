@@ -260,6 +260,19 @@ impl WaylandSurfaceState {
             .get_xdg_surface(&surface, &globals.qh, surface.id());
 
         let toplevel = xdg_surface.get_toplevel(&globals.qh, surface.id());
+
+        // Identify the toplevel in the same flush that creates it. Mutter creates its
+        // window object (and GNOME Shell matches it to a `.desktop` entry) as soon as it
+        // handles `get_toplevel`, and the renderer setup that follows flushes the
+        // connection and takes long enough that a toplevel with no app_id shows up as a
+        // separate, generic app in the dock until the app_id arrives.
+        if let Some(title) = params.titlebar.as_ref().and_then(|t| t.title.as_ref()) {
+            toplevel.set_title(title.to_string());
+        }
+        if let Some(app_id) = params.app_id.as_ref() {
+            toplevel.set_app_id(app_id.clone());
+        }
+
         let xdg_parent = parent.as_ref().and_then(|w| w.toplevel());
 
         if params.kind == WindowKind::Floating || params.kind == WindowKind::Dialog {
@@ -601,15 +614,9 @@ impl WaylandWindowState {
             .and_then(|titlebar| titlebar.title.as_ref())
             .map(ToString::to_string);
 
+        // The title and app_id were already sent alongside `get_toplevel`, in
+        // `WaylandSurfaceState::new`.
         if let WaylandSurfaceState::Xdg(ref xdg_state) = surface_state {
-            if let Some(title) = title.as_ref() {
-                xdg_state.toplevel.set_title(title.clone());
-            }
-
-            if let Some(app_id) = options.app_id.as_ref() {
-                xdg_state.toplevel.set_app_id(app_id.clone());
-            }
-
             // Set max window size based on the GPU's maximum texture dimension.
             // This prevents the window from being resized larger than what the GPU can render.
             let max_texture_size = renderer.max_texture_size() as i32;
