@@ -123,6 +123,7 @@ struct DirectXResources {
 }
 
 struct CachedSurfaceView {
+    #[cfg_attr(feature = "wgpu", allow(unfulfilled_lint_expectations))]
     #[expect(dead_code)]
     texture: ID3D11Texture2D,
     srv: Option<ID3D11ShaderResourceView>,
@@ -150,6 +151,7 @@ impl PathResources {
 }
 
 struct ColorTarget {
+    #[cfg_attr(feature = "wgpu", allow(unfulfilled_lint_expectations))]
     #[expect(dead_code)]
     texture: ID3D11Texture2D,
     target: Option<ID3D11RenderTargetView>,
