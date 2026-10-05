@@ -588,6 +588,142 @@ fn block_line_clamp_ignores_wrapped_trailing_whitespace() {
     assert_paragraph_fits(text, layout, f32::from(width), 2);
 }
 
+const TRAILING_SPACE_TEXT: &str = "Can’t find the version you’re looking for? Visit our ";
+const WITH_TRAILING_SPACE: &str = "with-trailing-space";
+const WITHOUT_TRAILING_SPACE: &str = "without-trailing-space";
+
+struct TrailingSpaceView;
+
+impl Render for TrailingSpaceView {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let paragraph = |text: &'static str, selector: &'static str| {
+            div()
+                .text_size(px(13.))
+                .line_height(px(20.))
+                .debug_selector(move || selector.into())
+                .child(text)
+        };
+
+        // Start-aligned column items take their max-content width.
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_start()
+            .child(paragraph(TRAILING_SPACE_TEXT, WITH_TRAILING_SPACE))
+            .child(paragraph(
+                TRAILING_SPACE_TEXT.trim_end(),
+                WITHOUT_TRAILING_SPACE,
+            ))
+    }
+}
+
+#[test]
+fn block_text_ending_in_whitespace_keeps_one_line_at_its_own_width() {
+    let mut cx = headless();
+    let window = cx
+        .open_window(size(px(900.), px(180.)), |_window, cx| {
+            cx.new(|_cx| TrailingSpaceView)
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    let window = window.into();
+    let mut debug_bounds = |selector| cx.debug_bounds(window, selector).unwrap().unwrap();
+    let with_space = debug_bounds(WITH_TRAILING_SPACE);
+    let without_space = debug_bounds(WITHOUT_TRAILING_SPACE);
+
+    assert_eq!(without_space.size.height, px(20.));
+    assert_eq!(with_space.size, without_space.size);
+}
+
+#[test]
+fn trailing_whitespace_hangs_on_the_last_row_at_any_width() {
+    let system = test_system();
+    let layout = |text: &str, wrap_width: Option<Pixels>, line_clamp: Option<usize>| {
+        system.layout_text(TextLayoutRequest {
+            text,
+            font_size: px(13.),
+            runs: &[text_run(text, IBM_PLEX.family)],
+            options: TextLayoutOptions {
+                wrap_width,
+                line_clamp,
+                text_align: TextAlign::Left,
+                ..Default::default()
+            },
+        })
+    };
+
+    // A forced break still starts its own row, even when only whitespace follows it.
+    assert_eq!(
+        layout("Visit our\u{2028} ", None, None).visual_lines.len(),
+        2
+    );
+
+    for text in [
+        "Visit our ",
+        "Visit our   ",
+        " ",
+        "Visit our \u{2028}",
+        "Visit our\u{2028} ",
+    ] {
+        let unwrapped = layout(text, None, None);
+        let own_width = unwrapped.platform_layout.size().width;
+
+        for line_clamp in [None, Some(4)] {
+            let wrapped = layout(text, Some(own_width), line_clamp);
+            let context = format!("{text:?} at {own_width:?}, clamp {line_clamp:?}");
+
+            assert_eq!(
+                wrapped.visual_lines.len(),
+                unwrapped.visual_lines.len(),
+                "{context}"
+            );
+            assert_eq!(
+                wrapped.platform_layout.size(),
+                unwrapped.platform_layout.size(),
+                "{context}"
+            );
+            assert_document_contract(text, &wrapped);
+        }
+    }
+}
+
+#[test]
+fn oversized_inline_box_ending_a_paragraph_leaves_no_blank_row() {
+    let system = test_system();
+    let text = "ab";
+    let layout = system.layout_inline(InlineLayoutRequest {
+        text,
+        runs: &[text_run(text, IBM_PLEX.family)],
+        boxes: &[InlineBoxRequest {
+            id: 1,
+            index: text.len(),
+            size: size(px(80.), px(12.)),
+            vertical_align: VerticalAlign::Baseline,
+        }],
+        text_styles: &[],
+        font_size: px(13.),
+        line_height: px(20.),
+        text_metrics: InlineTextMetrics {
+            ascent: px(10.),
+            descent: px(3.),
+            x_height: px(6.),
+        },
+        options: TextLayoutOptions {
+            wrap_width: Some(px(40.)),
+            text_align: TextAlign::Left,
+            ..Default::default()
+        },
+        bidi_scopes: &[],
+    });
+
+    assert_eq!(layout.lines.len(), 2);
+    assert_eq!(layout.boxes[0].line_index, 1);
+    let last_row = layout.lines[1];
+    assert_eq!(layout.size.height, last_row.origin.y + last_row.size.height);
+}
+
 #[test]
 fn block_paragraph_remeasures_nowrap_overflow_and_restores_original_text() {
     let mut cx = headless();
