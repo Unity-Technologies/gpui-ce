@@ -2043,7 +2043,10 @@ mod tests {
 
                     assert_eq!(document.text, text);
                     assert_eq!(state.len, text.len());
-                    assert_eq!(state.size, bounds.size);
+                    // The text wraps, so its widest row can be narrower than the root,
+                    // which fills the definite width it is given.
+                    assert_eq!(state.size.height, bounds.size.height);
+                    assert!(state.size.width <= bounds.size.width);
                     assert_eq!(state.size, document.size(state.line_height));
                     assert_eq!(state.options.wrap_width, Some(px(width)));
                     assert_eq!(state.truncate_width, None);
