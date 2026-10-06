@@ -15,6 +15,9 @@ path = "src/gpui_linux.rs"
 [features]
 default = ["wayland", "x11"]
 test-support = ["gpui/test-support"]
+# Reads a window’s frame back through the WGPU renderer’s offscreen readback
+# (`Window::render_to_image`) without the rest of `test-support`.
+render-to-image = ["gpui/render-to-image", "gpui_wgpu?/render-to-image"]
 wayland = [
   "bitflags",
   "gpui_wgpu",
