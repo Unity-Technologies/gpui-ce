@@ -2148,6 +2148,11 @@ impl PlatformWindow for WaylandWindow {
         self.0.schedule_frame();
     }
 
+    #[cfg(feature = "render-to-image")]
+    fn render_to_image(&self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
+        self.borrow_mut().renderer.render_to_image(scene)
+    }
+
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
         let state = self.borrow();
         state.renderer.sprite_atlas().clone()

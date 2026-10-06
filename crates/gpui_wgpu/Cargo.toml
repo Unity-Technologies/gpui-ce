@@ -15,6 +15,9 @@ path = "src/gpui_wgpu.rs"
 [features]
 default = []
 test-support = ["gpui/test-support", "dep:image"]
+# Compiles `WgpuRenderer::render_to_image`, the offscreen readback, without the
+# rest of `test-support`, so a window can read its own frame back.
+render-to-image = ["dep:image"]
 custom-gpu = ["gpui/custom-gpu"]
 wgpu-surfaces = ["gpui/wgpu-surfaces"]
 
