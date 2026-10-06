@@ -29,6 +29,7 @@ test-support = [
 render-to-image = [
   "gpui/render-to-image",
   "gpui_apple/render-to-image",
+  "gpui_linux/render-to-image",
   "gpui_macos/render-to-image",
   "gpui_windows/render-to-image",
 ]
