@@ -1998,13 +1998,15 @@ impl ParleyTextSystem {
             layout.break_all_lines(None);
         }
 
+        // The width the paragraph was given, if any.
+        let available_width = alignment_width
+            .or_else(|| wrap.map(|(width, _max_lines)| width))
+            .filter(|width| *width < Pixels::MAX);
+
         // Parley uses an unbounded line width for empty layouts. Align their empty
         // row here so centered and right-aligned carets stay inside the container.
         let empty_alignment = (text.is_empty() && inline_boxes.is_empty()).then(|| {
-            let width = alignment_width
-                .or_else(|| wrap.map(|(width, _max_lines)| width))
-                .filter(|width| *width < Pixels::MAX)
-                .unwrap_or_default();
+            let width = available_width.unwrap_or_default();
 
             match text_align {
                 TextAlign::Start if layout.is_rtl() => width,
@@ -2208,7 +2210,10 @@ impl ParleyTextSystem {
             anyhow::bail!("Parley produced no line");
         }
 
-        let mut size = size(px(layout.width()), px(layout.height()));
+        let mut size = size(
+            px(width_with_closing_whitespace(&layout, available_width)),
+            px(layout.height()),
+        );
 
         if empty_alignment.is_some() {
             size.width = Pixels::ZERO;
@@ -2301,6 +2306,28 @@ fn hang_trailing_whitespace(layout: &mut Layout<ParleyBrush>, text: &str, wrap_w
     }
 
     breaker.finish();
+}
+
+/// The paragraph’s width, counting the whitespace that ends it when it fits, as a text
+/// element’s width does. `Layout::width` leaves it out, so a block ending in a space lost it.
+fn width_with_closing_whitespace(
+    layout: &Layout<ParleyBrush>,
+    available_width: Option<Pixels>,
+) -> f32 {
+    let width = layout.width();
+    let Some(last_row) = layout.lines().last() else {
+        return width;
+    };
+    let metrics = last_row.metrics();
+    let closing_end = metrics.inline_min_coord + metrics.advance;
+    // Slack so a block laid out at its own measured width keeps the space.
+    let fits = available_width.is_none_or(|available| closing_end <= f32::from(available) + 0.01);
+
+    if metrics.trailing_whitespace > 0. && last_row.break_reason() == BreakReason::None && fits {
+        width.max(closing_end)
+    } else {
+        width
+    }
 }
 
 fn is_bidi_control(character: char) -> bool {
