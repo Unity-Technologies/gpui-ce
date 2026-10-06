@@ -589,19 +589,17 @@ fn block_line_clamp_ignores_wrapped_trailing_whitespace() {
 }
 
 const TRAILING_SPACE_TEXT: &str = "Can’t find the version you’re looking for? Visit our ";
-const WITH_TRAILING_SPACE: &str = "with-trailing-space";
-const WITHOUT_TRAILING_SPACE: &str = "without-trailing-space";
+const SENTENCE_ROW: &str = "sentence-row";
+const SENTENCE: &str = "sentence";
+const LINK: &str = "link";
+const TRIMMED_SENTENCE: &str = "trimmed-sentence";
 
 struct TrailingSpaceView;
 
 impl Render for TrailingSpaceView {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let paragraph = |text: &'static str, selector: &'static str| {
-            div()
-                .text_size(px(13.))
-                .line_height(px(20.))
-                .debug_selector(move || selector.into())
-                .child(text)
+        let block = |text: &'static str, selector: &'static str| {
+            div().debug_selector(move || selector.into()).child(text)
         };
 
         // Start-aligned column items take their max-content width.
@@ -610,16 +608,24 @@ impl Render for TrailingSpaceView {
             .flex()
             .flex_col()
             .items_start()
-            .child(paragraph(TRAILING_SPACE_TEXT, WITH_TRAILING_SPACE))
-            .child(paragraph(
-                TRAILING_SPACE_TEXT.trim_end(),
-                WITHOUT_TRAILING_SPACE,
-            ))
+            .text_size(px(13.))
+            .line_height(px(20.))
+            // A sentence built from fragments, like Unity Hub's Archive footer.
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_baseline()
+                    .debug_selector(|| SENTENCE_ROW.into())
+                    .child(block(TRAILING_SPACE_TEXT, SENTENCE))
+                    .child(block("download archive", LINK)),
+            )
+            .child(block(TRAILING_SPACE_TEXT.trim_end(), TRIMMED_SENTENCE))
     }
 }
 
 #[test]
-fn block_text_ending_in_whitespace_keeps_one_line_at_its_own_width() {
+fn block_text_ending_in_whitespace_keeps_its_line_and_its_space() {
     let mut cx = headless();
     let window = cx
         .open_window(size(px(900.), px(180.)), |_window, cx| {
@@ -630,11 +636,59 @@ fn block_text_ending_in_whitespace_keeps_one_line_at_its_own_width() {
 
     let window = window.into();
     let mut debug_bounds = |selector| cx.debug_bounds(window, selector).unwrap().unwrap();
-    let with_space = debug_bounds(WITH_TRAILING_SPACE);
-    let without_space = debug_bounds(WITHOUT_TRAILING_SPACE);
+    let row = debug_bounds(SENTENCE_ROW);
+    let sentence = debug_bounds(SENTENCE);
+    let link = debug_bounds(LINK);
+    let trimmed = debug_bounds(TRIMMED_SENTENCE);
 
-    assert_eq!(without_space.size.height, px(20.));
-    assert_eq!(with_space.size, without_space.size);
+    assert_eq!(sentence.size.height, px(20.));
+    assert_eq!(row.size.height, px(20.));
+    assert_eq!(link.origin.y, sentence.origin.y);
+    assert!(
+        link.origin.x - sentence.origin.x > trimmed.size.width,
+        "the link must not touch the sentence: {sentence:?}, {link:?}, {trimmed:?}"
+    );
+}
+
+#[test]
+fn closing_whitespace_counts_in_a_block_width_only_when_it_fits() {
+    let system = test_system();
+    let text = "Visit our ";
+    let layout = |wrap_width: Option<Pixels>| {
+        system.layout_inline(InlineLayoutRequest {
+            text,
+            runs: &[text_run(text, IBM_PLEX.family)],
+            boxes: &[],
+            text_styles: &[],
+            font_size: px(13.),
+            line_height: px(20.),
+            text_metrics: InlineTextMetrics {
+                ascent: px(10.),
+                descent: px(3.),
+                x_height: px(6.),
+            },
+            options: TextLayoutOptions {
+                wrap_width,
+                text_align: TextAlign::Left,
+                ..Default::default()
+            },
+            bidi_scopes: &[],
+        })
+    };
+
+    let natural = layout(None);
+    let trimmed_width = natural.layout.platform_layout.size().width;
+    assert!(natural.size.width > trimmed_width);
+
+    // At its own width the space fits: one row, same size.
+    let at_own_width = layout(Some(natural.size.width));
+    assert_eq!(at_own_width.lines.len(), 1);
+    assert_eq!(at_own_width.size, natural.size);
+
+    // Narrower, the space hangs and no longer counts.
+    let narrower = layout(Some(trimmed_width));
+    assert_eq!(narrower.lines.len(), 1);
+    assert_eq!(narrower.size.width, trimmed_width);
 }
 
 #[test]
