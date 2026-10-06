@@ -1,10 +1,14 @@
+#[cfg(feature = "test-support")]
 use std::sync::Arc;
 
 use gpui::{DevicePixels, Scene, Size};
 
+#[cfg(feature = "test-support")]
 use crate::{WgpuAtlas, WgpuContext};
 
-use super::{WgpuRenderer, WgpuSurfaceConfig};
+use super::WgpuRenderer;
+#[cfg(feature = "test-support")]
+use super::WgpuSurfaceConfig;
 
 struct OffscreenTarget {
     texture: wgpu::Texture,
@@ -15,6 +19,7 @@ struct OffscreenTarget {
 }
 
 impl WgpuRenderer {
+    #[cfg(feature = "test-support")]
     pub(super) fn new_headless(
         context: &WgpuContext,
         size: Size<DevicePixels>,
@@ -127,6 +132,11 @@ impl WgpuRenderer {
 
     /// Renders through the normal scene path and reads back without presenting.
     pub fn render_to_image(&mut self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
+        // A window’s renderer drops its GPU resources while it recovers a lost device.
+        anyhow::ensure!(
+            self.resources.is_some() && !self.device_lost(),
+            "render_to_image unavailable while recovering from a lost device"
+        );
         let target = self.create_offscreen_target();
         let submission = self
             .render_to_view_with_readback(scene, &target.view, target.readback_copy())
@@ -148,11 +158,13 @@ impl OffscreenTarget {
 }
 
 /// Surface-free renderer used by GPUI visual tests and benchmarks.
+#[cfg(feature = "test-support")]
 pub struct WgpuHeadlessRenderer {
     renderer: WgpuRenderer,
     target: Option<OffscreenTarget>,
 }
 
+#[cfg(feature = "test-support")]
 impl WgpuHeadlessRenderer {
     pub fn new() -> anyhow::Result<Self> {
         let context = WgpuContext::new_headless(None)?;
@@ -209,6 +221,7 @@ impl WgpuHeadlessRenderer {
     }
 }
 
+#[cfg(feature = "test-support")]
 impl gpui::PlatformHeadlessRenderer for WgpuHeadlessRenderer {
     fn render_scene_to_image(
         &mut self,
