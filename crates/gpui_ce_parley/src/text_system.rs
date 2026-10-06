@@ -17,8 +17,8 @@ use gpui::{
 use parking_lot::{Mutex, RwLock};
 use parley::setting::Tag;
 use parley::{
-    Affinity, Alignment, AlignmentOptions, CHROMIUM_LINE_BREAK_OVERRIDE, Cluster, Cursor,
-    FontContext, FontFamily, FontFamilyName, FontFeature, FontFeatures, FontStyle,
+    Affinity, Alignment, AlignmentOptions, BreakReason, CHROMIUM_LINE_BREAK_OVERRIDE, Cluster,
+    Cursor, FontContext, FontFamily, FontFamilyName, FontFeature, FontFeatures, FontStyle,
     FontVariation as ParleyFontVariation, FontWeight, GenericFamily, InlineBox, InlineBoxKind,
     Layout, LayoutContext, Line, LineHeight, PositionedLayoutItem, Selection, StyleProperty,
 };
@@ -1982,6 +1982,8 @@ impl ParleyTextSystem {
             } else {
                 layout.break_all_lines(Some(f32::from(wrap_width)));
             }
+
+            hang_trailing_whitespace(&mut layout, text, f32::from(wrap_width));
         } else if let Some(alignment_width) = alignment_width {
             let mut breaker = layout.break_lines();
             breaker.state_mut().set_layout_max_advance(f32::INFINITY);
@@ -1996,13 +1998,15 @@ impl ParleyTextSystem {
             layout.break_all_lines(None);
         }
 
+        // The width the paragraph was given, if any.
+        let available_width = alignment_width
+            .or_else(|| wrap.map(|(width, _max_lines)| width))
+            .filter(|width| *width < Pixels::MAX);
+
         // Parley uses an unbounded line width for empty layouts. Align their empty
         // row here so centered and right-aligned carets stay inside the container.
         let empty_alignment = (text.is_empty() && inline_boxes.is_empty()).then(|| {
-            let width = alignment_width
-                .or_else(|| wrap.map(|(width, _max_lines)| width))
-                .filter(|width| *width < Pixels::MAX)
-                .unwrap_or_default();
+            let width = available_width.unwrap_or_default();
 
             match text_align {
                 TextAlign::Start if layout.is_rtl() => width,
@@ -2206,7 +2210,10 @@ impl ParleyTextSystem {
             anyhow::bail!("Parley produced no line");
         }
 
-        let mut size = size(px(layout.width()), px(layout.height()));
+        let mut size = size(
+            px(width_with_closing_whitespace(&layout, available_width)),
+            px(layout.height()),
+        );
 
         if empty_alignment.is_some() {
             size.width = Pixels::ZERO;
@@ -2254,6 +2261,80 @@ impl ParleyTextSystem {
 
         Ok(result)
     }
+}
+
+/// Hangs the whitespace that ends a paragraph on its last row, as CSS does. Parley wraps
+/// overflowing trailing whitespace (or the end after an oversized inline box) onto blank rows.
+fn hang_trailing_whitespace(layout: &mut Layout<ParleyBrush>, text: &str, wrap_width: f32) {
+    let is_blank = |line: &Line<'_, ParleyBrush>| {
+        line.items()
+            .all(|item| !matches!(item, PositionedLayoutItem::InlineBox(_)))
+            && text.get(line.text_range()).is_some_and(|row| {
+                row.chars()
+                    .all(|character| character.is_whitespace() || is_bidi_control(character))
+            })
+    };
+    let last_row = layout
+        .lines()
+        .rposition(|line| !is_blank(&line))
+        .unwrap_or_default();
+    let soft_wrapped = layout.get(last_row).is_some_and(|line| {
+        matches!(
+            line.break_reason(),
+            BreakReason::Regular | BreakReason::Emergency
+        )
+    });
+
+    if !soft_wrapped {
+        return;
+    }
+
+    // Break the earlier rows again as before, then let the last one take the rest.
+    let mut breaker = layout.break_lines();
+    breaker.state_mut().set_layout_max_advance(f32::MAX);
+    breaker.state_mut().set_line_max_advance(wrap_width);
+
+    for _ in 0..last_row {
+        breaker.break_next();
+    }
+
+    breaker.state_mut().set_line_max_advance(f32::MAX);
+
+    while breaker.break_next().is_some() {
+        // Still align the row within the wrap width.
+        breaker.set_prior_line_width(wrap_width);
+    }
+
+    breaker.finish();
+}
+
+/// The paragraph’s width, counting the whitespace that ends it when it fits, as a text
+/// element’s width does. `Layout::width` leaves it out, so a block ending in a space lost it.
+fn width_with_closing_whitespace(
+    layout: &Layout<ParleyBrush>,
+    available_width: Option<Pixels>,
+) -> f32 {
+    let width = layout.width();
+    let Some(last_row) = layout.lines().last() else {
+        return width;
+    };
+    let metrics = last_row.metrics();
+    let closing_end = metrics.inline_min_coord + metrics.advance;
+    // Slack so a block laid out at its own measured width keeps the space.
+    let fits = available_width.is_none_or(|available| closing_end <= f32::from(available) + 0.01);
+
+    if metrics.trailing_whitespace > 0. && last_row.break_reason() == BreakReason::None && fits {
+        width.max(closing_end)
+    } else {
+        width
+    }
+}
+
+fn is_bidi_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+    )
 }
 
 fn run_ranges(runs: &[TextRun]) -> Vec<Range<usize>> {
