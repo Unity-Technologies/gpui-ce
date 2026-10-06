@@ -135,7 +135,16 @@ impl WgpuRenderer {
         // A window’s renderer drops its GPU resources while it recovers a lost device.
         anyhow::ensure!(
             self.resources.is_some() && !self.device_lost(),
-            "render_to_image unavailable while recovering from a lost device"
+            "render_to_image unavailable without a live GPU device"
+        );
+        // The readback copies 8-bit RGBA or BGRA rows; a window surface may use another format.
+        let format = self.target.format();
+        anyhow::ensure!(
+            matches!(
+                format,
+                wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm
+            ),
+            "render_to_image cannot read back a {format:?} target"
         );
         let target = self.create_offscreen_target();
         let submission = self
