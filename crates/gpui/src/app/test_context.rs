@@ -1,12 +1,13 @@
 use crate::{
-    Action, AnyView, AnyWindowHandle, App, AppCell, AppContext, AssetRegistry, AsyncApp,
-    AvailableSpace, BackgroundExecutor, BorrowAppContext, Bounds, Capslock, ClipboardItem,
-    DrawPhase, Drawable, Element, Empty, EntityId, EventEmitter, ForegroundExecutor, Global,
-    InputEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Pixels, Platform, Point, Render, Result, SharedString, Size,
-    SystemNotification, SystemNotificationResponse, Task, TestDispatcher, TestPlatform,
-    TestScreenCaptureSource, TestWindow, TextSystem, VisualContext, Window, WindowBounds,
-    WindowHandle, WindowOptions, app::GpuiMode, window::ElementArenaScope,
+    Action, AnyView, AnyWindowHandle, App, AppCell, AppContext, AssetRegistry, AssetSource,
+    AsyncApp, AvailableSpace, BackgroundExecutor, BorrowAppContext, Bounds, Capslock,
+    ClipboardItem, DEFAULT_TEST_SCALE_FACTOR, DrawPhase, Drawable, Element, Empty, EntityId,
+    EventEmitter, ForegroundExecutor, Global, InputEvent, Keystroke, Modifiers,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    Platform, PlatformHeadlessRenderer, PlatformTextSystem, Point, Render, Result, SharedString,
+    Size, SystemNotification, SystemNotificationResponse, Task, TestDispatcher, TestPlatform,
+    TestScreenCaptureSource, TestTextSystem, TestWindow, TextSystem, VisualContext, Window,
+    WindowBounds, WindowHandle, WindowOptions, app::GpuiMode, window::ElementArenaScope,
 };
 use anyhow::{anyhow, bail};
 use futures::{Stream, StreamExt, channel::oneshot};
@@ -155,19 +156,86 @@ impl AppContext for TestAppContext {
 
 impl TestAppContext {
     /// Creates a new `TestAppContext`. Usually you can rely on `#[gpui::test]` to do this for you.
+    ///
+    /// Its platform shapes text with a stub text system that paints no glyphs, has no
+    /// renderer, loads no assets, and gives its windows a scale factor of 2.
     pub fn build(dispatcher: TestDispatcher, fn_name: Option<&'static str>) -> Self {
+        Self::build_with(
+            dispatcher,
+            fn_name,
+            Arc::new(TestTextSystem),
+            AssetRegistry::default(),
+            None,
+            DEFAULT_TEST_SCALE_FACTOR,
+        )
+    }
+
+    /// Creates a `TestAppContext` whose windows can be rendered to pixels.
+    ///
+    /// Takes the text system that shapes and rasterizes text, the asset source behind
+    /// `svg()` and `img()`, a factory for each window's headless renderer (returning
+    /// `None` leaves that window without one, as [`Self::build`] does), and the scale
+    /// factor its windows report. With a renderer, `Window::render_to_image` returns
+    /// an image of the window's size times that scale factor.
+    ///
+    /// Unlike a context from `#[gpui::test]`, nothing quits this one for you: call
+    /// [`Self::quit`] when the test ends. [`Self::new_app`] still builds the default
+    /// platform.
+    ///
+    /// ```ignore
+    /// let mut cx = TestAppContext::with_platform(
+    ///     TestDispatcher::new(0),
+    ///     None,
+    ///     Arc::new(gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Skip)),
+    ///     Arc::new(Assets),
+    ///     gpui_platform::current_headless_renderer,
+    ///     1.0,
+    /// );
+    /// ```
+    pub fn with_platform(
+        dispatcher: TestDispatcher,
+        fn_name: Option<&'static str>,
+        platform_text_system: Arc<dyn PlatformTextSystem>,
+        asset_source: Arc<dyn AssetSource>,
+        renderer_factory: impl Fn() -> Option<Box<dyn PlatformHeadlessRenderer>> + 'static,
+        scale_factor: f32,
+    ) -> Self {
+        assert!(
+            scale_factor.is_finite() && scale_factor > 0.0,
+            "a test window's scale factor must be positive, got {scale_factor}"
+        );
+        Self::build_with(
+            dispatcher,
+            fn_name,
+            platform_text_system,
+            AssetRegistry::from(asset_source),
+            Some(Box::new(renderer_factory)),
+            scale_factor,
+        )
+    }
+
+    fn build_with(
+        dispatcher: TestDispatcher,
+        fn_name: Option<&'static str>,
+        platform_text_system: Arc<dyn PlatformTextSystem>,
+        asset_registry: AssetRegistry,
+        renderer_factory: Option<Box<dyn Fn() -> Option<Box<dyn PlatformHeadlessRenderer>>>>,
+        scale_factor: f32,
+    ) -> Self {
         let arc_dispatcher = Arc::new(dispatcher.clone());
         let background_executor = BackgroundExecutor::new(arc_dispatcher.clone());
         let foreground_executor = ForegroundExecutor::new(arc_dispatcher);
-        let platform = TestPlatform::new(background_executor.clone(), foreground_executor.clone());
+        let platform = TestPlatform::with_scale_factor(
+            background_executor.clone(),
+            foreground_executor.clone(),
+            platform_text_system,
+            renderer_factory,
+            scale_factor,
+        );
         let http_client = crate::http_client::FakeHttpClient::with_404_response();
         let text_system = Arc::new(TextSystem::new(platform.text_system()));
 
-        let app = App::new_app(
-            platform.clone(),
-            AssetRegistry::default().into(),
-            http_client,
-        );
+        let app = App::new_app(platform.clone(), asset_registry.into(), http_client);
         app.borrow_mut().mode = GpuiMode::test();
 
         Self {
@@ -1189,12 +1257,161 @@ impl AnyWindowHandle {
 #[cfg(test)]
 mod tests {
     use crate::{
-        PathPromptOptions, SystemNotification, SystemNotificationAction,
-        SystemNotificationResponse, TestAppContext,
+        AssetSource, Context, DevicePixels, IntoElement, ParentElement as _, PathPromptOptions,
+        PlatformAtlas, PlatformHeadlessRenderer, Render, Scene, SharedString, Size, Styled as _,
+        SystemNotification, SystemNotificationAction, SystemNotificationResponse, TestAppContext,
+        TestAtlas, TestDispatcher, TestTextSystem, VisualTestContext, Window, div, px, size,
     };
+    use image::RgbaImage;
+    use std::borrow::Cow;
     use std::cell::RefCell;
     use std::path::PathBuf;
     use std::rc::Rc;
+    use std::sync::Arc;
+
+    struct Label;
+
+    impl Render for Label {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child("Headless")
+        }
+    }
+
+    /// Records the device size of every frame and reads back a blank image of that size.
+    struct RecordingRenderer {
+        frame_sizes: Rc<RefCell<Vec<Size<DevicePixels>>>>,
+        sprite_atlas: Arc<TestAtlas>,
+    }
+
+    impl PlatformHeadlessRenderer for RecordingRenderer {
+        fn render_scene_to_image(
+            &mut self,
+            _scene: &Scene,
+            size: Size<DevicePixels>,
+        ) -> anyhow::Result<RgbaImage> {
+            self.frame_sizes.borrow_mut().push(size);
+            Ok(RgbaImage::new(size.width.0 as u32, size.height.0 as u32))
+        }
+
+        fn render_scene(&mut self, _scene: &Scene, size: Size<DevicePixels>) -> anyhow::Result<()> {
+            self.frame_sizes.borrow_mut().push(size);
+            Ok(())
+        }
+
+        fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
+            self.sprite_atlas.clone()
+        }
+    }
+
+    struct ProbeAssets;
+
+    impl AssetSource for ProbeAssets {
+        fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+            Ok((path == "icons/probe.svg").then_some(Cow::Borrowed(b"<svg/>".as_slice())))
+        }
+
+        fn list(&self, _path: &str) -> anyhow::Result<Vec<SharedString>> {
+            Ok(vec!["icons/probe.svg".into()])
+        }
+    }
+
+    fn device_size(width: i32, height: i32) -> Size<DevicePixels> {
+        Size {
+            width: DevicePixels(width),
+            height: DevicePixels(height),
+        }
+    }
+
+    #[gpui::test]
+    fn test_build_keeps_the_stub_platform(cx: &mut TestAppContext) {
+        let window = cx.open_window(size(px(200.), px(100.)), |_, _| Label);
+        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+
+        cx.update(|window, cx| {
+            assert_eq!(window.scale_factor(), 2.0);
+            let (_, monochrome, subpixel, polychrome) = window.rendered_primitive_counts();
+            assert_eq!(monochrome + subpixel + polychrome, 0);
+            let error = window.render_to_image().unwrap_err();
+            assert!(
+                error.to_string().contains("no HeadlessRenderer configured"),
+                "{error}"
+            );
+            assert!(cx.assets().load("icons/probe.svg").is_none());
+        });
+    }
+
+    #[test]
+    fn test_with_platform_uses_its_assets_renderer_and_scale_factor() {
+        let frame_sizes = Rc::new(RefCell::new(Vec::new()));
+        let mut cx = TestAppContext::with_platform(
+            TestDispatcher::new(0),
+            None,
+            Arc::new(TestTextSystem),
+            Arc::new(ProbeAssets),
+            {
+                let frame_sizes = frame_sizes.clone();
+                move || {
+                    Some(Box::new(RecordingRenderer {
+                        frame_sizes: frame_sizes.clone(),
+                        sprite_atlas: Arc::new(TestAtlas::new()),
+                    }) as Box<dyn PlatformHeadlessRenderer>)
+                }
+            },
+            1.5,
+        );
+
+        let probe = cx.update(|cx| {
+            cx.assets()
+                .load("icons/probe.svg")
+                .map(|data| data.into_owned())
+        });
+        assert_eq!(probe.as_deref(), Some(b"<svg/>".as_slice()));
+
+        let window = cx.open_window(size(px(200.), px(100.)), |_, _| Label);
+        let mut visual_cx = VisualTestContext::from_window(window.into(), &cx);
+        visual_cx.run_until_parked();
+
+        let image = visual_cx.update(|window, _| {
+            assert_eq!(window.scale_factor(), 1.5);
+            assert_eq!(window.viewport_size(), size(px(200.), px(100.)));
+            window.render_to_image()
+        });
+        assert_eq!(image.unwrap().dimensions(), (300, 150));
+        assert!(!frame_sizes.borrow().is_empty());
+        assert!(
+            frame_sizes
+                .borrow()
+                .iter()
+                .all(|frame_size| *frame_size == device_size(300, 150)),
+            "{:?}",
+            frame_sizes.borrow()
+        );
+
+        visual_cx.simulate_resize(size(px(100.), px(50.)));
+        visual_cx.run_until_parked();
+        let image = visual_cx.update(|window, _| {
+            assert_eq!(window.scale_factor(), 1.5);
+            window.render_to_image()
+        });
+        assert_eq!(image.unwrap().dimensions(), (150, 75));
+
+        drop(visual_cx);
+        cx.quit();
+    }
+
+    #[test]
+    #[should_panic(expected = "scale factor must be positive")]
+    fn test_with_platform_rejects_a_zero_scale_factor() {
+        TestAppContext::with_platform(
+            TestDispatcher::new(0),
+            None,
+            Arc::new(TestTextSystem),
+            Arc::new(()),
+            || None,
+            0.0,
+        );
+    }
 
     #[gpui::test]
     async fn test_system_notifications_require_identity_and_replace_matching_tags(

@@ -42,8 +42,12 @@ pub(crate) struct TestPlatform {
     pub expect_restart:
         RefCell<Option<oneshot::Sender<(Option<PathBuf>, Vec<std::ffi::OsString>)>>>,
     headless_renderer_factory: Option<Box<dyn Fn() -> Option<Box<dyn PlatformHeadlessRenderer>>>>,
+    scale_factor: f32,
     weak: Weak<Self>,
 }
+
+/// The scale factor a test window reports unless its platform was given another.
+pub(crate) const DEFAULT_TEST_SCALE_FACTOR: f32 = 2.0;
 
 #[derive(Clone)]
 /// A fake screen capture source, used for testing.
@@ -137,6 +141,25 @@ impl TestPlatform {
             Box<dyn Fn() -> Option<Box<dyn PlatformHeadlessRenderer>>>,
         >,
     ) -> Rc<Self> {
+        Self::with_scale_factor(
+            executor,
+            foreground_executor,
+            text_system,
+            headless_renderer_factory,
+            DEFAULT_TEST_SCALE_FACTOR,
+        )
+    }
+
+    /// Like [`Self::with_platform`], with the scale factor its windows report.
+    pub(crate) fn with_scale_factor(
+        executor: BackgroundExecutor,
+        foreground_executor: ForegroundExecutor,
+        text_system: Arc<dyn PlatformTextSystem>,
+        headless_renderer_factory: Option<
+            Box<dyn Fn() -> Option<Box<dyn PlatformHeadlessRenderer>>>,
+        >,
+        scale_factor: f32,
+    ) -> Rc<Self> {
         Rc::new_cyclic(|weak| TestPlatform {
             background_executor: executor,
             foreground_executor,
@@ -157,6 +180,7 @@ impl TestPlatform {
             system_notifications: Default::default(),
             text_system,
             headless_renderer_factory,
+            scale_factor,
         })
     }
 
@@ -446,6 +470,7 @@ impl Platform for TestPlatform {
             self.weak.clone(),
             self.active_display.clone(),
             renderer,
+            self.scale_factor,
         );
         Ok(Box::new(window))
     }
