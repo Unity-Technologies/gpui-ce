@@ -81,6 +81,10 @@ pub fn current_platform(headless: bool) -> Rc<dyn Platform> {
 }
 
 /// Returns a new [`HeadlessRenderer`] for the current platform, if available.
+///
+/// macOS renders with Metal. Linux, FreeBSD and Windows render with WGPU under the
+/// `test-support` feature, and panic when no GPU adapter is found; a software one,
+/// such as Mesa's lavapipe or WARP, is enough.
 #[cfg(any(feature = "bench-support", feature = "test-support"))]
 pub fn current_headless_renderer() -> Option<Box<dyn gpui::PlatformHeadlessRenderer>> {
     #[cfg(target_os = "macos")]
@@ -91,7 +95,23 @@ pub fn current_headless_renderer() -> Option<Box<dyn gpui::PlatformHeadlessRende
         )
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(
+        feature = "test-support",
+        any(target_os = "linux", target_os = "freebsd", target_os = "windows")
+    ))]
+    {
+        let renderer = gpui_wgpu::WgpuHeadlessRenderer::new()
+            .unwrap_or_else(|error| panic!("no headless WGPU renderer: {error:#}"));
+        Some(Box::new(renderer) as Box<dyn gpui::PlatformHeadlessRenderer>)
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        all(
+            feature = "test-support",
+            any(target_os = "linux", target_os = "freebsd", target_os = "windows")
+        )
+    )))]
     {
         None
     }
