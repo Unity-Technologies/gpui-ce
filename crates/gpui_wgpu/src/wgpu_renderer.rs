@@ -18,7 +18,10 @@ mod buffers;
 mod drawing;
 mod filters;
 mod frame;
-#[cfg(all(feature = "test-support", not(target_family = "wasm")))]
+#[cfg(all(
+    any(feature = "test-support", feature = "render-to-image"),
+    not(target_family = "wasm")
+))]
 mod headless;
 mod path_types;
 mod pipelines;
@@ -261,7 +264,10 @@ impl WgpuRenderer {
         frame::render_to_view(self, scene, frame_view, None).is_some()
     }
 
-    #[cfg(all(feature = "test-support", not(target_family = "wasm")))]
+    #[cfg(all(
+        any(feature = "test-support", feature = "render-to-image"),
+        not(target_family = "wasm")
+    ))]
     fn render_to_view_with_readback(
         &mut self,
         scene: &Scene,
@@ -491,6 +497,49 @@ mod tests {
             [128, 0, 0, 255],
             "must match the retired Metal renderer's mixed primitive baseline"
         );
+        Ok(())
+    }
+
+    #[cfg(all(feature = "test-support", not(target_family = "wasm")))]
+    #[test]
+    fn render_to_image_refuses_without_gpu_resources() -> anyhow::Result<()> {
+        let context = WgpuContext::new_headless(None)?;
+        let size = Size {
+            width: DevicePixels(2),
+            height: DevicePixels(2),
+        };
+        let mut renderer = WgpuRenderer::new_headless(&context, size)?;
+        let mut scene = Scene::default();
+        scene.finish();
+        // What a window’s renderer looks like while it recovers a lost device.
+        renderer.destroy();
+        let error = renderer
+            .render_to_image(&scene)
+            .expect_err("a renderer without GPU resources has no frame to read back");
+        assert!(error.to_string().contains("live GPU device"), "{error}");
+        Ok(())
+    }
+
+    #[cfg(all(feature = "test-support", not(target_family = "wasm")))]
+    #[test]
+    fn render_to_image_refuses_once_the_device_is_lost() -> anyhow::Result<()> {
+        let context = WgpuContext::new_headless(None)?;
+        let size = Size {
+            width: DevicePixels(2),
+            height: DevicePixels(2),
+        };
+        let mut renderer = WgpuRenderer::new_headless(&context, size)?;
+        let mut scene = Scene::default();
+        scene.finish();
+        // A window between the device-lost callback and the draw that recovers it.
+        renderer
+            .faults
+            .device_lost
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let error = renderer
+            .render_to_image(&scene)
+            .expect_err("a lost device has no frame to read back");
+        assert!(error.to_string().contains("live GPU device"), "{error}");
         Ok(())
     }
 

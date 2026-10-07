@@ -123,10 +123,10 @@ impl MacWgpuRenderer {
         self.renderer.render_to_image(scene)
     }
 
-    // WGPU's offscreen rendering needs gpui_wgpu's test-support, which the
-    // `test-support` feature enables. `render-to-image` deliberately does not
-    // (it exists to render without test-support's frame scheduling), so with
-    // the `wgpu` renderer it reports the gap rather than failing to compile.
+    // WGPU’s offscreen readback needs gpui_wgpu’s `test-support` or
+    // `render-to-image`, and this crate’s `render-to-image` forwards neither,
+    // so with the `wgpu` renderer it reports the gap rather than failing to
+    // compile.
     #[cfg(all(any(test, feature = "render-to-image"), not(feature = "test-support")))]
     pub fn render_to_image(&mut self, _scene: &Scene) -> anyhow::Result<image::RgbaImage> {
         anyhow::bail!("rendering to an image with the wgpu renderer needs the test-support feature")
