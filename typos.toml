@@ -4,6 +4,9 @@ ignore-hidden = false
 extend-exclude = [
   ".git/",
 
+  # A vendored copy of a crates.io crate, kept byte for byte.
+  "vendor/",
+
   # Windows likes its abbreviations.
   "crates/gpui/src/platform/windows/directx_renderer.rs",
   "crates/gpui/src/platform/windows/events.rs",

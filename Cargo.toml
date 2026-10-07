@@ -26,6 +26,9 @@ members = [
   "./crates/gpui_path/",
   "./tooling/perf/",
 ]
+# A patched copy of a crates.io crate, not part of this workspace; see
+# vendor/accesskit_unix/README.md.
+exclude = ["./vendor/accesskit_unix/"]
 default-members = ["./crates/gpui/"]
 resolver = "3"
 
@@ -42,7 +45,7 @@ readme = "README.md"
 accesskit = { version = "0.25.1", features = ["enumn"] }
 accesskit_consumer = "0.39.1"
 accesskit_macos = "0.27.1"
-accesskit_unix = "0.24.0"
+accesskit_unix = { version = "0.24.0", path = "./vendor/accesskit_unix" }
 accesskit_windows = "0.35.1"
 anyhow = "1.0.86"
 async-task = "4.7"
