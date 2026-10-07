@@ -25,6 +25,8 @@ test-support = [
   "gpui_apple/test-support",
   "gpui_macos/test-support",
   "gpui_windows/test-support",
+  "dep:gpui_wgpu",
+  "gpui_wgpu?/test-support",
 ]
 render-to-image = [
   "gpui/render-to-image",
@@ -49,6 +51,7 @@ gpui.workspace = true
 
 [dev-dependencies]
 gpui_fonts = { path = "../gpui_ce_fonts", version = "0.2.2", package = "gpui-ce-fonts" }
+gpui_parley.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui_apple.workspace = true
@@ -62,6 +65,10 @@ gpui_macos = { workspace = true, features = ["test-support"] }
 [target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))'.dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 gpui_wgpu = { workspace = true, features = ["test-support"] }
+
+# `current_headless_renderer` under `test-support`. Linux already builds it for its windows.
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))'.dependencies]
+gpui_wgpu = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 gpui_windows.workspace = true
@@ -78,3 +85,8 @@ console_error_panic_hook.workspace = true
 name = "parley_render"
 path = "tests/parley_render.rs"
 harness = false
+
+[[test]]
+name = "test_app_context_render"
+path = "tests/test_app_context_render.rs"
+required-features = ["test-support"]
