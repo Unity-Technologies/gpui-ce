@@ -37,9 +37,10 @@ use crate::{
 /// `gpui_platform::current_headless_renderer`. When present, scenes drawn by
 /// benchmarks are rasterized through the real sprite atlas and submitted to
 /// the GPU on present, so quad/sprite regressions show up in measurements.
-/// When `None`, presenting discards the scene. Currently only macOS provides
-/// a headless renderer (Metal), so GPU submission is excluded from benchmark
-/// measurements on other platforms.
+/// When `None`, presenting discards the scene. Under `bench-support` alone only
+/// macOS provides a headless renderer (Metal), so GPU submission is excluded
+/// from benchmark measurements on other platforms; `gpui_platform`'s
+/// `test-support` adds WGPU's on Linux, FreeBSD and Windows.
 pub fn bench_platform(
     headless_renderer_factory: Option<Box<dyn Fn() -> Option<Box<dyn PlatformHeadlessRenderer>>>>,
     text_system: Arc<dyn PlatformTextSystem>,
