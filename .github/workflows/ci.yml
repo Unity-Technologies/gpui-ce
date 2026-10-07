@@ -184,6 +184,8 @@ jobs:
       - run: just build
       - run: just test
       - run: just test-doc
+      - name: Test TestAppContext headless rendering
+        run: GPUI_RUN_RENDERING_TESTS=1 cargo test -p gpui_ce_platform --features test-support --test test_app_context_render
 
   # macOS build + test
   test-mac:
@@ -201,6 +203,8 @@ jobs:
       - run: just test-doc
       - name: Test Parley rendering invariants
         run: GPUI_RUN_RENDERING_TESTS=1 cargo test -p gpui_ce_platform --test parley_render
+      - name: Test TestAppContext headless rendering
+        run: GPUI_RUN_RENDERING_TESTS=1 cargo test -p gpui_ce_platform --features test-support --test test_app_context_render
 
   # Windows build + test
   test-windows:
@@ -218,6 +222,8 @@ jobs:
       - run: just test-doc
       - name: Test Parley rendering invariants
         run: $env:GPUI_RUN_RENDERING_TESTS=1; cargo test -p gpui_ce_platform --test parley_render
+      - name: Test TestAppContext headless rendering
+        run: $env:GPUI_RUN_RENDERING_TESTS=1; cargo test -p gpui_ce_platform --features test-support --test test_app_context_render
 
   # Examples
   check-examples:
