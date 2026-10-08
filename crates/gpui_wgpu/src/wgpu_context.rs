@@ -83,12 +83,30 @@ impl NativeBackend {
         }
     }
 
-    pub(crate) fn try_in_preference_order<T>(
+    /// The platform's backends in preference order, with `preferred` (when the
+    /// platform has it) moved to the front.
+    pub(crate) fn order(preferred: Option<wgpu::Backend>) -> SmallVec<[Self; 3]> {
+        let mut order: SmallVec<[Self; 3]> = Self::PREFERENCE.iter().copied().collect();
+        if let Some(index) = preferred.and_then(|preferred| {
+            order
+                .iter()
+                .position(|&backend| wgpu::Backends::from(backend) == preferred.into())
+        }) {
+            let backend = order.remove(index);
+            order.insert(0, backend);
+        }
+        order
+    }
+
+    /// Runs `attempt` with each backend in [`Self::order`] until one succeeds,
+    /// and reports every failure, in order, when none does.
+    pub(crate) fn try_in_order<T>(
         operation: &'static str,
+        preferred: Option<wgpu::Backend>,
         mut attempt: impl FnMut(Self) -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
         let mut failures = SmallVec::<[NativeBackendFailure; 3]>::new();
-        for &backend in Self::PREFERENCE {
+        for backend in Self::order(preferred) {
             match attempt(backend) {
                 Ok(value) => return Ok(value),
                 Err(source) => failures.push(NativeBackendFailure { backend, source }),
@@ -477,6 +495,11 @@ pub struct WgpuDeviceRequirements {
     /// application makes that call. It only takes effect when [`Self::features`]
     /// includes an experimental feature; the default leaves them disabled.
     pub experimental_features: wgpu::ExperimentalFeatures,
+    /// The native backend to try first (for example [`wgpu::Backend::Vulkan`]
+    /// on Windows, where ray queries on Direct3D 12 also need DXC). The
+    /// platform's other backends follow in their usual order, so a machine
+    /// without it still gets a device. `None` keeps the platform's order.
+    pub preferred_backend: Option<wgpu::Backend>,
 }
 
 impl WgpuDeviceRequirements {
@@ -516,10 +539,11 @@ impl WgpuContext {
     pub fn new_headless(
         extra_requirements: Option<&WgpuDeviceRequirements>,
     ) -> anyhow::Result<Self> {
-        NativeBackend::try_in_preference_order("a headless GPU context", |backend| {
+        let preferred = extra_requirements.and_then(|reqs| reqs.preferred_backend);
+        NativeBackend::try_in_order("a headless GPU context", preferred, |backend| {
             let instance = backend.instance(None);
-            let adapter =
-                gpui::block_on(instance.raw.request_adapter(&wgpu::RequestAdapterOptions {
+            let adapter = gpui::block_on(
+                instance.raw.request_adapter(&wgpu::RequestAdapterOptions {
                     // LowPower avoids waking a discrete GPU just for snapshots on dual-GPU
                     // systems. `WGPU_POWER_PREF=high` asks for the discrete one, for a
                     // headless frame that should cost what a window's frame costs.
@@ -528,10 +552,9 @@ impl WgpuContext {
                     compatible_surface: None,
                     force_fallback_adapter: false,
                     apply_limit_buckets: false,
-                }))
-                .map_err(|error| {
-                    anyhow::anyhow!("failed to request headless GPU adapter: {error}")
-                })?;
+                }),
+            )
+            .map_err(|error| anyhow::anyhow!("failed to request headless GPU adapter: {error}"))?;
             let device = gpui::block_on(Self::create_device(&adapter, extra_requirements))?;
             Self::from_created_device(instance.raw, adapter, device)
         })
@@ -1120,7 +1143,7 @@ mod tests {
     #[test]
     fn native_backend_fallback_preserves_ordered_failures() {
         let mut attempted = Vec::new();
-        let error = NativeBackend::try_in_preference_order::<()>("test context", |backend| {
+        let error = NativeBackend::try_in_order::<()>("test context", None, |backend| {
             attempted.push(backend);
             anyhow::bail!("unavailable")
         })
@@ -1135,6 +1158,51 @@ mod tests {
                 .expect("each backend failure should be reported in preference order");
             previous += index;
         }
+    }
+
+    #[test]
+    fn a_preferred_backend_is_tried_first_and_the_rest_keep_their_order() {
+        let default: Vec<_> = NativeBackend::order(None).into_iter().collect();
+        assert_eq!(default, NativeBackend::PREFERENCE);
+
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            NativeBackend::order(Some(wgpu::Backend::Vulkan)).as_slice(),
+            &[
+                NativeBackend::Vulkan,
+                NativeBackend::Dx12,
+                NativeBackend::Gl,
+            ]
+        );
+
+        // A backend the platform doesn't have leaves the order alone.
+        let absent: Vec<_> = NativeBackend::order(Some(wgpu::Backend::BrowserWebGpu))
+            .into_iter()
+            .collect();
+        assert_eq!(absent, NativeBackend::PREFERENCE);
+
+        let mut attempted = Vec::new();
+        let _ = NativeBackend::try_in_order::<()>(
+            "test context",
+            NativeBackend::PREFERENCE.last().map(|&b| {
+                let backends = wgpu::Backends::from(b);
+                [
+                    wgpu::Backend::Vulkan,
+                    wgpu::Backend::Metal,
+                    wgpu::Backend::Dx12,
+                    wgpu::Backend::Gl,
+                ]
+                .into_iter()
+                .find(|&backend| wgpu::Backends::from(backend) == backends)
+                .expect("a native backend")
+            }),
+            |backend| {
+                attempted.push(backend);
+                anyhow::bail!("unavailable")
+            },
+        );
+        assert_eq!(attempted.first(), NativeBackend::PREFERENCE.last());
+        assert_eq!(attempted.len(), NativeBackend::PREFERENCE.len());
     }
 
     #[test]
