@@ -443,7 +443,8 @@ fn initialize_context_and_surface(
     adapter_policy: SoftwareAdapterPolicy,
     extra_requirements: Option<&WgpuDeviceRequirements>,
 ) -> anyhow::Result<(WgpuContext, wgpu::Surface<'static>)> {
-    NativeBackend::try_in_preference_order("a GPU context for the window", |backend| {
+    let preferred = extra_requirements.and_then(|reqs| reqs.preferred_backend);
+    NativeBackend::try_in_order("a GPU context for the window", preferred, |backend| {
         let instance = backend.instance(display());
         let surface = create_surface(&instance.raw, surface_target)?;
         let context = WgpuContext::new_with_adapter_policy(
