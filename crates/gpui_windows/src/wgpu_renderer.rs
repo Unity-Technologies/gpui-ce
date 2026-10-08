@@ -24,7 +24,8 @@ impl Context {
     pub fn set_requirements(&self, requirements: WgpuDeviceRequirements) {
         if self.gpu.borrow().is_some() {
             log::warn!(
-                "set_gpu_requirements: the device already exists, so these requirements                  apply only if it is recreated; call it before opening the first window"
+                "set_gpu_requirements: the device already exists, so these requirements \
+                 apply only if it is recreated; call it before opening the first window"
             );
         }
         *self.requirements.borrow_mut() = Some(requirements);
@@ -180,7 +181,7 @@ impl WindowsWgpuRenderer {
         self.renderer.gpu_context_info()
     }
 
-    #[cfg(feature = "test-support")]
+    #[cfg(any(feature = "test-support", feature = "render-to-image"))]
     pub fn render_to_image(
         &mut self,
         scene: &Scene,
@@ -189,15 +190,15 @@ impl WindowsWgpuRenderer {
         self.renderer.render_to_image(scene)
     }
 
-    // WGPU's offscreen rendering needs gpui_wgpu's test-support, which the
-    // `test-support` feature enables.
-    #[cfg(all(test, not(feature = "test-support")))]
+    // WGPU's offscreen rendering needs gpui_wgpu's `test-support` or
+    // `render-to-image`, which the features of the same names enable.
+    #[cfg(all(test, not(any(feature = "test-support", feature = "render-to-image"))))]
     pub fn render_to_image(
         &mut self,
         _scene: &Scene,
         _background_appearance: WindowBackgroundAppearance,
     ) -> anyhow::Result<image::RgbaImage> {
-        anyhow::bail!("rendering to an image needs the test-support feature")
+        anyhow::bail!("rendering to an image needs the test-support or render-to-image feature")
     }
 }
 
