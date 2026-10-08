@@ -196,6 +196,14 @@ impl WgpuHeadlessRenderer {
         self.renderer.gpu_context()
     }
 
+    /// The typed context a custom-GPU control renders on, as a window's
+    /// renderer lends it through `WgpuContextHandle::from_window`. A headless
+    /// window has no platform renderer to ask, so a test that drives a
+    /// texture-surface control headlessly hands it this handle instead.
+    pub fn gpu_context_info(&self) -> Option<crate::WgpuContextHandle> {
+        self.renderer.gpu_context_info()
+    }
+
     fn ensure_target(&mut self, size: Size<DevicePixels>) -> anyhow::Result<()> {
         anyhow::ensure!(
             size.width.0 > 0 && size.height.0 > 0,
