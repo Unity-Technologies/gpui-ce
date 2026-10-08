@@ -110,8 +110,9 @@ pub(crate) struct WindowsWindowInner {
 impl WindowsWindowState {
     fn new(
         hwnd: HWND,
-        #[cfg(not(feature = "wgpu"))] directx_devices: &DirectXDevices,
+        directx_devices: &DirectXDevices,
         #[cfg(feature = "wgpu")] renderer_context: &RendererContext,
+        #[cfg(feature = "wgpu")] renderer_choice: WindowsRenderer,
         window_params: &CREATESTRUCTW,
         current_cursor: Option<HCURSOR>,
         cursor_visible: Arc<AtomicBool>,
@@ -142,9 +143,13 @@ impl WindowsWindowState {
         let renderer = DirectXRenderer::new(hwnd, directx_devices, disable_direct_composition)
             .context("Creating DirectX renderer")?;
         #[cfg(feature = "wgpu")]
-        let _ = disable_direct_composition;
-        #[cfg(feature = "wgpu")]
-        let renderer = WindowRenderer::new(hwnd, renderer_context)?;
+        let renderer = WindowRenderer::new(
+            hwnd,
+            renderer_choice,
+            directx_devices,
+            renderer_context,
+            disable_direct_composition,
+        )?;
         let callbacks = Callbacks::default();
         let input_handler = None;
         let pending_surrogate = None;
@@ -257,10 +262,11 @@ impl WindowsWindowInner {
     fn new(context: &mut WindowCreateContext, hwnd: HWND, cs: &CREATESTRUCTW) -> Result<Rc<Self>> {
         let state = WindowsWindowState::new(
             hwnd,
-            #[cfg(not(feature = "wgpu"))]
             &context.directx_devices,
             #[cfg(feature = "wgpu")]
             &context.renderer_context,
+            #[cfg(feature = "wgpu")]
+            context.windows_renderer,
             cs,
             context.current_cursor,
             context.cursor_visible.clone(),
@@ -415,10 +421,11 @@ struct WindowCreateContext {
     platform_window_handle: HWND,
     appearance: WindowAppearance,
     disable_direct_composition: bool,
-    #[cfg(not(feature = "wgpu"))]
     directx_devices: DirectXDevices,
     #[cfg(feature = "wgpu")]
     renderer_context: RendererContext,
+    #[cfg(feature = "wgpu")]
+    windows_renderer: WindowsRenderer,
     invalidate_devices: Arc<AtomicBool>,
     draw_coordinator: Rc<DrawCoordinator>,
     parent_hwnd: Option<HWND>,
@@ -446,13 +453,18 @@ impl WindowsWindow {
             main_receiver,
             platform_window_handle,
             disable_direct_composition,
-            #[cfg(not(feature = "wgpu"))]
             directx_devices,
             #[cfg(feature = "wgpu")]
             renderer_context,
             invalidate_devices,
             draw_coordinator,
         } = creation_info;
+        #[cfg(not(feature = "wgpu"))]
+        if params.windows_renderer == WindowsRenderer::Wgpu {
+            log::warn!(
+                "WindowsRenderer::Wgpu needs gpui_platform's windows-wgpu feature;                  the window draws with DirectX"
+            );
+        }
         register_window_class(icon);
         let parent_hwnd = if params.kind == WindowKind::Dialog {
             let parent_window = unsafe { GetActiveWindow() };
@@ -534,10 +546,11 @@ impl WindowsWindow {
             platform_window_handle,
             appearance,
             disable_direct_composition,
-            #[cfg(not(feature = "wgpu"))]
             directx_devices,
             #[cfg(feature = "wgpu")]
             renderer_context,
+            #[cfg(feature = "wgpu")]
+            windows_renderer: params.windows_renderer,
             invalidate_devices,
             draw_coordinator,
             parent_hwnd,
@@ -1150,13 +1163,13 @@ impl PlatformWindow for WindowsWindow {
 
     #[cfg(feature = "wgpu")]
     fn gpu_context(&self) -> Option<Box<dyn std::any::Any>> {
-        let (device, queue) = self.state.renderer.borrow().gpu_context();
+        let (device, queue) = self.state.renderer.borrow().gpu_context()?;
         Some(Box::new((device, queue)))
     }
 
     #[cfg(feature = "wgpu")]
     fn gpu_device_lost(&self) -> Option<bool> {
-        Some(self.state.renderer.borrow().device_lost())
+        self.state.renderer.borrow().device_lost()
     }
 
     #[cfg(feature = "wgpu")]

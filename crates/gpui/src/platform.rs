@@ -3180,6 +3180,12 @@ pub struct WindowOptions {
     #[cfg(target_os = "windows")]
     pub windows_window_background: WindowsWindowBackground,
 
+    /// The renderer a Windows window draws with. Each window chooses its own,
+    /// so an application can draw one window with WGPU and keep Direct3D 11
+    /// for the rest.
+    #[cfg(target_os = "windows")]
+    pub windows_renderer: WindowsRenderer,
+
     /// The background appearance of a Linux window.
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     pub linux_window_background: LinuxWindowBackground,
@@ -3271,6 +3277,10 @@ pub struct WindowParams {
 
     #[cfg(target_os = "macos")]
     pub tabbing_identifier: Option<String>,
+
+    /// The renderer the window draws with (Windows only)
+    #[cfg(target_os = "windows")]
+    pub windows_renderer: WindowsRenderer,
 }
 
 /// Represents the status of how a window should be opened.
@@ -3330,6 +3340,8 @@ impl Default for WindowOptions {
             macos_window_background: MacosWindowBackground::default(),
             #[cfg(target_os = "windows")]
             windows_window_background: WindowsWindowBackground::default(),
+            #[cfg(target_os = "windows")]
+            windows_renderer: WindowsRenderer::default(),
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
             linux_window_background: LinuxWindowBackground::default(),
             #[cfg(target_family = "wasm")]
@@ -3566,6 +3578,22 @@ pub enum WindowsWindowBackground {
     MicaBackdrop,
     /// The Mica Alt backdrop material, supported on Windows 11.
     MicaAltBackdrop,
+}
+
+/// The renderer a Windows window draws with, set through
+/// [`WindowOptions::windows_renderer`].
+#[cfg(target_os = "windows")]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum WindowsRenderer {
+    /// Direct3D 11 with DirectComposition.
+    #[default]
+    DirectX,
+    /// The WGPU renderer, which lends its device to the application (with
+    /// `gpui_wgpu`'s `custom-gpu` feature). Needs `gpui_platform`'s
+    /// `windows-wgpu` feature; without it the window draws with
+    /// [`WindowsRenderer::DirectX`]. Text is rasterized by DirectWrite under
+    /// either renderer.
+    Wgpu,
 }
 
 /// The background appearance of a Linux window, set through
