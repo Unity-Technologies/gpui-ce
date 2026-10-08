@@ -468,6 +468,33 @@ pub struct WgpuDeviceRequirements {
     /// `max(gpui_limit, app_limit)` for upper-bound limits and
     /// `min(gpui_limit, app_limit)` for alignment/lower-bound limits.
     pub limits: Option<wgpu::Limits>,
+    /// Opt-in to wgpu's `EXPERIMENTAL_*` features (for example
+    /// [`wgpu::Features::EXPERIMENTAL_RAY_QUERY`]). wgpu refuses to create a
+    /// device that requests one unless this token is enabled, and enabling it
+    /// is `unsafe` ([`wgpu::ExperimentalFeatures::enabled`]), so the
+    /// application makes that call. It only takes effect when [`Self::features`]
+    /// includes an experimental feature; the default leaves them disabled.
+    pub experimental_features: wgpu::ExperimentalFeatures,
+}
+
+impl WgpuDeviceRequirements {
+    /// The experimental-features token to create the device with: enabled only
+    /// when the application opted in *and* `required_features` (gpui's own
+    /// merged with the application's) includes an experimental feature.
+    fn experimental_features_for(
+        requirements: Option<&Self>,
+        required_features: wgpu::Features,
+    ) -> wgpu::ExperimentalFeatures {
+        match requirements {
+            Some(reqs)
+                if reqs.experimental_features.is_enabled()
+                    && required_features.intersects(wgpu::Features::all_experimental_mask()) =>
+            {
+                reqs.experimental_features
+            }
+            _ => wgpu::ExperimentalFeatures::disabled(),
+        }
+    }
 }
 
 impl WgpuContext {
@@ -677,6 +704,11 @@ impl WgpuContext {
             }
         }
 
+        let experimental_features = WgpuDeviceRequirements::experimental_features_for(
+            extra_requirements,
+            required_features,
+        );
+
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("gpui_device"),
@@ -684,7 +716,7 @@ impl WgpuContext {
                 required_limits,
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
                 trace: wgpu::Trace::Off,
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                experimental_features,
             })
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create wgpu device: {e}"))?;
@@ -1029,7 +1061,31 @@ fn parse_pci_id(id: &str) -> anyhow::Result<u32> {
 
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
-    use super::{NativeBackend, SoftwareAdapterPolicy, parse_pci_id};
+    use super::{NativeBackend, SoftwareAdapterPolicy, WgpuDeviceRequirements, parse_pci_id};
+
+    #[test]
+    fn experimental_features_require_opt_in_and_an_experimental_feature() {
+        let experimental = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
+        let ordinary = wgpu::Features::DUAL_SOURCE_BLENDING;
+        let resolve = |reqs: Option<&WgpuDeviceRequirements>, features| {
+            WgpuDeviceRequirements::experimental_features_for(reqs, features).is_enabled()
+        };
+
+        assert!(!resolve(None, experimental));
+        let default = WgpuDeviceRequirements::default();
+        assert!(!resolve(Some(&default), experimental));
+
+        let opted_in = WgpuDeviceRequirements {
+            // SAFETY: the token is only inspected here, never passed to a device.
+            experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
+            ..Default::default()
+        };
+        assert!(
+            !resolve(Some(&opted_in), ordinary),
+            "opting in without requesting an experimental feature must not enable them"
+        );
+        assert!(resolve(Some(&opted_in), ordinary | experimental));
+    }
 
     #[test]
     fn native_backend_fallbacks_are_individually_initialized() {
