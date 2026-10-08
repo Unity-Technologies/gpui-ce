@@ -1554,6 +1554,8 @@ impl Window {
             icon,
             #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
             tabbing_identifier,
+            #[cfg(target_os = "windows")]
+            windows_renderer,
             ..
         } = options;
 
@@ -1580,6 +1582,8 @@ impl Window {
                 icon,
                 #[cfg(target_os = "macos")]
                 tabbing_identifier,
+                #[cfg(target_os = "windows")]
+                windows_renderer,
             },
         )?;
 

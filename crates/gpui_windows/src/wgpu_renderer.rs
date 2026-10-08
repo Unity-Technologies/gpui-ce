@@ -1,15 +1,19 @@
 //! The WGPU renderer behind the DirectX renderer's interface, for the `wgpu`
-//! feature. Applications can then share the window's device through
-//! `gpui_wgpu::WgpuContextHandle` and composite their own WGPU textures
-//! (with gpui's `custom-gpu` feature).
+//! feature. A window opened with [`gpui::WindowsRenderer::Wgpu`] draws with
+//! it; every other window keeps the DirectX renderer. Applications can share
+//! a WGPU window's device through `gpui_wgpu::WgpuContextHandle` and composite
+//! their own WGPU textures (with gpui's `custom-gpu` feature).
 
 use std::sync::Arc;
 
+use anyhow::Context as _;
 use gpui::{GpuSpecs, Scene, Size, WindowBackgroundAppearance};
 use gpui_wgpu::{
-    GpuContext, WgpuContextHandle, WgpuDeviceRequirements, WgpuRenderer,
-    WgpuSurfaceConfig, wgpu,
+    FontRasterizationSettings, GpuContext, SubpixelOrder, WgpuContextHandle,
+    WgpuDeviceRequirements, WgpuRenderer, WgpuSurfaceConfig, wgpu,
 };
+
+use crate::{DirectXDevices, DirectXRenderer};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
@@ -38,8 +42,7 @@ impl Context {
 
 fn raw_window_handle_from_hwnd(hwnd: HWND) -> raw_window_handle::RawWindowHandle {
     let mut handle = raw_window_handle::Win32WindowHandle::new(
-        std::num::NonZeroIsize::new(hwnd.0 as isize)
-            .expect("an HWND is never the null handle"),
+        std::num::NonZeroIsize::new(hwnd.0 as isize).expect("an HWND is never the null handle"),
     );
     // The instance handle is not needed for wgpu surface creation.
     handle.hinstance = None;
@@ -87,6 +90,11 @@ impl WindowsWgpuRenderer {
             },
             context.requirements(),
         )?;
+        let mut renderer = renderer;
+        match direct_write_font_settings() {
+            Ok(settings) => renderer.set_font_rasterization_settings(settings),
+            Err(error) => log::warn!("reading DirectWrite's text rendering parameters: {error}"),
+        }
         Ok(Self {
             renderer,
             hwnd,
@@ -205,5 +213,143 @@ impl WindowsWgpuRenderer {
 impl Drop for WindowsWgpuRenderer {
     fn drop(&mut self) {
         self.renderer.destroy();
+    }
+}
+
+/// DirectWrite's gamma and contrast, which the DirectX renderer applies to
+/// glyphs, so text drawn with WGPU matches text drawn with Direct3D 11.
+fn direct_write_font_settings() -> anyhow::Result<FontRasterizationSettings> {
+    use windows::Win32::Graphics::DirectWrite::*;
+    use windows::core::Interface as _;
+    unsafe {
+        let factory: IDWriteFactory5 = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+        let params: IDWriteRenderingParams1 = factory.CreateRenderingParams()?.cast()?;
+        let order = if params.GetPixelGeometry() == DWRITE_PIXEL_GEOMETRY_BGR {
+            SubpixelOrder::BlueGreenRed
+        } else {
+            SubpixelOrder::RedGreenBlue
+        };
+        Ok(FontRasterizationSettings::new(
+            params.GetGamma(),
+            params.GetGrayscaleEnhancedContrast(),
+            params.GetEnhancedContrast(),
+            order,
+        ))
+    }
+}
+
+/// The renderer a window draws with, chosen per window by
+/// [`gpui::WindowsRenderer`].
+pub(crate) enum WindowRenderer {
+    DirectX(DirectXRenderer),
+    Wgpu(WindowsWgpuRenderer),
+}
+
+impl WindowRenderer {
+    pub(crate) fn new(
+        hwnd: HWND,
+        choice: gpui::WindowsRenderer,
+        directx_devices: &DirectXDevices,
+        context: &Context,
+        disable_direct_composition: bool,
+    ) -> anyhow::Result<Self> {
+        if choice == gpui::WindowsRenderer::Wgpu {
+            return Ok(Self::Wgpu(WindowsWgpuRenderer::new(hwnd, context)?));
+        }
+        Ok(Self::DirectX(
+            DirectXRenderer::new(hwnd, directx_devices, disable_direct_composition)
+                .context("Creating DirectX renderer")?,
+        ))
+    }
+
+    pub fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
+        match self {
+            Self::DirectX(r) => r.sprite_atlas(),
+            Self::Wgpu(r) => r.sprite_atlas(),
+        }
+    }
+
+    pub fn resize(&mut self, size: Size<gpui::DevicePixels>) -> anyhow::Result<()> {
+        match self {
+            Self::DirectX(r) => r.resize(size),
+            Self::Wgpu(r) => r.resize(size),
+        }
+    }
+
+    pub fn mark_drawable(&mut self) {
+        match self {
+            Self::DirectX(r) => r.mark_drawable(),
+            Self::Wgpu(r) => r.mark_drawable(),
+        }
+    }
+
+    pub fn draw(
+        &mut self,
+        scene: &Scene,
+        background_appearance: WindowBackgroundAppearance,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::DirectX(r) => r.draw(scene, background_appearance),
+            Self::Wgpu(r) => r.draw(scene, background_appearance),
+        }
+    }
+
+    /// Only the WGPU renderer skips frames that must be re-scheduled; the
+    /// DirectX renderer recovers through `WM_GPUI_GPU_DEVICE_LOST`.
+    pub fn needs_redraw(&self) -> bool {
+        match self {
+            Self::DirectX(_) => false,
+            Self::Wgpu(r) => r.needs_redraw(),
+        }
+    }
+
+    /// The DirectX devices were recreated; a WGPU window owns its own device
+    /// and recovers it on its next draw.
+    pub(crate) fn handle_device_lost(&mut self, devices: &DirectXDevices) -> anyhow::Result<()> {
+        match self {
+            Self::DirectX(r) => r.handle_device_lost(devices),
+            Self::Wgpu(_) => Ok(()),
+        }
+    }
+
+    pub fn gpu_specs(&self) -> anyhow::Result<GpuSpecs> {
+        match self {
+            Self::DirectX(r) => r.gpu_specs(),
+            Self::Wgpu(r) => r.gpu_specs(),
+        }
+    }
+
+    /// The WGPU device and queue; `None` for a Direct3D 11 window.
+    pub fn gpu_context(&self) -> Option<(Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
+        match self {
+            Self::DirectX(_) => None,
+            Self::Wgpu(r) => Some(r.gpu_context()),
+        }
+    }
+
+    pub fn device_lost(&self) -> Option<bool> {
+        match self {
+            Self::DirectX(_) => None,
+            Self::Wgpu(r) => Some(r.device_lost()),
+        }
+    }
+
+    pub fn gpu_context_info(&self) -> Option<WgpuContextHandle> {
+        match self {
+            Self::DirectX(_) => None,
+            Self::Wgpu(r) => r.gpu_context_info(),
+        }
+    }
+
+    #[cfg(any(test, feature = "test-support", feature = "render-to-image"))]
+    pub fn render_to_image(
+        &mut self,
+        scene: &Scene,
+        background_appearance: WindowBackgroundAppearance,
+    ) -> anyhow::Result<image::RgbaImage> {
+        match self {
+            Self::DirectX(r) => r.render_to_image(scene, background_appearance),
+            Self::Wgpu(r) => r.render_to_image(scene, background_appearance),
+        }
     }
 }
