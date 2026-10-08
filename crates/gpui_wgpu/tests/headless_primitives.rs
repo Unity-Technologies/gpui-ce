@@ -48,6 +48,16 @@ fn filled_path_resolves_without_invalidating_the_frame() {
     assert_eq!(image.get_pixel(150, 40).0, [0, 0, 0, 255]);
 }
 
+#[test]
+fn the_headless_context_handle_lends_the_renderers_own_device() {
+    let renderer = WgpuHeadlessRenderer::new().expect("headless renderer");
+    let handle = renderer.gpu_context_info().expect("a live device");
+    let (device, queue) = renderer.gpu_context();
+    assert!(std::ptr::eq(handle.device(), &*device));
+    assert!(std::ptr::eq(handle.queue(), &*queue));
+    assert!(!handle.device_lost());
+}
+
 fn bounds(x: f32, y: f32, w: f32, h: f32) -> Bounds<ScaledPixels> {
     Bounds {
         origin: Point {
