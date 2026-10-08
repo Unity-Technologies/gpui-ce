@@ -168,7 +168,7 @@ fn native_renderer_fallbacks_and_intermediates_are_lazy() {
     assert!(
         wgpu_context.contains("impl From<NativeBackend> for wgpu::Backends")
             && wgpu_context.contains("backends: self.into()")
-            && wgpu_context.contains("try_in_preference_order"),
+            && wgpu_context.contains("try_in_order"),
         "{} must initialize one backend per fallback attempt",
         wgpu_context_path.display()
     );
