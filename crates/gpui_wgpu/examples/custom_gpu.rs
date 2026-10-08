@@ -331,19 +331,22 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     pub fn run() {
         env_logger::init();
         application().run(|cx: &mut App| {
-            cx.open_window(
-                WindowOptions::new()
-                    .titlebar(Some(TitlebarOptions {
-                        title: Some("Custom GPU rendering".into()),
-                        ..Default::default()
-                    }))
-                    .window_bounds(Some(WindowBounds::Windowed(Bounds::centered(
-                        None,
-                        size(px(800.0), px(600.0)),
-                        cx,
-                    )))),
-                |window, cx| cx.new(|cx| CustomGpuControl::new(window, cx)),
-            )
+            let options = WindowOptions::new()
+                .titlebar(Some(TitlebarOptions {
+                    title: Some("Custom GPU rendering".into()),
+                    ..Default::default()
+                }))
+                .window_bounds(Some(WindowBounds::Windowed(Bounds::centered(
+                    None,
+                    size(px(800.0), px(600.0)),
+                    cx,
+                ))));
+            // Windows draws a window with WGPU only when it asks to.
+            #[cfg(target_os = "windows")]
+            let options = options.windows_renderer(gpui::WindowsRenderer::Wgpu);
+            cx.open_window(options, |window, cx| {
+                cx.new(|cx| CustomGpuControl::new(window, cx))
+            })
             .unwrap();
             cx.activate(true);
         });
