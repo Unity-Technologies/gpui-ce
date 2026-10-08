@@ -17,9 +17,10 @@ default = ["gpui/default"]
 test-support = ["gpui/test-support", "gpui_wgpu?/test-support"]
 render-to-image = ["gpui/render-to-image", "gpui_wgpu?/render-to-image"]
 screen-capture = ["gpui/screen-capture"]
-# Draw windows with the WGPU renderer instead of DirectX, so applications can
-# share its device and composite their own WGPU textures (with gpui's
-# `custom-gpu` feature).
+# Compile in the WGPU renderer beside DirectX. A window opened with
+# `WindowsRenderer::Wgpu` draws with it, so applications can share its device
+# and composite their own WGPU textures (with gpui's `custom-gpu` feature);
+# every other window keeps DirectX.
 wgpu = [
   "dep:gpui_wgpu",
   "gpui/custom-gpu",
