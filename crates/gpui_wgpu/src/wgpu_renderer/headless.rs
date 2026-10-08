@@ -176,7 +176,15 @@ pub struct WgpuHeadlessRenderer {
 #[cfg(feature = "test-support")]
 impl WgpuHeadlessRenderer {
     pub fn new() -> anyhow::Result<Self> {
-        let context = WgpuContext::new_headless(None)?;
+        Self::new_with_requirements(None)
+    }
+
+    /// Like [`Self::new`], with the device features and limits an application
+    /// would pass a window's renderer through `set_gpu_requirements`.
+    pub fn new_with_requirements(
+        requirements: Option<&crate::WgpuDeviceRequirements>,
+    ) -> anyhow::Result<Self> {
+        let context = WgpuContext::new_headless(requirements)?;
         let renderer = WgpuRenderer::new_headless(
             &context,
             Size {
