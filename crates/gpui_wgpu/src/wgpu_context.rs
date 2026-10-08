@@ -521,8 +521,10 @@ impl WgpuContext {
             let adapter =
                 gpui::block_on(instance.raw.request_adapter(&wgpu::RequestAdapterOptions {
                     // LowPower avoids waking a discrete GPU just for snapshots on dual-GPU
-                    // systems.
-                    power_preference: wgpu::PowerPreference::LowPower,
+                    // systems. `WGPU_POWER_PREF=high` asks for the discrete one, for a
+                    // headless frame that should cost what a window's frame costs.
+                    power_preference: wgpu::PowerPreference::from_env()
+                        .unwrap_or(wgpu::PowerPreference::LowPower),
                     compatible_surface: None,
                     force_fallback_adapter: false,
                     apply_limit_buckets: false,
