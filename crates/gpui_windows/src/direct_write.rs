@@ -91,7 +91,19 @@ impl DirectWriteTextSystem {
             "Segoe UI",
             BitmapFallbackGlyphRasterizer::new(SharedDirectWriteRenderer(renderer.clone())),
         )
-        .with_fallback_families(["Lilex", "IBM Plex Sans", "Arial"]);
+        .with_fallback_families(["Lilex", "IBM Plex Sans", "Arial"])
+        // DirectWrite picks one Han face from a sample character; on a Japanese or Korean
+        // pick, Simplified-only characters such as 简 would otherwise draw as .notdef.
+        .with_script_fallback_families(
+            *b"Hani",
+            [
+                "Microsoft YaHei UI",
+                "Microsoft JhengHei UI",
+                "Yu Gothic UI",
+                "Malgun Gothic",
+                "SimSun-ExtB",
+            ],
+        );
 
         Ok(Self { parley, renderer })
     }
@@ -958,6 +970,37 @@ mod tests {
     };
     use gpui_parley::FontSynthesis;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn han_fallback_covers_simplified_only_characters() -> Result<()> {
+        let system = DirectWriteTextSystem::new_headless()?;
+        // 简 is Simplified-only and absent from Japanese and Korean UI fonts; the rest
+        // are shared Han, Japanese and Hangul text that must keep a real glyph too.
+        for text in ["简体中文", "繁體中文", "日本語", "한국어"] {
+            let runs = [gpui::TextRun {
+                len: text.len(),
+                font: font("Segoe UI"),
+                ..Default::default()
+            }];
+            let layout = system.layout_text(TextLayoutRequest {
+                text,
+                font_size: px(16.0),
+                runs: &runs,
+                options: Default::default(),
+            });
+            let glyphs = layout
+                .paint_fragments
+                .iter()
+                .flat_map(|fragment| fragment.glyphs.iter())
+                .collect::<Vec<_>>();
+            assert_eq!(glyphs.len(), text.chars().count(), "{text}");
+            assert!(
+                glyphs.iter().all(|glyph| glyph.id != GlyphId(0)),
+                "{text} shaped a .notdef glyph"
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn fixed_fonts_cover_native_modes_instances_and_empty_glyphs() -> Result<()> {
