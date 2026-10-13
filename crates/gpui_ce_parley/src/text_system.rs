@@ -1463,6 +1463,34 @@ impl ParleyTextSystem {
         self
     }
 
+    /// Appends installed `families` after the operating system's own fallback for `script`.
+    ///
+    /// Some platforms answer a script fallback with a single face, chosen from one sample
+    /// character, so a character that face lacks has no candidate at all. Families that are
+    /// not installed are skipped, and the system's pick keeps its place first.
+    pub fn with_script_fallback_families(
+        self,
+        script: [u8; 4],
+        families: impl IntoIterator<Item = impl AsRef<str>>,
+    ) -> Self {
+        {
+            let mut state = self.parley.lock();
+            let collection = &mut state.font_context.collection;
+            let key = fontique::FallbackKey::new(fontique::Script::from_bytes(script), None);
+            // Resolve the system's pick first: a key that already has families never asks it.
+            let mut ids = collection.fallback_families(key).collect::<Vec<_>>();
+            for family in families {
+                if let Some(id) = collection.family_id(family.as_ref())
+                    && !ids.contains(&id)
+                {
+                    ids.push(id);
+                }
+            }
+            collection.set_fallbacks(key, ids.into_iter());
+        }
+        self
+    }
+
     fn font_families<'a>(
         &'a self,
         descriptor: &'a Font,
