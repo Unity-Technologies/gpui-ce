@@ -2162,7 +2162,8 @@ impl ParleyTextSystem {
                 text_top = text_top.min(px(-run_metrics.ascent - half_leading));
                 text_bottom = text_bottom.max(px(run_metrics.descent + half_leading));
 
-                if text.is_empty() {
+                // Bidi preparation can add direction markers to an empty source string.
+                if source_text_len == 0 {
                     continue;
                 }
 
@@ -2735,6 +2736,54 @@ mod tests {
                 "{family}: strikethrough={strikethrough:?}, ascent={:?}",
                 layout.ascent
             );
+        }
+    }
+
+    #[test]
+    fn empty_directional_text_without_runs_keeps_metrics_without_paint() {
+        let system = test_system();
+        {
+            // Give Parley a default font for synthetic bidi markers without
+            // depending on installed system fonts or an explicit text run.
+            let mut state = system.parley.lock();
+            let collection = &mut state.font_context.collection;
+            let family = collection.family_id(IBM_PLEX.family).unwrap();
+            collection.set_generic_families(GenericFamily::SansSerif, std::iter::once(family));
+        }
+
+        for (direction, expected_direction) in [
+            (ParagraphDirection::Auto, ResolvedDirection::LeftToRight),
+            (
+                ParagraphDirection::LeftToRight,
+                ResolvedDirection::LeftToRight,
+            ),
+            (
+                ParagraphDirection::RightToLeft,
+                ResolvedDirection::RightToLeft,
+            ),
+        ] {
+            // Exercise both a fresh layout and the cached result.
+            for _ in 0..2 {
+                let layout = system.layout_text(TextLayoutRequest {
+                    text: "",
+                    font_size: px(16.0),
+                    runs: &[],
+                    options: TextLayoutOptions {
+                        direction,
+                        ..Default::default()
+                    },
+                });
+
+                assert_eq!(layout.len, 0);
+                assert_eq!(layout.width, Pixels::ZERO);
+                assert!(layout.ascent > Pixels::ZERO);
+                assert!(layout.descent > Pixels::ZERO);
+                assert_eq!(layout.visual_lines.len(), 1);
+                assert_eq!(layout.visual_lines[0].text_range, 0..0);
+                assert_eq!(layout.visual_lines[0].paint_fragment_range, 0..0);
+                assert_eq!(layout.visual_lines[0].direction, expected_direction);
+                assert!(layout.paint_fragments.is_empty());
+            }
         }
     }
 
