@@ -269,6 +269,15 @@ impl WindowRenderer {
         }
     }
 
+    /// The size the renderer was last resized to.
+    #[cfg(test)]
+    pub(crate) fn drawable_size(&self) -> Size<gpui::DevicePixels> {
+        match self {
+            Self::DirectX(r) => r.drawable_size(),
+            Self::Wgpu(r) => r.size,
+        }
+    }
+
     pub fn resize(&mut self, size: Size<gpui::DevicePixels>) -> anyhow::Result<()> {
         match self {
             Self::DirectX(r) => r.resize(size),

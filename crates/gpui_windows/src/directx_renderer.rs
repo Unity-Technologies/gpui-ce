@@ -794,6 +794,15 @@ impl DirectXRenderer {
             .context("failed to build RGBA image from DirectX staging readback")
     }
 
+    /// The size the swap chain was last resized to.
+    #[cfg(test)]
+    pub(crate) fn drawable_size(&self) -> Size<DevicePixels> {
+        Size {
+            width: DevicePixels(self.width as i32),
+            height: DevicePixels(self.height as i32),
+        }
+    }
+
     pub(crate) fn resize(&mut self, new_size: Size<DevicePixels>) -> Result<()> {
         let width = new_size.width.0.max(1) as u32;
         let height = new_size.height.0.max(1) as u32;
