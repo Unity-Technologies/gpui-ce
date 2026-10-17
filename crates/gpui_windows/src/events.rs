@@ -237,8 +237,8 @@ impl WindowsWindowInner {
     }
 
     fn handle_size_msg(&self, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
-        // Don't resize the renderer when the window is minimized, but record that it was minimized so
-        // that on restore the swap chain can be recreated via `update_drawable_size_even_if_unchanged`.
+        // A minimized window has no client area to draw, so stop requesting frames until it is
+        // restored. The renderer keeps its size: `WM_SIZE` reports 0x0 while minimized.
         if wparam.0 == SIZE_MINIMIZED as usize {
             self.state
                 .restore_from_minimized
@@ -251,32 +251,27 @@ impl WindowsWindowInner {
         let new_size = size(DevicePixels(width), DevicePixels(height));
 
         let scale_factor = self.state.scale_factor.get();
-        let mut should_resize_renderer = false;
         if let Some(restore_from_minimized) = self.state.restore_from_minimized.take() {
             self.state
                 .callbacks
                 .request_frame
                 .set(Some(restore_from_minimized));
-        } else {
-            should_resize_renderer = true;
         }
 
-        self.handle_size_change(new_size, scale_factor, should_resize_renderer);
+        // Resize the renderer on restore too. The restored size can differ from the size the
+        // window had when it was minimized (a display, scale or resolution change while it sat in
+        // the taskbar, or restoring to maximized). Layout follows the new size either way, so a
+        // swap chain left at the old size clips the right and bottom of the window. The renderer
+        // returns early when the size is unchanged.
+        self.handle_size_change(new_size, scale_factor);
         Some(0)
     }
 
-    fn handle_size_change(
-        &self,
-        device_size: Size<DevicePixels>,
-        scale_factor: f32,
-        should_resize_renderer: bool,
-    ) {
+    fn handle_size_change(&self, device_size: Size<DevicePixels>, scale_factor: f32) {
         let new_logical_size = device_size.to_pixels(scale_factor);
 
         self.state.logical_size.set(new_logical_size);
-        if should_resize_renderer
-            && let Err(e) = self.state.renderer.borrow_mut().resize(device_size)
-        {
+        if let Err(e) = self.state.renderer.borrow_mut().resize(device_size) {
             log::error!("Failed to resize renderer, invalidating devices: {}", e);
             self.state
                 .invalidate_devices
@@ -924,7 +919,7 @@ impl WindowsWindowInner {
                 // SetWindowPos may not send WM_SIZE for maximized windows in some cases,
                 // so we manually update the size to ensure proper rendering
                 let device_size = size(DevicePixels(width), DevicePixels(height));
-                self.handle_size_change(device_size, new_scale_factor, true);
+                self.handle_size_change(device_size, new_scale_factor);
             }
         } else {
             // For non-maximized windows, use the suggested RECT from the system

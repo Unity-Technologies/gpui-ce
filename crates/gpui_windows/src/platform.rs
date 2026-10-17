@@ -1599,6 +1599,105 @@ mod tests {
         );
     }
 
+    /// A window restored from the taskbar at a different size than it was minimized at (a display,
+    /// scale or resolution change while minimized, or restoring to maximized) must resize its
+    /// renderer. Layout follows the restored size, so a swap chain left at the old size clips the
+    /// right and bottom of the window until the user resizes it.
+    #[test]
+    fn restoring_a_minimized_window_resizes_the_renderer() -> anyhow::Result<()> {
+        use super::WindowsPlatform;
+        use crate::WindowsWindow;
+        use gpui::{
+            AnyWindowHandle, Bounds, DevicePixels, PlatformWindow as _, WindowHandle, WindowId,
+            WindowKind, WindowParams, point, px, size,
+        };
+        use windows::Win32::Foundation::RECT;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            DestroyWindow, GetClientRect, GetWindowPlacement, SW_RESTORE, SW_SHOWMINNOACTIVE,
+            SW_SHOWNOACTIVATE, SetWindowPlacement, ShowWindow, WINDOWPLACEMENT,
+        };
+
+        struct Root;
+        impl gpui::Render for Root {
+            fn render(
+                &mut self,
+                _: &mut gpui::Window,
+                _: &mut gpui::Context<Self>,
+            ) -> impl gpui::IntoElement {
+                gpui::Empty
+            }
+        }
+
+        let platform = WindowsPlatform::new(false)?;
+        let handle: AnyWindowHandle = WindowHandle::<Root>::new(WindowId::from(1)).into();
+        let window = WindowsWindow::new(
+            handle,
+            WindowParams {
+                bounds: Bounds::new(point(px(100.), px(100.)), size(px(400.), px(300.))),
+                titlebar: None,
+                kind: WindowKind::Normal,
+                is_movable: true,
+                app_owns_titlebar_drag: false,
+                is_resizable: true,
+                is_minimizable: true,
+                focus: false,
+                show: false,
+                icon: None,
+                display_id: None,
+                app_id: None,
+                window_min_size: None,
+                windows_renderer: Default::default(),
+            },
+            platform.generate_creation_info(),
+        )?;
+        let hwnd = window.get_raw_handle();
+        let client_size = || -> anyhow::Result<gpui::Size<DevicePixels>> {
+            let mut rect = RECT::default();
+            unsafe { GetClientRect(hwnd, &mut rect)? };
+            Ok(size(
+                DevicePixels(rect.right - rect.left),
+                DevicePixels(rect.bottom - rect.top),
+            ))
+        };
+        let renderer_size = || window.0.state.renderer.borrow().drawable_size();
+        // Every gpui window registers a frame callback, and minimizing stashes it. Without one, the
+        // restore looks like an ordinary resize and the bug never shows.
+        window.on_request_frame(Box::new(|_| {}));
+
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+        let before = client_size()?;
+        assert_eq!(renderer_size(), before);
+
+        // Minimize, then grow the size the window restores to while it sits in the taskbar, the
+        // way a display or scale change does.
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOWMINNOACTIVE);
+            let mut placement = WINDOWPLACEMENT {
+                length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+                ..Default::default()
+            };
+            GetWindowPlacement(hwnd, &mut placement)?;
+            placement.rcNormalPosition.right += 200;
+            placement.rcNormalPosition.bottom += 100;
+            placement.showCmd = SW_SHOWMINNOACTIVE.0 as u32;
+            SetWindowPlacement(hwnd, &placement)?;
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+
+        let after = client_size()?;
+        assert_ne!(after, before, "the restored window should be larger");
+        assert_eq!(
+            renderer_size(),
+            after,
+            "the renderer must take the restored size, not keep the pre-minimize size"
+        );
+
+        unsafe { DestroyWindow(hwnd)? };
+        Ok(())
+    }
+
     #[test]
     fn test_clipboard() {
         let item = ClipboardItem::new_string("你好，我是张小白".to_string());
