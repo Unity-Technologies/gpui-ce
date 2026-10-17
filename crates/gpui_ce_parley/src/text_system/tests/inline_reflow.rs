@@ -729,7 +729,7 @@ fn trailing_whitespace_hangs_on_the_last_row_at_any_width() {
                 unwrapped.platform_layout.size(),
                 "{context}"
             );
-            assert_document_contract(text, &wrapped);
+            assert_document_structure(text, &wrapped);
         }
     }
 }
