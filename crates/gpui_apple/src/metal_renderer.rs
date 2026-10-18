@@ -170,8 +170,53 @@ pub fn new_renderer(
     _bounds: gpui::Size<f32>,
     transparent: bool,
 ) -> Result<Renderer> {
-    Ok(MetalRenderer::new(context, transparent))
+    Ok(MetalRenderer::new(context, transparent)?)
 }
+
+/// Why a [`MetalRenderer`] could not be created.
+///
+/// Building the renderer compiles the generated MSL with the device's runtime
+/// compiler and creates a pipeline state per primitive. A driver can refuse
+/// either step (for example "Compiler encountered an internal error" on some
+/// older GPUs), and a window cannot draw without them. The error says what
+/// failed, so an application can report it and exit instead of panicking.
+/// `open_window` returns it inside an `anyhow::Error`; use `downcast_ref`.
+#[derive(Clone, Debug)]
+pub struct MetalRendererError {
+    /// The `MTLDevice` name of the GPU, or `None` when no Metal device was found.
+    pub device_name: Option<String>,
+    /// What the renderer was doing, such as "compiling the quads shader library".
+    pub stage: String,
+    /// Metal's own error text.
+    pub message: String,
+}
+
+impl MetalRendererError {
+    fn new(
+        device: Option<&metal::DeviceRef>,
+        stage: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            device_name: device.map(|device| device.name().to_string()),
+            stage: stage.into(),
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for MetalRendererError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let device = self.device_name.as_deref().unwrap_or("no Metal device");
+        write!(
+            f,
+            "failed to create the Metal renderer on {device} while {}: {}",
+            self.stage, self.message
+        )
+    }
+}
+
+impl std::error::Error for MetalRendererError {}
 
 pub struct InstanceBufferPool {
     buffer_size: usize,
@@ -289,8 +334,14 @@ pub struct MetalRenderer {
 
 impl MetalRenderer {
     /// Creates a new MetalRenderer with a CAMetalLayer for window-based rendering.
-    pub fn new(instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>, transparent: bool) -> Self {
-        let device = Self::create_device();
+    ///
+    /// Fails when no Metal device is available, or when the device cannot build
+    /// the renderer's shader libraries and pipeline states.
+    pub fn new(
+        instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
+        transparent: bool,
+    ) -> Result<Self, MetalRendererError> {
+        let device = Self::create_device()?;
 
         let layer = new_window_layer(transparent);
         layer.set_device(&device);
@@ -313,12 +364,14 @@ impl MetalRenderer {
     /// This renderer can render scenes to images without requiring a CAMetalLayer,
     /// window, or AppKit. Use `render_scene_to_image()` to render scenes.
     #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
-    pub fn new_headless(instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>) -> Self {
-        let device = Self::create_device();
+    pub fn new_headless(
+        instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
+    ) -> Result<Self, MetalRendererError> {
+        let device = Self::create_device()?;
         Self::new_internal(device, None, true, instance_buffer_pool)
     }
 
-    fn create_device() -> metal::Device {
+    fn create_device() -> Result<metal::Device, MetalRendererError> {
         // Prefer low‐power integrated GPUs on Intel Mac. On Apple
         // Silicon, there is only ever one GPU, so this is equivalent to
         // `metal::Device::system_default()`.
@@ -326,16 +379,19 @@ impl MetalRenderer {
             .into_iter()
             .min_by_key(|d| (d.is_removable(), !d.is_low_power()))
         {
-            d
+            Ok(d)
         } else {
             // For some reason `all()` can return an empty list, see https://github.com/zed-industries/zed/issues/37689
             // In that case, we fall back to the system default device.
             log::error!(
                 "Unable to enumerate Metal devices; attempting to use system default device"
             );
-            metal::Device::system_default().unwrap_or_else(|| {
-                log::error!("unable to access a compatible graphics device");
-                std::process::exit(1);
+            metal::Device::system_default().ok_or_else(|| {
+                MetalRendererError::new(
+                    None,
+                    "selecting a graphics device",
+                    "unable to access a compatible graphics device",
+                )
             })
         }
     }
@@ -345,7 +401,21 @@ impl MetalRenderer {
         layer: Option<metal::MetalLayer>,
         opaque: bool,
         instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
-    ) -> Self {
+    ) -> Result<Self, MetalRendererError> {
+        Self::new_internal_with_sources(device, layer, opaque, instance_buffer_pool, |shader| {
+            shader.msl
+        })
+    }
+
+    /// `new_internal`, with the MSL for each shader chosen by `msl_for`, so a test can
+    /// hand the device a source it refuses.
+    fn new_internal_with_sources(
+        device: metal::Device,
+        layer: Option<metal::MetalLayer>,
+        opaque: bool,
+        instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
+        msl_for: impl Fn(&'static NativeShader) -> &'static str,
+    ) -> Result<Self, MetalRendererError> {
         // Shared memory can be used only if CPU and GPU share the same memory space.
         // https://developer.apple.com/documentation/metal/setting-resource-storage-modes
         let is_unified_memory = device.has_unified_memory();
@@ -358,136 +428,137 @@ impl MetalRenderer {
         // Compile the Naga-generated MSL with the device's runtime compiler, deduplicating
         // per source so each module compiles exactly once.
         let mut libraries: Vec<(&'static str, metal::Library)> = Vec::new();
-        let mut library_for = |source: &'static str| -> metal::Library {
-            if let Some((_, library)) = libraries
-                .iter()
-                .find(|(registered, _)| *registered == source)
-            {
-                return library.clone();
-            }
-            let library = device
-                .new_library_with_source(source, &metal::CompileOptions::new())
-                .unwrap_or_else(|error| panic!("error building metal library: {error}"));
-            libraries.push((source, library.clone()));
-            library
-        };
+        let mut library_for =
+            |shader: &'static NativeShader| -> Result<metal::Library, MetalRendererError> {
+                let source = msl_for(shader);
+                if let Some((_, library)) = libraries
+                    .iter()
+                    .find(|(registered, _)| *registered == source)
+                {
+                    return Ok(library.clone());
+                }
+                let library = compile_library(&device, shader.label, source)?;
+                libraries.push((source, library.clone()));
+                Ok(library)
+            };
 
-        let mut pipeline = |label: &str| -> (&'static NativeShader, metal::Library) {
-            let shader = native_shader(label);
-            (shader, library_for(shader.msl))
-        };
+        let mut pipeline =
+            |label: &str| -> Result<(&'static NativeShader, metal::Library), MetalRendererError> {
+                let shader = native_shader(label);
+                Ok((shader, library_for(shader)?))
+            };
 
         let (path_rasterization_shader, path_rasterization_library) =
-            pipeline("path_rasterization");
+            pipeline("path_rasterization")?;
         let paths_rasterization_pipeline_state = build_path_rasterization_pipeline_state(
             &device,
             &path_rasterization_library,
             path_rasterization_shader,
             MTLPixelFormat::BGRA8Unorm,
             PATH_SAMPLE_COUNT,
-        );
-        let (paths_shader, paths_library) = pipeline("paths");
+        )?;
+        let (paths_shader, paths_library) = pipeline("paths")?;
         let path_sprites_pipeline_state = build_path_sprite_pipeline_state(
             &device,
             &paths_library,
             paths_shader,
             MTLPixelFormat::BGRA8Unorm,
-        );
-        let (shadows_shader, shadows_library) = pipeline("shadows");
+        )?;
+        let (shadows_shader, shadows_library) = pipeline("shadows")?;
         let shadows_pipeline_state = build_pipeline_state(
             &device,
             &shadows_library,
             shadows_shader,
             MTLPixelFormat::BGRA8Unorm,
-        );
-        let (smoothed_shadows_shader, smoothed_shadows_library) = pipeline("smoothed_shadows");
+        )?;
+        let (smoothed_shadows_shader, smoothed_shadows_library) = pipeline("smoothed_shadows")?;
         let smoothed_shadows_pipeline_state = build_pipeline_state(
             &device,
             &smoothed_shadows_library,
             smoothed_shadows_shader,
             MTLPixelFormat::BGRA8Unorm,
-        );
-        let (quads_shader, quads_library) = pipeline("quads");
+        )?;
+        let (quads_shader, quads_library) = pipeline("quads")?;
         let quads_pipeline_state = build_pipeline_state(
             &device,
             &quads_library,
             quads_shader,
             MTLPixelFormat::BGRA8Unorm,
-        );
-        let (smoothed_quads_shader, smoothed_quads_library) = pipeline("smoothed_quads");
+        )?;
+        let (smoothed_quads_shader, smoothed_quads_library) = pipeline("smoothed_quads")?;
         let smoothed_quads_pipeline_state = build_pipeline_state(
             &device,
             &smoothed_quads_library,
             smoothed_quads_shader,
             MTLPixelFormat::BGRA8Unorm,
-        );
-        let (underlines_shader, underlines_library) = pipeline("underlines");
+        )?;
+        let (underlines_shader, underlines_library) = pipeline("underlines")?;
         let underlines_pipeline_state = build_pipeline_state(
             &device,
             &underlines_library,
             underlines_shader,
             MTLPixelFormat::BGRA8Unorm,
-        );
-        let (monochrome_shader, monochrome_library) = pipeline("monochrome_sprites");
+        )?;
+        let (monochrome_shader, monochrome_library) = pipeline("monochrome_sprites")?;
         let monochrome_sprites_pipeline_state = build_pipeline_state(
             &device,
             &monochrome_library,
             monochrome_shader,
             MTLPixelFormat::BGRA8Unorm,
-        );
-        let (polychrome_shader, polychrome_library) = pipeline("polychrome_sprites");
+        )?;
+        let (polychrome_shader, polychrome_library) = pipeline("polychrome_sprites")?;
         let polychrome_sprites_pipeline_state = build_pipeline_state(
             &device,
             &polychrome_library,
             polychrome_shader,
             MTLPixelFormat::BGRA8Unorm,
-        );
+        )?;
         let (smoothed_polychrome_shader, smoothed_polychrome_library) =
-            pipeline("smoothed_polychrome_sprites");
+            pipeline("smoothed_polychrome_sprites")?;
         let smoothed_polychrome_sprites_pipeline_state = build_pipeline_state(
             &device,
             &smoothed_polychrome_library,
             smoothed_polychrome_shader,
             MTLPixelFormat::BGRA8Unorm,
-        );
-        let (surfaces_shader, surfaces_library) = pipeline("surfaces");
+        )?;
+        let (surfaces_shader, surfaces_library) = pipeline("surfaces")?;
         let surfaces_pipeline_state = build_path_sprite_pipeline_state(
             &device,
             &surfaces_library,
             surfaces_shader,
             MTLPixelFormat::BGRA8Unorm,
-        );
-        let (blur_downsample_shader, blur_downsample_library) = pipeline("blur_downsample");
+        )?;
+        let (blur_downsample_shader, blur_downsample_library) = pipeline("blur_downsample")?;
         let blur_downsample_pipeline_state = build_blur_pipeline_state(
             &device,
             &blur_downsample_library,
             blur_downsample_shader,
             MTLPixelFormat::BGRA8Unorm,
-        );
-        let (blur_shader, blur_library) = pipeline("blur");
+        )?;
+        let (blur_shader, blur_library) = pipeline("blur")?;
         let blur_pipeline_state = build_blur_pipeline_state(
             &device,
             &blur_library,
             blur_shader,
             MTLPixelFormat::BGRA8Unorm,
-        );
+        )?;
         // Premultiplied blend (One / OneMinusSourceAlpha) — the composite outputs a premultiplied
         // blurred sample; straight-alpha blending would darken the faded edges.
-        let (blur_composite_shader, blur_composite_library) = pipeline("blur_composite");
+        let (blur_composite_shader, blur_composite_library) = pipeline("blur_composite")?;
         let blur_composite_pipeline_state = build_path_sprite_pipeline_state(
             &device,
             &blur_composite_library,
             blur_composite_shader,
             MTLPixelFormat::BGRA8Unorm,
-        );
+        )?;
         let (smoothed_blur_composite_shader, smoothed_blur_composite_library) =
-            pipeline("smoothed_blur_composite");
+            pipeline("smoothed_blur_composite")?;
         let smoothed_blur_composite_pipeline_state = build_path_sprite_pipeline_state(
             &device,
             &smoothed_blur_composite_library,
             smoothed_blur_composite_shader,
             MTLPixelFormat::BGRA8Unorm,
-        );
+        )?;
 
         let sampler_descriptor = SamplerDescriptor::new();
         sampler_descriptor.set_min_filter(metal::MTLSamplerMinMagFilter::Linear);
@@ -496,10 +567,16 @@ impl MetalRenderer {
 
         let command_queue = device.new_command_queue();
         let sprite_atlas = Arc::new(MetalAtlas::new(device.clone(), is_apple_gpu));
-        let core_video_texture_cache =
-            CVMetalTextureCache::new(None, device.clone(), None).unwrap();
+        let core_video_texture_cache = CVMetalTextureCache::new(None, device.clone(), None)
+            .map_err(|status| {
+                MetalRendererError::new(
+                    Some(&device),
+                    "creating the CoreVideo texture cache",
+                    format!("CVReturn {status}"),
+                )
+            })?;
 
-        Self {
+        Ok(Self {
             device,
             layer,
             presents_with_transaction: false,
@@ -537,7 +614,7 @@ impl MetalRenderer {
             path_sample_count: PATH_SAMPLE_COUNT,
             #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
             headless_render_target: None,
-        }
+        })
     }
 
     pub fn layer(&self) -> Option<&metal::MetalLayerRef> {
@@ -1993,18 +2070,57 @@ fn new_command_encoder_for_texture<'a>(
     command_encoder
 }
 
+/// Compiles one generated MSL module with the device's runtime compiler.
+fn compile_library(
+    device: &metal::DeviceRef,
+    label: &str,
+    source: &str,
+) -> Result<metal::Library, MetalRendererError> {
+    device
+        .new_library_with_source(source, &metal::CompileOptions::new())
+        .map_err(|error| {
+            MetalRendererError::new(
+                Some(device),
+                format!("compiling the {label} shader library"),
+                error,
+            )
+        })
+}
+
+fn locate_function(
+    device: &metal::DeviceRef,
+    library: &metal::LibraryRef,
+    entry: &str,
+) -> Result<metal::Function, MetalRendererError> {
+    library
+        .get_function(entry, None)
+        .map_err(|error| MetalRendererError::new(Some(device), format!("locating {entry}"), error))
+}
+
+fn new_pipeline_state(
+    device: &metal::DeviceRef,
+    shader: &NativeShader,
+    descriptor: &metal::RenderPipelineDescriptorRef,
+) -> Result<metal::RenderPipelineState, MetalRendererError> {
+    device
+        .new_render_pipeline_state(descriptor)
+        .map_err(|error| {
+            MetalRendererError::new(
+                Some(device),
+                format!("creating the {} pipeline state", shader.label),
+                error,
+            )
+        })
+}
+
 fn build_pipeline_state(
     device: &metal::DeviceRef,
     library: &metal::LibraryRef,
     shader: &NativeShader,
     pixel_format: metal::MTLPixelFormat,
-) -> metal::RenderPipelineState {
-    let vertex_fn = library
-        .get_function(shader.vertex_entry, None)
-        .unwrap_or_else(|error| panic!("error locating {}: {error}", shader.vertex_entry));
-    let fragment_fn = library
-        .get_function(shader.fragment_entry, None)
-        .unwrap_or_else(|error| panic!("error locating {}: {error}", shader.fragment_entry));
+) -> Result<metal::RenderPipelineState, MetalRendererError> {
+    let vertex_fn = locate_function(device, library, shader.vertex_entry)?;
+    let fragment_fn = locate_function(device, library, shader.fragment_entry)?;
 
     let descriptor = metal::RenderPipelineDescriptor::new();
     descriptor.set_label(shader.label);
@@ -2020,9 +2136,7 @@ fn build_pipeline_state(
     color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
     color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
 
-    device
-        .new_render_pipeline_state(&descriptor)
-        .expect("could not create render pipeline state")
+    new_pipeline_state(device, shader, &descriptor)
 }
 
 fn build_path_sprite_pipeline_state(
@@ -2030,13 +2144,9 @@ fn build_path_sprite_pipeline_state(
     library: &metal::LibraryRef,
     shader: &NativeShader,
     pixel_format: metal::MTLPixelFormat,
-) -> metal::RenderPipelineState {
-    let vertex_fn = library
-        .get_function(shader.vertex_entry, None)
-        .unwrap_or_else(|error| panic!("error locating {}: {error}", shader.vertex_entry));
-    let fragment_fn = library
-        .get_function(shader.fragment_entry, None)
-        .unwrap_or_else(|error| panic!("error locating {}: {error}", shader.fragment_entry));
+) -> Result<metal::RenderPipelineState, MetalRendererError> {
+    let vertex_fn = locate_function(device, library, shader.vertex_entry)?;
+    let fragment_fn = locate_function(device, library, shader.fragment_entry)?;
 
     let descriptor = metal::RenderPipelineDescriptor::new();
     descriptor.set_label(shader.label);
@@ -2052,9 +2162,7 @@ fn build_path_sprite_pipeline_state(
     color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
     color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
 
-    device
-        .new_render_pipeline_state(&descriptor)
-        .expect("could not create render pipeline state")
+    new_pipeline_state(device, shader, &descriptor)
 }
 
 fn build_path_rasterization_pipeline_state(
@@ -2063,13 +2171,9 @@ fn build_path_rasterization_pipeline_state(
     shader: &NativeShader,
     pixel_format: metal::MTLPixelFormat,
     path_sample_count: u32,
-) -> metal::RenderPipelineState {
-    let vertex_fn = library
-        .get_function(shader.vertex_entry, None)
-        .unwrap_or_else(|error| panic!("error locating {}: {error}", shader.vertex_entry));
-    let fragment_fn = library
-        .get_function(shader.fragment_entry, None)
-        .unwrap_or_else(|error| panic!("error locating {}: {error}", shader.fragment_entry));
+) -> Result<metal::RenderPipelineState, MetalRendererError> {
+    let vertex_fn = locate_function(device, library, shader.vertex_entry)?;
+    let fragment_fn = locate_function(device, library, shader.fragment_entry)?;
 
     let descriptor = metal::RenderPipelineDescriptor::new();
     descriptor.set_label(shader.label);
@@ -2089,9 +2193,7 @@ fn build_path_rasterization_pipeline_state(
     color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
     color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
 
-    device
-        .new_render_pipeline_state(&descriptor)
-        .expect("could not create render pipeline state")
+    new_pipeline_state(device, shader, &descriptor)
 }
 
 // Blur downsample/gaussian passes overwrite their target (no blending). The composite pass
@@ -2101,13 +2203,9 @@ fn build_blur_pipeline_state(
     library: &metal::LibraryRef,
     shader: &NativeShader,
     pixel_format: metal::MTLPixelFormat,
-) -> metal::RenderPipelineState {
-    let vertex_fn = library
-        .get_function(shader.vertex_entry, None)
-        .unwrap_or_else(|error| panic!("error locating {}: {error}", shader.vertex_entry));
-    let fragment_fn = library
-        .get_function(shader.fragment_entry, None)
-        .unwrap_or_else(|error| panic!("error locating {}: {error}", shader.fragment_entry));
+) -> Result<metal::RenderPipelineState, MetalRendererError> {
+    let vertex_fn = locate_function(device, library, shader.vertex_entry)?;
+    let fragment_fn = locate_function(device, library, shader.fragment_entry)?;
 
     let descriptor = metal::RenderPipelineDescriptor::new();
     descriptor.set_label(shader.label);
@@ -2117,9 +2215,7 @@ fn build_blur_pipeline_state(
     color_attachment.set_pixel_format(pixel_format);
     color_attachment.set_blending_enabled(false);
 
-    device
-        .new_render_pipeline_state(&descriptor)
-        .expect("could not create render pipeline state")
+    new_pipeline_state(device, shader, &descriptor)
 }
 
 fn required_instance_buffer_size(scene: &Scene) -> usize {
@@ -2178,10 +2274,10 @@ pub struct MetalHeadlessRenderer {
 
 #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
 impl MetalHeadlessRenderer {
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self, MetalRendererError> {
         let instance_buffer_pool = Arc::new(Mutex::new(InstanceBufferPool::default()));
-        let renderer = MetalRenderer::new_headless(instance_buffer_pool);
-        Self { renderer }
+        let renderer = MetalRenderer::new_headless(instance_buffer_pool)?;
+        Ok(Self { renderer })
     }
 }
 
@@ -2216,9 +2312,48 @@ mod tests {
     use std::borrow::Cow;
 
     #[test]
+    fn a_shader_library_the_device_refuses_is_an_error() {
+        let device = MetalRenderer::create_device().unwrap();
+        let device_name = device.name().to_string();
+        let pool = Arc::new(Mutex::new(InstanceBufferPool::default()));
+
+        let result = MetalRenderer::new_internal_with_sources(device, None, true, pool, |shader| {
+            if shader.label == "quads" {
+                "this is not Metal Shading Language"
+            } else {
+                shader.msl
+            }
+        });
+
+        let Err(error) = result else {
+            panic!("a shader library the compiler rejects still built a renderer");
+        };
+        assert_eq!(error.device_name.as_deref(), Some(device_name.as_str()));
+        assert_eq!(error.stage, "compiling the quads shader library");
+        assert!(
+            !error.message.is_empty(),
+            "the compiler's error text is kept"
+        );
+        assert!(error.to_string().contains(&device_name));
+    }
+
+    #[test]
+    fn a_missing_shader_entry_point_is_an_error() {
+        let device = MetalRenderer::create_device().unwrap();
+        let shader = native_shader("quads");
+        let library = compile_library(&device, shader.label, shader.msl).unwrap();
+
+        let Err(error) = locate_function(&device, &library, "no_such_entry_point") else {
+            panic!("a missing entry point was found");
+        };
+        assert_eq!(error.stage, "locating no_such_entry_point");
+        assert_eq!(error.device_name.as_deref(), Some(device.name()));
+    }
+
+    #[test]
     fn intermediate_textures_follow_scene_requirements() {
         let pool = Arc::new(Mutex::new(InstanceBufferPool::default()));
-        let mut renderer = MetalRenderer::new_headless(pool);
+        let mut renderer = MetalRenderer::new_headless(pool).unwrap();
         let target_size = size(DevicePixels(5), DevicePixels(5));
         let mut empty_scene = Scene::default();
         empty_scene.finish();
@@ -2257,7 +2392,7 @@ mod tests {
     #[test]
     fn generated_sprite_shader_preserves_monochrome_coverage() {
         let pool = Arc::new(Mutex::new(InstanceBufferPool::default()));
-        let mut renderer = MetalRenderer::new_headless(pool);
+        let mut renderer = MetalRenderer::new_headless(pool).unwrap();
         let tile_size = Size {
             width: DevicePixels(8),
             height: DevicePixels(8),
@@ -2365,7 +2500,7 @@ mod tests {
 
     #[test]
     fn generated_quad_shaders_render_background_contracts() {
-        let mut renderer = MetalHeadlessRenderer::new();
+        let mut renderer = MetalHeadlessRenderer::new().unwrap();
         let bounds = |x, y| Bounds {
             origin: gpui::point(ScaledPixels(x), ScaledPixels(y)),
             size: Size {
@@ -2489,7 +2624,7 @@ mod tests {
 
     #[test]
     fn generated_underline_shaders_render_line_contracts() {
-        let mut renderer = MetalHeadlessRenderer::new();
+        let mut renderer = MetalHeadlessRenderer::new().unwrap();
         let underline_bounds = Bounds {
             origin: gpui::point(ScaledPixels(1.5), ScaledPixels(3.5)),
             size: Size {
@@ -2592,7 +2727,7 @@ mod tests {
 
     #[test]
     fn generated_border_shader_renders_dashed_rounded_rect() {
-        let mut renderer = MetalHeadlessRenderer::new();
+        let mut renderer = MetalHeadlessRenderer::new().unwrap();
         let full = Bounds {
             origin: gpui::point(ScaledPixels(0.0), ScaledPixels(0.0)),
             size: Size {
@@ -2692,7 +2827,7 @@ mod tests {
 
     #[test]
     fn generated_shadow_shader_renders_soft_falloff() {
-        let mut renderer = MetalHeadlessRenderer::new();
+        let mut renderer = MetalHeadlessRenderer::new().unwrap();
         let full = Bounds {
             origin: gpui::point(ScaledPixels(0.0), ScaledPixels(0.0)),
             size: Size {
@@ -2755,7 +2890,7 @@ mod tests {
 
     #[test]
     fn generated_blur_shader_softens_backdrop() {
-        let mut renderer = MetalHeadlessRenderer::new();
+        let mut renderer = MetalHeadlessRenderer::new().unwrap();
         let full = Bounds {
             origin: gpui::point(ScaledPixels(0.0), ScaledPixels(0.0)),
             size: Size {
@@ -2827,7 +2962,7 @@ mod tests {
 
     #[test]
     fn generated_sprite_shader_blends_opacity() {
-        let mut renderer = MetalHeadlessRenderer::new();
+        let mut renderer = MetalHeadlessRenderer::new().unwrap();
         let key = AtlasKey::Image(RenderImageParams {
             image_id: ImageId(0),
             frame_index: 0,
@@ -2935,7 +3070,7 @@ mod tests {
 
     #[test]
     fn generated_path_shader_fills_and_antialiases() {
-        let mut renderer = MetalHeadlessRenderer::new();
+        let mut renderer = MetalHeadlessRenderer::new().unwrap();
         let mut path = Path::new(gpui::point(px(1.0), px(1.0)));
         path.line_to(gpui::point(px(7.0), px(1.0)));
         path.line_to(gpui::point(px(4.0), px(7.0)));

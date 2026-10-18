@@ -3,6 +3,11 @@
 
 pub use gpui::Platform;
 
+/// What `open_window` fails with on macOS when the device cannot build the Metal
+/// renderer. Find it with `anyhow::Error::downcast_ref`.
+#[cfg(target_os = "macos")]
+pub use gpui_apple::metal_renderer::MetalRendererError;
+
 use std::rc::Rc;
 
 /// Returns a background executor for the current platform.
@@ -82,17 +87,17 @@ pub fn current_platform(headless: bool) -> Rc<dyn Platform> {
 
 /// Returns a new [`HeadlessRenderer`] for the current platform, if available.
 ///
-/// macOS renders with Metal. Linux, FreeBSD and Windows render with WGPU under the
-/// `test-support` feature, and panic when no GPU adapter is found; a software one,
-/// such as Mesa's lavapipe or WARP, is enough.
+/// macOS renders with Metal, and panics when the device cannot build the renderer.
+/// Linux, FreeBSD and Windows render with WGPU under the `test-support` feature, and
+/// panic when no GPU adapter is found; a software one, such as Mesa's lavapipe or
+/// WARP, is enough.
 #[cfg(any(feature = "bench-support", feature = "test-support"))]
 pub fn current_headless_renderer() -> Option<Box<dyn gpui::PlatformHeadlessRenderer>> {
     #[cfg(target_os = "macos")]
     {
-        Some(
-            Box::new(gpui_apple::metal_renderer::MetalHeadlessRenderer::new())
-                as Box<dyn gpui::PlatformHeadlessRenderer>,
-        )
+        let renderer = gpui_apple::metal_renderer::MetalHeadlessRenderer::new()
+            .unwrap_or_else(|error| panic!("no headless Metal renderer: {error}"));
+        Some(Box::new(renderer) as Box<dyn gpui::PlatformHeadlessRenderer>)
     }
 
     #[cfg(all(
