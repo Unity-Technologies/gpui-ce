@@ -215,23 +215,102 @@ fn windows_default_renderer_has_no_wgpu_path() {
     let manifest_path = root.join("crates/gpui_windows/Cargo.toml");
     let manifest = fs::read_to_string(&manifest_path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", manifest_path.display()));
-    assert!(
-        !manifest.contains("gpui_wgpu") && !manifest.contains("wgpu.workspace"),
-        "{} must not pull WGPU into the native Windows renderer",
-        manifest_path.display()
-    );
+    // WGPU may only be an optional dependency that the non-default `wgpu` feature
+    // turns on; a default build of the Windows platform never compiles it.
+    let mut in_dependencies = false;
+    for line in manifest.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_dependencies = line.ends_with("dependencies]");
+            continue;
+        }
+        let declares_dependency = in_dependencies
+            && [
+                "gpui_wgpu ",
+                "gpui_wgpu=",
+                "gpui_wgpu.",
+                "wgpu ",
+                "wgpu=",
+                "wgpu.",
+            ]
+            .iter()
+            .any(|prefix| line.starts_with(prefix));
+        assert!(
+            !declares_dependency || line.contains("optional = true"),
+            "{} must declare WGPU only as an optional dependency: {line}",
+            manifest_path.display()
+        );
+    }
+    for (name, enables) in manifest_features(&manifest) {
+        if name == "wgpu" {
+            continue;
+        }
+        assert!(
+            !enables.contains("dep:gpui_wgpu")
+                && !enables.contains("\"gpui_wgpu/")
+                && !enables.contains("\"wgpu\""),
+            "{}: feature `{name}` must not enable WGPU (only `wgpu` may, and only \
+             `gpui_wgpu?/` weak references are allowed elsewhere): {enables}",
+            manifest_path.display()
+        );
+        if name == "default" {
+            assert!(
+                !enables.contains("wgpu"),
+                "{}: the default features must not mention WGPU: {enables}",
+                manifest_path.display()
+            );
+        }
+    }
 
+    // Without the feature, every window draws with DirectX.
     let window_path = root.join("crates/gpui_windows/src/window.rs");
     let window = fs::read_to_string(&window_path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", window_path.display()));
+    let directx_without_wgpu = window.lines().map(str::trim).collect::<Vec<_>>();
     assert!(
-        window.contains("RefCell<DirectXRenderer>"),
-        "{} must use the native DirectX renderer",
+        directx_without_wgpu.windows(2).any(|pair| {
+            pair[0] == "#[cfg(not(feature = \"wgpu\"))]"
+                && pair[1].starts_with("let renderer = DirectXRenderer::new(")
+        }),
+        "{} must create the native DirectX renderer when the `wgpu` feature is off",
         window_path.display()
     );
-    assert!(
-        !window.contains("feature = \"wgpu\"") && !window.contains("WgpuRenderer"),
-        "{} must not contain a dormant WGPU renderer path",
-        window_path.display()
-    );
+}
+
+/// The `[features]` table of a manifest as (name, enabled list) pairs, with each
+/// list's lines joined. Enough for the audit above without a TOML parser.
+fn manifest_features(manifest: &str) -> Vec<(String, String)> {
+    let mut features = Vec::new();
+    let mut in_features = false;
+    let mut current: Option<(String, String)> = None;
+    for line in manifest.lines().map(str::trim) {
+        if line.starts_with('[') && !line.starts_with("[\"") {
+            if let Some(done) = current.take() {
+                features.push(done);
+            }
+            in_features = line == "[features]";
+            continue;
+        }
+        if !in_features || line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((name, rest)) = line.split_once('=')
+            && current.is_none()
+        {
+            current = Some((name.trim().to_string(), rest.trim().to_string()));
+        } else if let Some((_, body)) = current.as_mut() {
+            body.push(' ');
+            body.push_str(line);
+        }
+        if current
+            .as_ref()
+            .is_some_and(|(_, body)| body.trim_end().ends_with(']'))
+            && let Some(done) = current.take()
+        {
+            features.push(done);
+        }
+    }
+    if let Some(done) = current.take() {
+        features.push(done);
+    }
+    features
 }
