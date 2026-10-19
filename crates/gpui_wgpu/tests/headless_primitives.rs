@@ -9,7 +9,7 @@ use gpui::{
     Quad, RenderImageParams, RenderSvgParams, ScaledFilter, ScaledPixels, Scene, ShaderBool,
     Shadow, Size, Underline, checkerboard, linear_color_stop, linear_gradient, solid_background,
 };
-use gpui_ce_wgpu::WgpuHeadlessRenderer;
+use gpui_ce_wgpu::{WgpuContext, WgpuHeadlessRenderer};
 use smallvec::smallvec;
 use std::borrow::Cow;
 
@@ -56,6 +56,56 @@ fn the_headless_context_handle_lends_the_renderers_own_device() {
     assert!(std::ptr::eq(handle.device(), &*device));
     assert!(std::ptr::eq(handle.queue(), &*queue));
     assert!(!handle.device_lost());
+}
+
+#[test]
+fn renderers_on_one_context_share_its_device_and_render_alike() {
+    let context = WgpuContext::new_headless(None).expect("headless context");
+    let mut first = WgpuHeadlessRenderer::with_context(&context).expect("first renderer");
+    let mut second = WgpuHeadlessRenderer::with_context(&context).expect("second renderer");
+    let mut own_device = WgpuHeadlessRenderer::new().expect("renderer with its own device");
+
+    let first_handle = first.gpu_context_info().expect("a live device");
+    let second_handle = second.gpu_context_info().expect("a live device");
+    assert!(first_handle.is_same_device(&second_handle));
+    assert!(std::ptr::eq(second_handle.device(), &*context.device));
+    assert!(std::ptr::eq(second_handle.queue(), &*context.queue));
+    assert!(!first_handle.is_same_device(&own_device.gpu_context_info().expect("a live device")));
+
+    let scene = triangle_scene();
+    let expected = own_device
+        .render_scene_to_image(&scene, TARGET)
+        .expect("frame on its own device");
+    for renderer in [&mut first, &mut second] {
+        let image = renderer
+            .render_scene_to_image(&scene, TARGET)
+            .expect("frame on the shared device");
+        assert!(
+            image == expected,
+            "a shared device renders a different frame"
+        );
+    }
+}
+
+fn triangle_scene() -> Scene {
+    let mut scene = Scene::default();
+    scene.insert_primitive(Quad {
+        bounds: bounds(0.0, 0.0, 310.0, 100.0),
+        content_mask: full_mask(),
+        background: solid_background(gpui::black()),
+        ..Default::default()
+    });
+    let mut builder = gpui::PathBuilder::fill();
+    builder.move_to(gpui::point(gpui::px(20.0), gpui::px(20.0)));
+    builder.line_to(gpui::point(gpui::px(80.0), gpui::px(20.0)));
+    builder.line_to(gpui::point(gpui::px(50.0), gpui::px(80.0)));
+    builder.close();
+    let mut path = builder.build().expect("triangle").scale(1.0);
+    path.content_mask = full_mask();
+    path.color = solid_background(gpui::white());
+    scene.insert_primitive(path);
+    scene.finish();
+    scene
 }
 
 fn bounds(x: f32, y: f32, w: f32, h: f32) -> Bounds<ScaledPixels> {
