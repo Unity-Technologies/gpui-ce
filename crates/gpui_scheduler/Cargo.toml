@@ -1,9 +1,9 @@
 [package]
 name = "gpui_ce_scheduler"
-version = "0.2.2"
+version = "0.2.2-unity.20261019"
 edition = "2024"
 license = "Apache-2.0"
-publish = true
+publish.workspace = true
 description = "Async task scheduler/executor for gpui-ce (vendored from Zed)."
 
 [lib]

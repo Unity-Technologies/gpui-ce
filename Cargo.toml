@@ -33,7 +33,7 @@ resolver = "3"
 edition = "2024"
 authors = ["Nathan Sobo <nathan@zed.dev>"]
 description = "A community fork of Zed's GPU-accelerated UI framework"
-publish = true
+publish = ["unity"]
 license = "Apache-2.0"
 homepage = "https://gpui-ce.github.io/"
 readme = "README.md"
@@ -48,7 +48,7 @@ anyhow = "1.0.86"
 async-task = "4.7"
 backtrace = "0.3"
 bitflags = "2.6.0"
-collections = { path = "crates/gpui_collections", version = "0.2.2", package = "gpui_ce_collections" }
+collections = { path = "crates/gpui_collections", version = "=0.2.2-unity.20261019", registry = "unity", package = "gpui_ce_collections" }
 dunce = "1.0"
 etagere = "0.2"
 fontique = { version = "0.11.1", default-features = false }
@@ -106,8 +106,8 @@ chrono = { version = "0.4", features = ["serde"] }
 profiling = "1"
 rand = "0.10.3"
 regex = "1.5"
-refineable = { path = "crates/gpui_refineable", version = "0.2.2", package = "gpui_ce_refineable" }
-scheduler = { path = "crates/gpui_scheduler", version = "0.2.2", package = "gpui_ce_scheduler" }
+refineable = { path = "crates/gpui_refineable", version = "=0.2.2-unity.20261019", registry = "unity", package = "gpui_ce_refineable" }
+scheduler = { path = "crates/gpui_scheduler", version = "=0.2.2-unity.20261019", registry = "unity", package = "gpui_ce_scheduler" }
 schemars = { version = "1.0", features = ["indexmap2"] }
 serde = { version = "1.0.221", features = ["derive", "rc"] }
 serde_json = { version = "1.0.144", features = ["preserve_order", "raw_value"] }
@@ -116,7 +116,7 @@ smallvec = { version = "1.6", features = ["union", "const_new"] }
 async-channel = "2.5.0"
 stacksafe = "1.0"
 strum = { version = "0.27.2", features = ["derive"] }
-sum_tree = { path = "crates/gpui_sum_tree", version = "0.2.2", package = "gpui_ce_sum_tree" }
+sum_tree = { path = "crates/gpui_sum_tree", version = "=0.2.2-unity.20261019", registry = "unity", package = "gpui_ce_sum_tree" }
 thiserror = "2.0.12"
 tracing = { version = "0.1.44", features = ["attributes"] }
 hdrhistogram = "7"
@@ -134,7 +134,7 @@ core-graphics = "0.24"
 core-text = "21"
 core-video = { version = "0.5.2", features = ["metal"] }
 foreign-types = "0.5"
-media = { path = "crates/gpui_media", version = "0.2.2", package = "gpui_ce_media" }
+media = { path = "crates/gpui_media", version = "=0.2.2-unity.20261019", registry = "unity", package = "gpui_ce_media" }
 objc = "0.2"
 objc2 = "0.6"
 objc2-foundation = { version = "=0.3.2", default-features = false, features = [
@@ -192,15 +192,17 @@ ashpd = { version = "0.13", default-features = false, features = [
 ] }
 libc = "0.2"
 smol = "2.0"
-util = { path = "crates/gpui_zed_util", version = "0.2.2", package = "gpui_ce_zed_util" }
+util = { path = "crates/gpui_zed_util", version = "=0.2.2-unity.20261019", registry = "unity", package = "gpui_ce_zed_util" }
 wgpu = "30.0.1"
+# The crates.io release, not a git pin: `cargo publish` rejects git
+# dependencies, and the Unity registry publish needs every dependency in a
+# registry. Exact, because wgsl-rs is pre-1.0 and its betas change the API.
 # No `validation` here: it only backs the `#[cfg(test)]` validation tests the
-# `#[wgsl]` macro generates, and it links wgsl-rs's own naga (29, behind this
-# workspace's), so enabling it workspace-wide put a second naga into every
-# consumer's normal build. gpui_render, the one crate with `#[wgsl]` modules,
-# enables it as a dev-dependency instead, and its build.rs already validates
-# every pipeline's WGSL with this workspace's naga on every build.
-wgsl-rs = { git = "https://github.com/schell/wgsl-rs", rev = "b2de16a1b81e67d76bc265c296184f882864badb", default-features = false }
+# `#[wgsl]` macro generates, so it pulls naga into every consumer's normal build
+# for nothing. gpui_render, the one crate with `#[wgsl]` modules, enables it as
+# a dev-dependency instead, and its build.rs already validates every pipeline's
+# WGSL with this workspace's naga on every build.
+wgsl-rs = { version = "=0.1.0-beta.6", default-features = false }
 criterion = { version = "0.5", features = ["html_reports"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = [
   "objc2-core-foundation",
@@ -255,23 +257,23 @@ objc2-screen-capture-kit = { version = "0.3", default-features = false, features
 semver = { version = "1.0", features = ["serde"] }
 windows-core = "0.62.2"
 tokio = { version = "1" }
-gpui_util = { path = "crates/gpui_ce_util", version = "0.2.6", package = "gpui_ce_util" }
+gpui_util = { path = "crates/gpui_ce_util", version = "=0.2.6-unity.20261019", registry = "unity", package = "gpui_ce_util" }
 
-gpui = { path = "./crates/gpui/", version = "0.2.2", package = "gpui-ce", default-features = false }
-gpui_render = { path = "./crates/gpui_render/", version = "0.1.0", package = "gpui_ce_render" }
-gpui_platform = { path = "./crates/gpui_platform/", version = "0.1.0", package = "gpui_ce_platform" }
-gpui_linux = { path = "./crates/gpui_linux/", version = "0.1.0", package = "gpui_ce_linux" }
-gpui_macos = { path = "./crates/gpui_macos/", version = "0.1.0", package = "gpui_ce_macos" }
-gpui_apple = { path = "./crates/gpui_apple/", version = "0.1.0", package = "gpui_ce_apple" }
-gpui_windows = { path = "./crates/gpui_windows/", version = "0.1.0", package = "gpui_ce_windows" }
-gpui_web = { path = "./crates/gpui_web/", version = "0.1.0", package = "gpui_ce_web" }
-gpui_parley = { path = "./crates/gpui_ce_parley/", version = "0.1.0", package = "gpui_ce_parley", default-features = false }
+gpui = { path = "./crates/gpui/", version = "=0.2.2-unity.20261019", registry = "unity", package = "gpui-ce", default-features = false }
+gpui_render = { path = "./crates/gpui_render/", version = "=0.1.0-unity.20261019", registry = "unity", package = "gpui_ce_render" }
+gpui_platform = { path = "./crates/gpui_platform/", version = "=0.1.0-unity.20261019", registry = "unity", package = "gpui_ce_platform" }
+gpui_linux = { path = "./crates/gpui_linux/", version = "=0.1.0-unity.20261019", registry = "unity", package = "gpui_ce_linux" }
+gpui_macos = { path = "./crates/gpui_macos/", version = "=0.1.0-unity.20261019", registry = "unity", package = "gpui_ce_macos" }
+gpui_apple = { path = "./crates/gpui_apple/", version = "=0.1.0-unity.20261019", registry = "unity", package = "gpui_ce_apple" }
+gpui_windows = { path = "./crates/gpui_windows/", version = "=0.1.0-unity.20261019", registry = "unity", package = "gpui_ce_windows" }
+gpui_web = { path = "./crates/gpui_web/", version = "=0.1.0-unity.20261019", registry = "unity", package = "gpui_ce_web" }
+gpui_parley = { path = "./crates/gpui_ce_parley/", version = "=0.1.0-unity.20261019", registry = "unity", package = "gpui_ce_parley", default-features = false }
 
-gpui_wgpu = { path = "./crates/gpui_wgpu/", version = "0.1.0", package = "gpui_ce_wgpu" }
+gpui_wgpu = { path = "./crates/gpui_wgpu/", version = "=0.1.0-unity.20261019", registry = "unity", package = "gpui_ce_wgpu" }
 
-gpui_macros = { path = "./crates/gpui_macros/", version = "0.1.0", package = "gpui_ce_macros" }
-gpui_shared_string = { path = "./crates/gpui_shared_string/", version = "0.1.0", package = "gpui_ce_shared_string" }
-gpui_tokio = { path = "./crates/gpui_tokio/", version = "0.1.0", package = "gpui_ce_tokio" }
+gpui_macros = { path = "./crates/gpui_macros/", version = "=0.1.0-unity.20261019", registry = "unity", package = "gpui_ce_macros" }
+gpui_shared_string = { path = "./crates/gpui_shared_string/", version = "=0.1.0-unity.20261019", registry = "unity", package = "gpui_ce_shared_string" }
+gpui_tokio = { path = "./crates/gpui_tokio/", version = "=0.1.0-unity.20261019", registry = "unity", package = "gpui_ce_tokio" }
 
 [workspace.dependencies.windows]
 version = "0.62.2"

@@ -1,9 +1,9 @@
 [package]
 name = "gpui_ce_util"
-version = "0.2.6"
+version = "0.2.6-unity.20261019"
 edition = "2024"
 license = "Apache-2.0"
-publish = true
+publish.workspace = true
 description = "Utility structs and functions used by gpui-ce (vendored from Zed's gpui_util)."
 repository = "https://github.com/gpui-ce/gpui-ce"
 

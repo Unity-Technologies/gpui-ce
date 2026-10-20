@@ -1,9 +1,9 @@
 [package]
 name = "gpui_ce_derive_refineable"
-version = "0.2.2"
+version = "0.2.2-unity.20261019"
 edition = "2024"
 license = "Apache-2.0"
-publish = true
+publish.workspace = true
 description = "Derive macro for gpui-ce's Refineable (vendored from Zed)."
 
 [lib]
