@@ -1,6 +1,6 @@
 [package]
 name = "gpui_ce_render"
-version = "0.1.0"
+version = "0.1.0-unity.20261019"
 description.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -13,7 +13,7 @@ workspace = true
 path = "src/gpui_render.rs"
 
 [dependencies]
-gpui = { path = "../gpui", version = "0.2.2", package = "gpui-ce", default-features = false }
+gpui = { path = "../gpui", version = "=0.2.2-unity.20261019", registry = "unity", package = "gpui-ce", default-features = false }
 smallvec.workspace = true
 wgsl-rs.workspace = true
 
@@ -31,12 +31,12 @@ naga-old = { package = "naga", version = "24.0.0", features = [
   "hlsl-out",
   "wgsl-in",
 ] }
-gpui = { path = "../gpui", version = "0.2.2", package = "gpui-ce", default-features = false }
+gpui = { path = "../gpui", version = "=0.2.2-unity.20261019", registry = "unity", package = "gpui-ce", default-features = false }
 wgsl-rs.workspace = true
 
 [dev-dependencies]
 naga = { version = "30.0.1", features = ["wgsl-in"] }
 # The `#[wgsl]` modules' generated `#[cfg(test)]` validation tests call
 # `Source::validate`, which only exists with this feature. Enabling it here
-# keeps those tests while leaving wgsl-rs's own naga out of normal builds.
+# keeps those tests while leaving naga out of wgsl-rs's normal builds.
 wgsl-rs = { workspace = true, features = ["validation"] }
