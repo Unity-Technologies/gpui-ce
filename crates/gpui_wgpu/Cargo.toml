@@ -1,6 +1,6 @@
 [package]
 name = "gpui_ce_wgpu"
-version = "0.1.0"
+version = "0.1.0-unity.20261019"
 description.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -22,7 +22,7 @@ custom-gpu = ["gpui/custom-gpu"]
 wgpu-surfaces = ["gpui/wgpu-surfaces"]
 
 [dependencies]
-gpui = { path = "../gpui", version = "0.2.2", package = "gpui-ce", default-features = false }
+gpui = { path = "../gpui", version = "=0.2.2-unity.20261019", registry = "unity", package = "gpui-ce", default-features = false }
 gpui_render.workspace = true
 anyhow.workspace = true
 collections.workspace = true
@@ -69,7 +69,9 @@ js-sys.workspace = true
 bytemuck = { version = "1", features = ["derive"] }
 criterion.workspace = true
 env_logger.workspace = true
-gpui_platform = { workspace = true, features = ["wayland", "x11", "test-support"] }
+# Path-only, so `cargo publish` strips it: gpui_ce_platform depends on this
+# crate, and a versioned edge back would make a cycle no publish order satisfies.
+gpui_platform = { path = "../gpui_platform", package = "gpui_ce_platform", features = ["wayland", "x11", "test-support"] }
 naga = { version = "30.0.1", features = ["wgsl-in"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
