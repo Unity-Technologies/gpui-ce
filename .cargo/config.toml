@@ -59,3 +59,11 @@ MACOSX_DEPLOYMENT_TARGET = "10.15.7"
 # The component workspace is independently resolved, but CI runs some of its
 # checks from this repository root. Keep its unpublished GPUI CE dependencies
 # local during those checks; published component manifests still use crates.io.
+
+# Unity's internal Cargo registry. The Unity Hub consumes this fork from here,
+# because `cargo publish` rejects the git dependency the Hub otherwise uses.
+# The Hub's own CI publishes a pinned commit of this repository with
+# `cargo publish --workspace --registry unity --exclude perf --exclude gpui-ce-fonts`
+# and `CARGO_REGISTRIES_UNITY_TOKEN` set.
+[registries.unity]
+index = "sparse+https://unity3d.jfrog.io/artifactory/api/cargo/hub-cargo-prod-local/index/"
