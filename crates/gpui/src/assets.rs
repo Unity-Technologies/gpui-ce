@@ -267,7 +267,7 @@ pub(crate) fn downscaled_image_size(source: Size<DevicePixels>, level: u8) -> Si
 pub(crate) fn downscale_bgra(bytes: &[u8], source: Size<DevicePixels>, level: u8) -> Vec<u8> {
     let mut width = source.width.0.max(0) as usize;
     let mut height = source.height.0.max(0) as usize;
-    let mut pixels = bytes.to_vec();
+    let mut pixels = Cow::Borrowed(bytes);
     for _ in 0..level {
         if width <= 1 && height <= 1 {
             break;
@@ -298,11 +298,11 @@ pub(crate) fn downscale_bgra(bytes: &[u8], source: Size<DevicePixels>, level: u8
                 out[3] = ((alpha + count / 2) / count) as u8;
             }
         }
-        pixels = half;
+        pixels = Cow::Owned(half);
         width = half_width;
         height = half_height;
     }
-    pixels
+    pixels.into_owned()
 }
 
 /// A cached and processed image, in BGRA format
