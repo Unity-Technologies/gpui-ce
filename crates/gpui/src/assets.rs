@@ -269,33 +269,31 @@ pub(crate) fn downscale_bgra(bytes: &[u8], source: Size<DevicePixels>, level: u8
     let mut height = source.height.0.max(0) as usize;
     let mut pixels = Cow::Borrowed(bytes);
     for _ in 0..level {
-        if width <= 1 && height <= 1 {
+        if width == 0 || height == 0 || (width <= 1 && height <= 1) {
             break;
         }
         let half_width = width.div_ceil(2);
         let half_height = height.div_ceil(2);
         let mut half = vec![0u8; half_width * half_height * 4];
-        for y in 0..half_height {
-            for x in 0..half_width {
-                let mut color = [0u32; 3];
-                let mut alpha = 0u32;
-                let mut count = 0u32;
-                for source_y in (2 * y)..(2 * y + 2).min(height) {
-                    for source_x in (2 * x)..(2 * x + 2).min(width) {
-                        let pixel = &pixels[(source_y * width + source_x) * 4..][..4];
-                        let a = u32::from(pixel[3]);
-                        for (sum, channel) in color.iter_mut().zip(&pixel[..3]) {
-                            *sum += u32::from(*channel) * a;
-                        }
-                        alpha += a;
-                        count += 1;
-                    }
+        for (y, out_row) in half.chunks_exact_mut(half_width * 4).enumerate() {
+            let out_row = out_row.as_chunks_mut::<4>().0;
+            let row = |row: usize| pixels[row * width * 4..][..width * 4].as_chunks::<4>().0;
+            let (top_pairs, top_rest) = row(2 * y).as_chunks::<2>();
+            if 2 * y + 1 < height {
+                let (bottom_pairs, bottom_rest) = row(2 * y + 1).as_chunks::<2>();
+                for ((out, [a, b]), [c, d]) in out_row.iter_mut().zip(top_pairs).zip(bottom_pairs) {
+                    *out = average_bgra([a, b, c, d]);
                 }
-                let out = &mut half[(y * half_width + x) * 4..][..4];
-                for (channel, sum) in out.iter_mut().zip(color) {
-                    *channel = (sum + alpha / 2).checked_div(alpha).unwrap_or(0) as u8;
+                if let ([a], [c]) = (top_rest, bottom_rest) {
+                    out_row[half_width - 1] = average_bgra([a, c]);
                 }
-                out[3] = ((alpha + count / 2) / count) as u8;
+            } else {
+                for (out, [a, b]) in out_row.iter_mut().zip(top_pairs) {
+                    *out = average_bgra([a, b]);
+                }
+                if let [a] = top_rest {
+                    out_row[half_width - 1] = average_bgra([a]);
+                }
             }
         }
         pixels = Cow::Owned(half);
@@ -303,6 +301,33 @@ pub(crate) fn downscale_bgra(bytes: &[u8], source: Size<DevicePixels>, level: u8
         height = half_height;
     }
     pixels.into_owned()
+}
+
+/// The alpha-weighted average of `N` straight-alpha BGRA pixels, rounded to nearest.
+///
+/// A fixed `N` lets the compiler unroll the sums. Fully opaque blocks, the common case for
+/// photos and avatars, skip the per-channel division by total alpha.
+#[inline(always)]
+fn average_bgra<const N: usize>(pixels: [&[u8; 4]; N]) -> [u8; 4] {
+    let count = N as u32;
+    let alpha: u32 = pixels.iter().map(|pixel| u32::from(pixel[3])).sum();
+    let mut out = [0u8; 4];
+    if alpha == 255 * count {
+        for (channel, out) in out[..3].iter_mut().enumerate() {
+            let sum: u32 = pixels.iter().map(|pixel| u32::from(pixel[channel])).sum();
+            *out = ((sum + count / 2) / count) as u8;
+        }
+    } else {
+        for (channel, out) in out[..3].iter_mut().enumerate() {
+            let sum: u32 = pixels
+                .iter()
+                .map(|pixel| u32::from(pixel[channel]) * u32::from(pixel[3]))
+                .sum();
+            *out = (sum + alpha / 2).checked_div(alpha).unwrap_or(0) as u8;
+        }
+    }
+    out[3] = ((alpha + count / 2) / count) as u8;
+    out
 }
 
 /// A cached and processed image, in BGRA format

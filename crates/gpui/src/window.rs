@@ -1,24 +1,24 @@
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AtlasTile, AvailableSpace, BackdropFilter, Background, BorderStyle, Bounds,
-    BoxShadow, Capslock, Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
-    DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
-    EntityId, EventEmitter, FileDropEvent, Filter, FilterBoundary, FontId, Global, GlobalElementId,
-    GlyphId, GlyphRenderMode, GpuSpecs, InputHandler, IntoElement, IsZero, KeyBinding, KeyContext,
-    KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId, Lerp, LineLayoutIndex, Modifiers,
-    ModifiersChangedEvent, MonochromeSprite, Motion, MouseButton, MouseEvent, MouseMoveEvent,
-    MouseUpEvent, PaintSurface, Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
-    PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, Priority, PromptButton,
-    PromptLevel, Quad, RasterizedGlyphFormat, Render, RenderGlyphParams, RenderImage,
-    RenderImageParams, RenderSvgParams, Replay, ResizeEdge, ResolvedDirection,
-    SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledFilter, ScaledPixels,
-    Scene, Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite, SubscriberSet,
-    Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task,
-    TextInputConfiguration, TextInputStateChange, TextRenderingMode, TextStyle,
-    TextStyleRefinement, ThermalState, TransformationMatrix, Transition, TransitionState,
-    Underline, UnderlineStyle, UnicodeBidi, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem,
-    downscale_bgra, downscaled_image_size,
+    AsyncApp, AsyncWindowContext, AtlasTile, AvailableSpace, BackdropFilter, Background,
+    BorderStyle, Bounds, BoxShadow, Capslock, Context, Corners, CursorHideMode, CursorStyle,
+    Decorations, DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId,
+    Edges, Effect, Entity, EntityId, EventEmitter, FileDropEvent, Filter, FilterBoundary, FontId,
+    Global, GlobalElementId, GlyphId, GlyphRenderMode, GpuSpecs, ImageId, InputHandler,
+    IntoElement, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent,
+    LayoutId, Lerp, LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite, Motion,
+    MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, PaintSurface, Path, Pixels,
+    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
+    PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, RasterizedGlyphFormat, Render,
+    RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge,
+    ResolvedDirection, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y,
+    ScaledFilter, ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle, Style,
+    SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab, SystemWindowTabController,
+    TabStopMap, TaffyLayoutEngine, Task, TextInputConfiguration, TextInputStateChange,
+    TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState, TransformationMatrix,
+    Transition, TransitionState, Underline, UnderlineStyle, UnicodeBidi, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations, WindowOptions,
+    WindowParams, WindowTextSystem, downscale_bgra, downscaled_image_size,
     gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer},
     image_downscale_level,
     interactive::TouchEvent,
@@ -1302,6 +1302,11 @@ pub struct Window {
     is_resizable: bool,
     is_minimizable: bool,
     sprite_atlas: Arc<dyn PlatformAtlas>,
+    /// Box-filtered copies of oversized images being made off the UI thread, by image and
+    /// downscale level. See [`Window::paint_image`].
+    pending_image_downscales: FxHashMap<(ImageId, u8), PendingImageDownscale>,
+    /// Runs those copies and brings each back to this window when it is done.
+    async_app: AsyncApp,
     text_system: Arc<WindowTextSystem>,
     text_rendering_mode: Rc<Cell<TextRenderingMode>>,
     rem_size: Pixels,
@@ -1387,6 +1392,18 @@ pub struct Window {
     debug_frame_overlay: crate::debug_overlay::DebugFrameOverlay,
     pub(crate) a11y: A11y,
 }
+
+/// A box-filtered copy of every frame of an image, being made on the background executor.
+struct PendingImageDownscale {
+    /// The views that painted the image while it was pending, to repaint once it is uploaded.
+    /// Empty when it was painted outside any view; the whole window is redrawn then.
+    views: SmallVec<[EntityId; 1]>,
+    task: Task<()>,
+}
+
+/// Images of up to this many pixels are shrunk during paint, which takes microseconds, so
+/// they never miss a frame. Larger ones are shrunk on the background executor.
+const INLINE_IMAGE_DOWNSCALE_MAX_PIXELS: i64 = 128 * 128;
 
 #[derive(Clone, Debug, Default)]
 struct ModifierState {
@@ -2067,6 +2084,8 @@ impl Window {
             is_resizable,
             is_minimizable,
             sprite_atlas,
+            pending_image_downscales: FxHashMap::default(),
+            async_app: cx.to_async(),
             text_system,
             text_rendering_mode: cx.text_rendering_mode.clone(),
             rem_size: px(16.),
@@ -5105,6 +5124,10 @@ impl Window {
     /// The visible region rendered is `bounds.intersect(&image_bounds)`, with `corner_radii`
     /// applied to `bounds`.
     /// `corner_smoothing` ranges from circular corners at `0.0` to maximum smoothing at `1.0`.
+    ///
+    /// An image drawn well below its pixel size is drawn from a box-filtered copy. A large
+    /// image's copy is made off the UI thread: until it is ready, the image is drawn from a copy
+    /// already uploaded at another size, or not at all, and the view is repainted after.
     pub fn paint_image(
         &mut self,
         bounds: Bounds<Pixels>,
@@ -5138,21 +5161,38 @@ impl Window {
             downscale_level,
         };
 
-        let tile = self
+        let downscale_inline = downscale_level == 0
+            || i64::from(source_size.width.0) * i64::from(source_size.height.0)
+                <= INLINE_IMAGE_DOWNSCALE_MAX_PIXELS;
+        let tile = if downscale_inline {
+            self.sprite_atlas
+                .get_or_insert_with(&params.into(), &mut || {
+                    let bytes = data
+                        .as_bytes(frame_index)
+                        .expect("It's the caller's job to pass a valid frame index");
+                    if downscale_level == 0 {
+                        return Ok(Some((source_size, Cow::Borrowed(bytes))));
+                    }
+                    Ok(Some((
+                        downscaled_image_size(source_size, downscale_level),
+                        Cow::Owned(downscale_bgra(bytes, source_size, downscale_level)),
+                    )))
+                })?
+                .expect("Callback above only returns Some")
+        } else if let Some(tile) = self
             .sprite_atlas
-            .get_or_insert_with(&params.into(), &mut || {
-                let bytes = data
-                    .as_bytes(frame_index)
-                    .expect("It's the caller's job to pass a valid frame index");
-                if downscale_level == 0 {
-                    return Ok(Some((source_size, Cow::Borrowed(bytes))));
-                }
-                Ok(Some((
-                    downscaled_image_size(source_size, downscale_level),
-                    Cow::Owned(downscale_bgra(bytes, source_size, downscale_level)),
-                )))
-            })?
-            .expect("Callback above only returns Some");
+            .get_or_insert_with(&params.clone().into(), &mut || Ok(None))?
+        {
+            tile
+        } else {
+            // Shrinking a large image takes milliseconds, so it happens off the UI thread. Until
+            // it lands, draw a copy already uploaded at another size, or nothing.
+            self.downscale_image_in_background(&data, downscale_level);
+            let Some(tile) = self.nearest_uploaded_image_tile(params, source_size)? else {
+                return Ok(());
+            };
+            tile
+        };
 
         let visible_bounds_snapped = self.snap_bounds(visible_bounds);
 
@@ -5234,8 +5274,131 @@ impl Window {
         });
     }
 
+    /// Starts making a box-filtered copy of every frame of `data` at `downscale_level` on the
+    /// background executor, unless one is already being made. The views that painted the image
+    /// meanwhile are notified once the copy is in the atlas, so they paint it.
+    fn downscale_image_in_background(&mut self, data: &Arc<RenderImage>, downscale_level: u8) {
+        let view = self.rendered_entity_stack.last().copied();
+        let key = (data.id, downscale_level);
+        if let Some(pending) = self.pending_image_downscales.get_mut(&key) {
+            if let Some(view) = view
+                && !pending.views.contains(&view)
+            {
+                pending.views.push(view);
+            }
+            return;
+        }
+
+        let mut cx = self.async_app.clone();
+        let background = cx.background_executor().clone();
+        let handle = self.handle;
+        let data = data.clone();
+        let task = cx.foreground_executor().clone().spawn(async move {
+            let frames = background
+                .spawn(async move {
+                    (0..data.frame_count())
+                        .map(|frame_index| {
+                            let size = data.size(frame_index);
+                            let bytes = data
+                                .as_bytes(frame_index)
+                                .expect("frame_index is below frame_count");
+                            (
+                                downscaled_image_size(size, downscale_level),
+                                downscale_bgra(bytes, size, downscale_level),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .await;
+            handle
+                .update(&mut cx, |_, window, cx| {
+                    window.finish_image_downscale(key, frames, cx)
+                })
+                .ok();
+        });
+        self.pending_image_downscales.insert(
+            key,
+            PendingImageDownscale {
+                views: view.into_iter().collect(),
+                task,
+            },
+        );
+    }
+
+    /// Uploads the frames a background downscale made and repaints the views waiting on them.
+    fn finish_image_downscale(
+        &mut self,
+        (image_id, downscale_level): (ImageId, u8),
+        frames: Vec<(Size<DevicePixels>, Vec<u8>)>,
+        cx: &mut App,
+    ) {
+        // A missing entry means `drop_image` ran after the copy was made; it stays out.
+        let Some(pending) = self
+            .pending_image_downscales
+            .remove(&(image_id, downscale_level))
+        else {
+            return;
+        };
+        for (frame_index, (size, bytes)) in frames.iter().enumerate() {
+            let params = RenderImageParams {
+                image_id,
+                frame_index,
+                downscale_level,
+            };
+            self.sprite_atlas
+                .get_or_insert_with(&params.into(), &mut || {
+                    Ok(Some((*size, Cow::Borrowed(bytes.as_slice()))))
+                })
+                .log_err();
+        }
+        if pending.views.is_empty() {
+            // Painted outside any view, as tests do: redraw everything.
+            self.refresh();
+        }
+        for view in pending.views {
+            cx.notify(view);
+        }
+        // This runs inside that task, so let it finish rather than cancel it.
+        pending.task.detach();
+    }
+
+    /// The tile of the frame `params` names at the downscale level nearest its own that is
+    /// already in the atlas, if any.
+    fn nearest_uploaded_image_tile(
+        &self,
+        params: RenderImageParams,
+        source_size: Size<DevicePixels>,
+    ) -> Result<Option<AtlasTile>> {
+        let wanted = params.downscale_level;
+        let max_level = max_image_downscale_level(source_size);
+        for distance in 1..=wanted.max(max_level - wanted.min(max_level)) {
+            // A larger copy aliases a little; a smaller one blurs a little. Neither for long.
+            let levels = [wanted.checked_sub(distance), wanted.checked_add(distance)];
+            for downscale_level in levels.into_iter().flatten() {
+                if downscale_level > max_level {
+                    continue;
+                }
+                let key = RenderImageParams {
+                    downscale_level,
+                    ..params
+                }
+                .into();
+                if let Some(tile) = self
+                    .sprite_atlas
+                    .get_or_insert_with(&key, &mut || Ok(None))?
+                {
+                    return Ok(Some(tile));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Removes an image from the sprite atlas.
     pub fn drop_image(&mut self, data: Arc<RenderImage>) -> Result<()> {
+        // Cancels any copy still being made, so it never reaches the atlas.
+        self.pending_image_downscales
+            .retain(|(image_id, _), _| *image_id != data.id);
         for frame_index in 0..data.frame_count() {
             // Every size the image was painted at left its own downscaled copy.
             for downscale_level in 0..=max_image_downscale_level(data.size(frame_index)) {
