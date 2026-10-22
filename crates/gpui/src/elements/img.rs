@@ -960,6 +960,71 @@ mod tests {
     }
 
     #[gpui::test]
+    fn oversized_image_uploads_a_copy_near_its_draw_size(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        let image = test_image_with_size(512, 512);
+        window.draw(point(px(0.), px(0.)), size(px(100.), px(100.)), |_, _| {
+            img(ImageSource::Render(image.clone()))
+                .size(px(32.))
+                .into_any_element()
+        });
+
+        let (tile_size, target) = window.update(|window, _| {
+            let sprite = window
+                .rendered_frame
+                .scene
+                .polychrome_sprites
+                .last()
+                .expect("image should paint a sprite");
+            (sprite.tile.bounds.size, 32. * window.scale_factor())
+        });
+        // The 512px source would leave bilinear sampling reading 4 of every 256 pixels.
+        for side in [tile_size.width.0, tile_size.height.0] {
+            let side = side as f32;
+            assert!(
+                side >= target && side < 2. * target,
+                "a {target}px draw uploaded a {side}px tile"
+            );
+        }
+        assert!(window.update(|window, _| window.has_image_atlas_entry(&image)));
+
+        window.update(|window, _| window.drop_image(image.clone()).unwrap());
+        assert!(
+            !window.update(|window, _| window.has_image_atlas_entry(&image)),
+            "dropping the image should free its downscaled copy"
+        );
+    }
+
+    #[gpui::test]
+    fn image_drawn_at_its_own_size_uploads_the_original(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        let scale_factor = window.update(|window, _| window.scale_factor());
+        let side = (64. * scale_factor) as u32;
+        let image = test_image_with_size(side, side);
+        window.draw(point(px(0.), px(0.)), size(px(100.), px(100.)), |_, _| {
+            img(ImageSource::Render(image.clone()))
+                .size(px(64.))
+                .into_any_element()
+        });
+
+        let tile_size = window.update(|window, _| {
+            window
+                .rendered_frame
+                .scene
+                .polychrome_sprites
+                .last()
+                .expect("image should paint a sprite")
+                .tile
+                .bounds
+                .size
+        });
+        assert_eq!(
+            (tile_size.width.0, tile_size.height.0),
+            (side as i32, side as i32)
+        );
+    }
+
+    #[gpui::test]
     fn stale_frame_index_is_clamped_when_image_changes(cx: &mut TestAppContext) {
         let window = cx.add_empty_window();
 
