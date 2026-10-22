@@ -800,7 +800,10 @@ impl From<image::ImageError> for ImageCacheError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ParentElement as _, TestAppContext, canvas, div, point, px, size};
+    use crate::{
+        Context, Entity, ParentElement as _, Render, Scene, TestApp, TestAppContext, TestAppWindow,
+        VisualTestContext, Window, canvas, div, point, px, size,
+    };
     use image::{Frame, ImageBuffer, Rgba};
 
     const TEST_IMG_ID: &str = "test-img";
@@ -959,40 +962,152 @@ mod tests {
         assert_eq!(corner_radius, Some(expected_corner_radius));
     }
 
-    #[gpui::test]
-    fn oversized_image_uploads_a_copy_near_its_draw_size(cx: &mut TestAppContext) {
-        let window = cx.add_empty_window();
-        let image = test_image_with_size(512, 512);
-        window.draw(point(px(0.), px(0.)), size(px(100.), px(100.)), |_, _| {
+    /// Draws `image` at `side` x `side` device pixels and returns the size of every tile the
+    /// frame painted.
+    fn draw_image_at(
+        window: &mut VisualTestContext,
+        image: &Arc<RenderImage>,
+        side: f32,
+    ) -> Vec<(i32, i32)> {
+        let side = side / window.update(|window, _| window.scale_factor());
+        window.draw(point(px(0.), px(0.)), size(px(600.), px(600.)), |_, _| {
             img(ImageSource::Render(image.clone()))
-                .size(px(32.))
+                .size(px(side))
                 .into_any_element()
         });
+        window.update(|window, _| painted_tile_sizes(&window.rendered_frame.scene))
+    }
 
-        let (tile_size, target) = window.update(|window, _| {
-            let sprite = window
-                .rendered_frame
-                .scene
-                .polychrome_sprites
-                .last()
-                .expect("image should paint a sprite");
-            (sprite.tile.bounds.size, 32. * window.scale_factor())
-        });
-        // The 512px source would leave bilinear sampling reading 4 of every 256 pixels.
-        for side in [tile_size.width.0, tile_size.height.0] {
-            let side = side as f32;
-            assert!(
-                side >= target && side < 2. * target,
-                "a {target}px draw uploaded a {side}px tile"
-            );
-        }
+    fn painted_tile_sizes(scene: &Scene) -> Vec<(i32, i32)> {
+        scene
+            .polychrome_sprites
+            .iter()
+            .map(|sprite| {
+                let size = sprite.tile.bounds.size;
+                (size.width.0, size.height.0)
+            })
+            .collect()
+    }
+
+    #[gpui::test]
+    fn oversized_image_is_shrunk_off_the_ui_thread(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        let image = test_image_with_size(512, 512);
+
+        // Shrinking 512px to 32px takes about a millisecond, too long for paint. Until the
+        // copy is ready there is no tile of this image to draw.
+        assert_eq!(draw_image_at(window, &image, 32.), vec![]);
+        assert!(!window.update(|window, _| window.has_image_atlas_entry(&image)));
+
+        window.run_until_parked();
         assert!(window.update(|window, _| window.has_image_atlas_entry(&image)));
+        // The 512px source would leave bilinear sampling reading 4 of every 256 pixels.
+        assert_eq!(draw_image_at(window, &image, 32.), vec![(32, 32)]);
 
         window.update(|window, _| window.drop_image(image.clone()).unwrap());
         assert!(
             !window.update(|window, _| window.has_image_atlas_entry(&image)),
             "dropping the image should free its downscaled copy"
         );
+    }
+
+    #[gpui::test]
+    fn resized_image_keeps_its_last_copy_until_the_new_one_is_ready(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        let image = test_image_with_size(512, 512);
+        draw_image_at(window, &image, 256.);
+        window.run_until_parked();
+        assert_eq!(draw_image_at(window, &image, 256.), vec![(256, 256)]);
+
+        assert_eq!(
+            draw_image_at(window, &image, 32.),
+            vec![(256, 256)],
+            "the 256px copy stands in while the 32px one is made"
+        );
+        window.run_until_parked();
+        assert_eq!(draw_image_at(window, &image, 32.), vec![(32, 32)]);
+    }
+
+    #[gpui::test]
+    fn dropping_an_image_cancels_its_pending_copy(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        let image = test_image_with_size(512, 512);
+        draw_image_at(window, &image, 32.);
+        window.update(|window, _| window.drop_image(image.clone()).unwrap());
+
+        window.run_until_parked();
+        assert!(
+            !window.update(|window, _| window.has_image_atlas_entry(&image)),
+            "a copy finished after the drop should not reach the atlas"
+        );
+    }
+
+    #[gpui::test]
+    fn animated_image_shrinks_every_frame_at_once(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        let frame = Frame::new(ImageBuffer::from_pixel(512, 512, Rgba([0, 0, 0, 0])));
+        let image = Arc::new(RenderImage::new(SmallVec::from_elem(frame, 3)));
+        draw_image_at(window, &image, 32.);
+
+        window.run_until_parked();
+        // Only frame 0 was painted, but every frame has a copy, so playback never waits.
+        assert!(window.update(|window, _| window.has_image_atlas_entry(&image)));
+    }
+
+    #[gpui::test]
+    fn small_image_is_shrunk_during_paint(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        let image = test_image_with_size(128, 128);
+        assert_eq!(draw_image_at(window, &image, 16.), vec![(16, 16)]);
+    }
+
+    struct CachedImage {
+        image: Arc<RenderImage>,
+        side: Pixels,
+    }
+
+    impl Render for CachedImage {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            img(ImageSource::Render(self.image.clone())).size(self.side)
+        }
+    }
+
+    struct CachedImageParent {
+        child: Entity<CachedImage>,
+        side: Pixels,
+    }
+
+    impl Render for CachedImageParent {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let child_style = div().size(self.side).style().clone();
+            div()
+                .size(px(100.))
+                .child(self.child.clone().cached(child_style))
+        }
+    }
+
+    #[test]
+    fn finished_copy_repaints_the_cached_view_that_drew_the_image() {
+        let mut app = TestApp::new();
+        let image = test_image_with_size(512, 512);
+        let mut window = app.open_window(|window, cx| {
+            let side = px(32. / window.scale_factor());
+            CachedImageParent {
+                child: cx.new(|_| CachedImage {
+                    image: image.clone(),
+                    side,
+                }),
+                side,
+            }
+        });
+        let tile_sizes = |window: &mut TestAppWindow<CachedImageParent>| {
+            window.update(|_, window, _| painted_tile_sizes(&window.rendered_frame.scene))
+        };
+        // Opening the window painted the child before its copy existed. The child is cached,
+        // so only a notify makes it paint again.
+        app.run_until_parked();
+        window.draw();
+        assert_eq!(tile_sizes(&mut window), vec![(32, 32)]);
     }
 
     #[gpui::test]
