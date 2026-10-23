@@ -3018,6 +3018,7 @@ mod tests {
             AtlasKey::Image(RenderImageParams {
                 image_id: ImageId(1),
                 frame_index: 0,
+                downscale_level: 0,
             }),
             // BGRA red, opaque.
             (0..64).flat_map(|_| [0u8, 0, 255, 255]).collect(),

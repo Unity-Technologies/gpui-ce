@@ -214,6 +214,95 @@ pub struct ImageId(pub usize);
 pub struct RenderImageParams {
     pub image_id: ImageId,
     pub frame_index: usize,
+    /// How many times the frame was halved before upload; `0` is the frame as decoded.
+    ///
+    /// The atlas has no mipmaps and samples bilinearly, so drawing an image far below its
+    /// pixel size skips most of its pixels and aliases. `Window::paint_image` uploads a
+    /// box-filtered copy instead (see [`image_downscale_level`]).
+    pub downscale_level: u8,
+}
+
+/// The number of halvings that bring an image of `source` pixels to within 2x of the
+/// `target_width` x `target_height` device pixels it is drawn at, without dropping below them.
+///
+/// Bilinear sampling reads 2x2 texels per pixel, so it only averages every source pixel
+/// while the source is at most twice the drawn size. A whole number of halvings (like a mip
+/// chain) keeps the variants of one image down to a handful, however the draw size changes
+/// during a resize or animation. The smaller of the two axis ratios decides, so neither
+/// axis is ever magnified.
+pub(crate) fn image_downscale_level(
+    source: Size<DevicePixels>,
+    target_width: f32,
+    target_height: f32,
+) -> u8 {
+    if !(target_width > 0.0 && target_height > 0.0) {
+        return 0;
+    }
+    let ratio = (source.width.0 as f32 / target_width).min(source.height.0 as f32 / target_height);
+    if ratio < 2.0 {
+        return 0;
+    }
+    (ratio.log2().floor() as u8).min(max_image_downscale_level(source))
+}
+
+/// The most halvings `source` allows before one side reaches a single pixel.
+pub(crate) fn max_image_downscale_level(source: Size<DevicePixels>) -> u8 {
+    let longest = source.width.0.max(source.height.0).max(1) as u32;
+    longest.ilog2() as u8
+}
+
+/// The size of `source` after `level` halvings, rounding up so no side reaches zero.
+pub(crate) fn downscaled_image_size(source: Size<DevicePixels>, level: u8) -> Size<DevicePixels> {
+    let halve = |side: i32| (0..level).fold(side.max(1) as u32, |side, _| side.div_ceil(2)) as i32;
+    size(
+        DevicePixels(halve(source.width.0)),
+        DevicePixels(halve(source.height.0)),
+    )
+}
+
+/// Halves straight-alpha BGRA pixels `level` times with a 2x2 box filter.
+///
+/// Colors are weighted by alpha, so the color of a transparent pixel (often black) does not
+/// darken the edge of an opaque one. An odd last row or column averages only the pixels it has.
+pub(crate) fn downscale_bgra(bytes: &[u8], source: Size<DevicePixels>, level: u8) -> Vec<u8> {
+    let mut width = source.width.0.max(0) as usize;
+    let mut height = source.height.0.max(0) as usize;
+    let mut pixels = Cow::Borrowed(bytes);
+    for _ in 0..level {
+        if width <= 1 && height <= 1 {
+            break;
+        }
+        let half_width = width.div_ceil(2);
+        let half_height = height.div_ceil(2);
+        let mut half = vec![0u8; half_width * half_height * 4];
+        for y in 0..half_height {
+            for x in 0..half_width {
+                let mut color = [0u32; 3];
+                let mut alpha = 0u32;
+                let mut count = 0u32;
+                for source_y in (2 * y)..(2 * y + 2).min(height) {
+                    for source_x in (2 * x)..(2 * x + 2).min(width) {
+                        let pixel = &pixels[(source_y * width + source_x) * 4..][..4];
+                        let a = u32::from(pixel[3]);
+                        for (sum, channel) in color.iter_mut().zip(&pixel[..3]) {
+                            *sum += u32::from(*channel) * a;
+                        }
+                        alpha += a;
+                        count += 1;
+                    }
+                }
+                let out = &mut half[(y * half_width + x) * 4..][..4];
+                for (channel, sum) in out.iter_mut().zip(color) {
+                    *channel = (sum + alpha / 2).checked_div(alpha).unwrap_or(0) as u8;
+                }
+                out[3] = ((alpha + count / 2) / count) as u8;
+            }
+        }
+        pixels = Cow::Owned(half);
+        width = half_width;
+        height = half_height;
+    }
+    pixels.into_owned()
 }
 
 /// A cached and processed image, in BGRA format
@@ -416,5 +505,117 @@ mod tests {
         let result = assets.extend(Arc::new(StubAssetSource).iter_ondemand());
         assert!(result.is_ok());
         test_load_from(&assets);
+    }
+
+    fn device_size(width: i32, height: i32) -> Size<DevicePixels> {
+        size(DevicePixels(width), DevicePixels(height))
+    }
+
+    #[test]
+    fn downscale_level_brings_the_source_within_twice_the_draw_size() {
+        let badge = device_size(512, 512);
+        // 32px at 100%, 125%, 150% and 200% scale.
+        assert_eq!(image_downscale_level(badge, 32.0, 32.0), 4);
+        assert_eq!(image_downscale_level(badge, 40.0, 40.0), 3);
+        assert_eq!(image_downscale_level(badge, 48.0, 48.0), 3);
+        assert_eq!(image_downscale_level(badge, 64.0, 64.0), 3);
+        for target in [24.0_f32, 32.0, 40.0, 48.0, 64.0, 100.0, 255.0] {
+            let level = image_downscale_level(badge, target, target);
+            let side = downscaled_image_size(badge, level).width.0 as f32;
+            assert!(
+                side >= target && side < 2.0 * target,
+                "{target}px: level {level} gives {side}px"
+            );
+        }
+    }
+
+    #[test]
+    fn downscale_level_leaves_images_at_or_near_their_size_alone() {
+        let image = device_size(200, 100);
+        assert_eq!(image_downscale_level(image, 200.0, 100.0), 0);
+        assert_eq!(image_downscale_level(image, 101.0, 51.0), 0);
+        assert_eq!(image_downscale_level(image, 400.0, 200.0), 0);
+        assert_eq!(image_downscale_level(image, 0.0, 0.0), 0);
+        assert_eq!(image_downscale_level(image, f32::NAN, 10.0), 0);
+        assert_eq!(image_downscale_level(device_size(0, 0), 10.0, 10.0), 0);
+    }
+
+    #[test]
+    fn downscale_level_follows_the_less_shrunk_axis() {
+        // Squashed to a quarter of the width but only half the height: one halving, so the
+        // height is never magnified.
+        assert_eq!(
+            image_downscale_level(device_size(400, 400), 100.0, 200.0),
+            1
+        );
+    }
+
+    #[test]
+    fn downscale_level_stops_at_one_pixel() {
+        let image = device_size(8, 2);
+        assert_eq!(max_image_downscale_level(image), 3);
+        assert_eq!(image_downscale_level(image, 0.01, 0.01), 3);
+        assert_eq!(downscaled_image_size(image, 3), device_size(1, 1));
+    }
+
+    #[test]
+    fn downscaled_size_rounds_odd_sides_up() {
+        assert_eq!(
+            downscaled_image_size(device_size(5, 3), 1),
+            device_size(3, 2)
+        );
+        assert_eq!(
+            downscaled_image_size(device_size(5, 3), 2),
+            device_size(2, 1)
+        );
+    }
+
+    #[test]
+    fn downscale_averages_every_source_pixel() {
+        // A 1px checkerboard aliases to a solid color under point or bilinear sampling at
+        // 4:1; a box filter gives the true average grey.
+        let mut bytes = Vec::new();
+        for y in 0..4 {
+            for x in 0..4 {
+                let value = if (x + y) % 2 == 0 { 255 } else { 0 };
+                bytes.extend_from_slice(&[value, value, value, 255]);
+            }
+        }
+        let out = downscale_bgra(&bytes, device_size(4, 4), 2);
+        assert_eq!(out, vec![128, 128, 128, 255]);
+    }
+
+    #[test]
+    fn downscale_weights_color_by_alpha() {
+        // An opaque red pixel next to transparent black ones stays red, at a quarter of the
+        // alpha, instead of darkening toward black. Pixels are BGRA.
+        let bytes = [
+            0, 0, 255, 255, //
+            0, 0, 0, 0, //
+            0, 0, 0, 0, //
+            0, 0, 0, 0,
+        ];
+        assert_eq!(
+            downscale_bgra(&bytes, device_size(2, 2), 1),
+            vec![0, 0, 255, 64]
+        );
+        assert_eq!(
+            downscale_bgra(&[0; 16], device_size(2, 2), 1),
+            vec![0, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn downscale_averages_only_the_pixels_an_odd_edge_has() {
+        // 3x1: the second output pixel covers one source pixel, not a phantom black one.
+        let bytes = [
+            10, 20, 30, 255, //
+            30, 40, 50, 255, //
+            200, 100, 50, 255,
+        ];
+        assert_eq!(
+            downscale_bgra(&bytes, device_size(3, 1), 1),
+            vec![20, 30, 40, 255, 200, 100, 50, 255]
+        );
     }
 }

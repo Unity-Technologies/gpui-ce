@@ -501,6 +501,7 @@ mod tests {
         let key = AtlasKey::Image(RenderImageParams {
             image_id: ImageId(1),
             frame_index: 0,
+            downscale_level: 0,
         });
         let size = Size {
             width: DevicePixels(1),
@@ -535,6 +536,7 @@ mod tests {
             AtlasKey::Image(RenderImageParams {
                 image_id: ImageId(image_id),
                 frame_index: 0,
+                downscale_level: 0,
             })
         };
         let insert = |key: &AtlasKey, size: Size<DevicePixels>| {
@@ -573,6 +575,7 @@ mod tests {
             AtlasKey::Image(RenderImageParams {
                 image_id: ImageId(image_id),
                 frame_index: 0,
+                downscale_level: 0,
             })
         };
         let insert = |key: &AtlasKey| {

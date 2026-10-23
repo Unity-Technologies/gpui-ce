@@ -2966,6 +2966,7 @@ mod tests {
         let key = AtlasKey::Image(RenderImageParams {
             image_id: ImageId(0),
             frame_index: 0,
+            downscale_level: 0,
         });
         let tile = renderer
             .sprite_atlas()

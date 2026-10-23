@@ -18,9 +18,11 @@ use crate::{
     TextStyleRefinement, ThermalState, TransformationMatrix, Transition, TransitionState,
     Underline, UnderlineStyle, UnicodeBidi, WindowAppearance, WindowBackgroundAppearance,
     WindowBounds, WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem,
+    downscale_bgra, downscaled_image_size,
     gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer},
+    image_downscale_level,
     interactive::TouchEvent,
-    point, px, rems, size, transparent_black,
+    max_image_downscale_level, point, px, rems, size, transparent_black,
     util::{
         atomic_incr_if_not_zero, ceil_to_device_pixel, floor_to_device_pixel,
         round_half_toward_zero, round_half_toward_zero_f64, round_stroke_to_device_pixel,
@@ -5123,20 +5125,31 @@ impl Window {
             return Ok(());
         }
 
+        let source_size = data.size(frame_index);
+        let scale_factor = self.scale_factor();
+        let downscale_level = image_downscale_level(
+            source_size,
+            image_bounds.size.width.0 * scale_factor,
+            image_bounds.size.height.0 * scale_factor,
+        );
         let params = RenderImageParams {
             image_id: data.id,
             frame_index,
+            downscale_level,
         };
 
         let tile = self
             .sprite_atlas
             .get_or_insert_with(&params.into(), &mut || {
+                let bytes = data
+                    .as_bytes(frame_index)
+                    .expect("It's the caller's job to pass a valid frame index");
+                if downscale_level == 0 {
+                    return Ok(Some((source_size, Cow::Borrowed(bytes))));
+                }
                 Ok(Some((
-                    data.size(frame_index),
-                    Cow::Borrowed(
-                        data.as_bytes(frame_index)
-                            .expect("It's the caller's job to pass a valid frame index"),
-                    ),
+                    downscaled_image_size(source_size, downscale_level),
+                    Cow::Owned(downscale_bgra(bytes, source_size, downscale_level)),
                 )))
             })?
             .expect("Callback above only returns Some");
@@ -5224,29 +5237,37 @@ impl Window {
     /// Removes an image from the sprite atlas.
     pub fn drop_image(&mut self, data: Arc<RenderImage>) -> Result<()> {
         for frame_index in 0..data.frame_count() {
-            let params = RenderImageParams {
-                image_id: data.id,
-                frame_index,
-            };
+            // Every size the image was painted at left its own downscaled copy.
+            for downscale_level in 0..=max_image_downscale_level(data.size(frame_index)) {
+                let params = RenderImageParams {
+                    image_id: data.id,
+                    frame_index,
+                    downscale_level,
+                };
 
-            self.sprite_atlas.remove(&params.clone().into());
+                self.sprite_atlas.remove(&params.into());
+            }
         }
 
         Ok(())
     }
 
-    /// Returns whether every frame of an image is present in the sprite atlas.
+    /// Returns whether every frame of an image is present in the sprite atlas, at any of the
+    /// downscale levels it may have been painted at.
     #[cfg(any(test, feature = "test-support"))]
     pub fn has_image_atlas_entry(&self, data: &RenderImage) -> bool {
         data.frame_count() > 0
             && (0..data.frame_count()).all(|frame_index| {
-                self.sprite_atlas.contains(
-                    &RenderImageParams {
-                        image_id: data.id,
-                        frame_index,
-                    }
-                    .into(),
-                )
+                (0..=max_image_downscale_level(data.size(frame_index))).any(|downscale_level| {
+                    self.sprite_atlas.contains(
+                        &RenderImageParams {
+                            image_id: data.id,
+                            frame_index,
+                            downscale_level,
+                        }
+                        .into(),
+                    )
+                })
             })
     }
 
