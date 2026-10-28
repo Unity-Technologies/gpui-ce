@@ -145,7 +145,7 @@
 | e4a3732b94 | #66206 | gpui: Fix text system reference cycle through pooled line wrappers (#66206) | skip | fork has no LineWrapper or wrapper pool: Parley owns wrapping, so the TextSystem cycle does not exist |
 | 24a2823456 | #66190 | gpui_wgpu: Fix WebGL surface reconfiguration panics (#66190) | skip | WebGL-only (web target not in scope for this fork) |
 | 44ec5691b5 | #65728 | gpui_apple: Start font-size alternation at the exact size (#65728) | skip | CoreText font-size alternation in gpui_apple text_system; fork renders text through Parley and has no gpui_apple text_system |
-| 4d847859f5 | #64058 | gpui_linux: Fix Wayland activation requests (#64058) | skip | DEFERRED: fork's Wayland activation diverged (CharacterPalette pending activation, activate(token) returning bool, no graphical_environment); conflicts in 6 hunks and Linux cannot be built on this host. Port in a Linux lane |
+| 4d847859f5 | #64058 | gpui_linux: Fix Wayland activation requests (#64058) | adapt | per-token PendingActivation user data and press+surface ActivationContext taken; fork keeps activate(token) -> bool and its CharacterPalette activation (now also carried on the token); fork has no graphical_environment, so open_uri/reveal_path keep their 3-arg internals |
 | f0210f1621 | #64624 | gpui: Use UAX #14 line breaking for text wrapping (#64624) | skip | UAX #14 breaking in LineWrapper; fork has no LineWrapper, Parley already does UAX #14 line breaking |
 | 2c2f737ab2 | #66165 | gpui: Add sendable foreground execution for web HTTP clients (#66165) | skip | web-target sendable foreground execution (gpui_web dispatcher/http client); web target not in scope |
 | 4112666801 | #66283 | gpui_macos: Update Spanish-ISO shortcut mappings (#66283) | take |  |
