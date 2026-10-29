@@ -1333,6 +1333,10 @@ fn file_open_dialog(
     unsafe {
         folder_dialog.SetOptions(dialog_options)?;
 
+        if let Some(directory) = options.directory.as_deref() {
+            set_dialog_folder(&folder_dialog, directory);
+        }
+
         if let Some(prompt) = options.prompt {
             let prompt: &str = &prompt;
             folder_dialog.SetOkButtonLabel(&HSTRING::from(prompt))?;
@@ -1358,6 +1362,34 @@ fn file_open_dialog(
     }
 
     Ok(Some(paths))
+}
+
+/// Opens `dialog` in `directory`. A folder that can't be resolved is logged
+/// and leaves the dialog where Windows would have opened it.
+fn set_dialog_folder(dialog: &windows::Win32::UI::Shell::IFileDialog, directory: &std::path::Path) {
+    if directory.as_os_str().is_empty() {
+        return;
+    }
+    let Some(full_path) = directory
+        .canonicalize()
+        .context("failed to canonicalize directory")
+        .log_err()
+    else {
+        return;
+    };
+    let full_path_string = dunce::simplified(&full_path).display().to_string();
+    let path_item: Option<IShellItem> =
+        unsafe { SHCreateItemFromParsingName(&HSTRING::from(full_path_string), None) }
+            .context("failed to resolve dialog folder")
+            .log_err();
+    if let Some(path_item) = path_item {
+        unsafe {
+            dialog
+                .SetFolder(&path_item)
+                .context("failed to set dialog folder")
+                .log_err()
+        };
+    }
 }
 
 fn file_save_dialog(

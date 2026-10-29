@@ -1732,6 +1732,7 @@ mod tests {
                 directories: true,
                 multiple: true,
                 prompt: None,
+                directory: Some(PathBuf::from("/start")),
             })
         });
         assert!(cx.did_prompt_for_paths());
@@ -1741,6 +1742,7 @@ mod tests {
             let selected = selected.clone();
             move |options| {
                 assert!(options.multiple);
+                assert_eq!(options.directory, Some(PathBuf::from("/start")));
                 Some(selected)
             }
         });
@@ -1758,6 +1760,7 @@ mod tests {
                 directories: false,
                 multiple: false,
                 prompt: None,
+                directory: None,
             })
         });
 
