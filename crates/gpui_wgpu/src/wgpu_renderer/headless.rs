@@ -184,9 +184,15 @@ impl WgpuHeadlessRenderer {
     pub fn new_with_requirements(
         requirements: Option<&crate::WgpuDeviceRequirements>,
     ) -> anyhow::Result<Self> {
-        let context = WgpuContext::new_headless(requirements)?;
+        Self::with_context(&WgpuContext::new_headless(requirements)?)
+    }
+
+    /// Like [`Self::new`], on an existing context's device and queue instead
+    /// of a new device, so a suite that opens many windows creates one. Each
+    /// renderer still gets its own sprite atlas and render target.
+    pub fn with_context(context: &WgpuContext) -> anyhow::Result<Self> {
         let renderer = WgpuRenderer::new_headless(
-            &context,
+            context,
             Size {
                 width: DevicePixels(1),
                 height: DevicePixels(1),
