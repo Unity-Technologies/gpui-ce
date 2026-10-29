@@ -421,7 +421,7 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
                     .accept_label(options.prompt.as_ref().map(gpui::SharedString::as_str))
                     .multiple(options.multiple)
                     .directory(options.directories)
-                    .current_folder(options.directory.as_deref())
+                    .current_folder::<&std::path::Path>(options.directory.as_deref())
                 {
                     Ok(request_builder) => request_builder,
                     Err(err) => {
