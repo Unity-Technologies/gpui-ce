@@ -843,6 +843,11 @@ impl Platform for MacPlatform {
                     if let Some(prompt) = options.prompt {
                         panel.setPrompt(Some(&ns_string(&prompt)));
                     }
+                    if let Some(directory) = options.directory {
+                        let path = ns_string(directory.to_string_lossy().as_ref());
+                        let url = NSURL::fileURLWithPath_isDirectory(&path, true);
+                        panel.setDirectoryURL(Some(&url));
+                    }
 
                     panel.beginWithCompletionHandler(&block);
                 }

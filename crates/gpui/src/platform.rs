@@ -3759,6 +3759,9 @@ pub struct PathPromptOptions {
     pub multiple: bool,
     /// The prompt to show to a user when selecting a path
     pub prompt: Option<SharedString>,
+    /// The folder the prompt opens in. `None` leaves it to the platform,
+    /// which usually reopens the last folder the user picked from.
+    pub directory: Option<PathBuf>,
 }
 
 /// What kind of prompt styling to show
