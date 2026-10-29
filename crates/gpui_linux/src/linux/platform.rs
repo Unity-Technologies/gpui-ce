@@ -414,16 +414,23 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
                     "Open File"
                 };
 
-                let request = match ashpd::desktop::file_chooser::OpenFileRequest::default()
+                let request_builder = match ashpd::desktop::file_chooser::OpenFileRequest::default()
                     .identifier(identifier.await)
                     .modal(true)
                     .title(title)
                     .accept_label(options.prompt.as_ref().map(gpui::SharedString::as_str))
                     .multiple(options.multiple)
                     .directory(options.directories)
-                    .send()
-                    .await
+                    .current_folder(options.directory.as_deref())
                 {
+                    Ok(request_builder) => request_builder,
+                    Err(err) => {
+                        let _ = done_tx.send(Err(err.into()));
+                        return;
+                    }
+                };
+
+                let request = match request_builder.send().await {
                     Ok(request) => request,
                     Err(err) => {
                         let result = match err {
