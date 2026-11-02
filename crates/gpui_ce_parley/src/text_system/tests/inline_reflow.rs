@@ -644,8 +644,7 @@ fn block_text_ending_in_whitespace_keeps_its_line_and_its_space() {
 #[test]
 fn closing_whitespace_counts_in_a_block_width_only_when_it_fits() {
     let system = test_system();
-    let text = "Visit our ";
-    let layout = |wrap_width: Option<Pixels>| {
+    let layout = |text: &str, wrap_width: Option<Pixels>| {
         system.layout_inline(InlineLayoutRequest {
             text,
             runs: &[text_run(text, IBM_PLEX.family)],
@@ -667,17 +666,17 @@ fn closing_whitespace_counts_in_a_block_width_only_when_it_fits() {
         })
     };
 
-    let natural = layout(None);
-    let trimmed_width = natural.layout.platform_layout.size().width;
+    let natural = layout("Visit our ", None);
+    let trimmed_width = layout("Visit our", None).size.width;
     assert!(natural.size.width > trimmed_width);
 
     // At its own width the space fits: one row, same size.
-    let at_own_width = layout(Some(natural.size.width));
+    let at_own_width = layout("Visit our ", Some(natural.size.width));
     assert_eq!(at_own_width.lines.len(), 1);
     assert_eq!(at_own_width.size, natural.size);
 
     // Narrower, the space hangs and no longer counts.
-    let narrower = layout(Some(trimmed_width));
+    let narrower = layout("Visit our ", Some(trimmed_width));
     assert_eq!(narrower.lines.len(), 1);
     assert_eq!(narrower.size.width, trimmed_width);
 }
