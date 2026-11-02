@@ -1,6 +1,6 @@
 [package]
 name = "gpui_ce_windows"
-version = "0.4.0-unity.20261019"
+version = "0.4.0-unity.20261102"
 description.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -29,7 +29,7 @@ wgpu = [
 ]
 
 [dependencies]
-gpui = { path = "../gpui", version = "=0.4.0-unity.20261019", registry = "unity", package = "gpui-ce", default-features = false }
+gpui = { path = "../gpui", version = "=0.4.0-unity.20261102", registry = "unity", package = "gpui-ce", default-features = false }
 gpui_render = { workspace = true, features = ["swash"] }
 wgsl-rs.workspace = true
 
