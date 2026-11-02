@@ -21,6 +21,7 @@ use parley::{
     Cursor, FontContext, FontFamily, FontFamilyName, FontFeature, FontFeatures, FontStyle,
     FontVariation as ParleyFontVariation, FontWeight, GenericFamily, InlineBox, InlineBoxKind,
     Layout, LayoutContext, Line, LineHeight, PositionedLayoutItem, Selection, StyleProperty,
+    VerticalAlign,
 };
 use skrifa::instance::NormalizedCoord;
 use std::{
@@ -1057,7 +1058,7 @@ impl PlatformTextLayout for ParleyLayout {
     }
 
     fn size(&self) -> Size<Pixels> {
-        let width = if self.text.is_empty() && self.layout.inline_boxes().is_empty() {
+        let width = if self.text.is_empty() && self.layout.inline_boxes().len() == 0 {
             Pixels::ZERO
         } else {
             px(self.layout.width())
@@ -1126,7 +1127,7 @@ impl PlatformTextLayout for ParleyLayout {
             return None;
         }
 
-        if self.text.is_empty() && self.layout.inline_boxes().is_empty() {
+        if self.text.is_empty() && self.layout.inline_boxes().len() == 0 {
             return Some(Bounds::new(
                 point(self.inline_lines[0].origin.x, Pixels::ZERO),
                 size(Pixels::ZERO, line_height),
@@ -1152,7 +1153,7 @@ impl PlatformTextLayout for ParleyLayout {
         caret: CaretPosition,
         direction: VisualDirection,
     ) -> Option<CaretPosition> {
-        if self.text.is_empty() && self.layout.inline_boxes().is_empty() {
+        if self.text.is_empty() && self.layout.inline_boxes().len() == 0 {
             return None;
         }
 
@@ -1981,6 +1982,8 @@ impl ParleyTextSystem {
                     index: inline_box.index,
                     width: f32::from(inline_box.size.width),
                     height: f32::from(inline_box.size.height),
+                    baseline: None,
+                    vertical_align: VerticalAlign::BASELINE,
                 });
             }
 
@@ -2058,6 +2061,7 @@ impl ParleyTextSystem {
                 alignment,
                 AlignmentOptions {
                     align_when_overflowing: true,
+                    last_line_alignment: None,
                 },
             );
         }
@@ -2121,8 +2125,7 @@ impl ParleyTextSystem {
                 let normalized_coords = run
                     .normalized_coords()
                     .iter()
-                    .copied()
-                    .map(NormalizedCoord::from_bits)
+                    .map(|coord| NormalizedCoord::from_bits(coord.to_bits()))
                     .collect::<Vec<_>>();
                 let shaping_variations = self
                     .automatic_optical_sizing
@@ -2136,7 +2139,7 @@ impl ParleyTextSystem {
                 )?;
 
                 let baseline = glyph_run.baseline();
-                let run_metrics = glyph_run.run().metrics();
+                let run_metrics = glyph_run.run().font_metrics();
 
                 // Resolve leading from the input ranges. Parley 0.11 can report the
                 // following style's line height in a shaped run's cached metrics.
@@ -2149,9 +2152,9 @@ impl ParleyTextSystem {
                     .map(|style| f32::from(style.line_height))
                     .reduce(f32::max)
                     .unwrap_or_else(|| {
-                        line_height
-                            .map(f32::from)
-                            .unwrap_or(run_metrics.line_height)
+                        line_height.map(f32::from).unwrap_or(
+                            run_metrics.ascent + run_metrics.descent + run_metrics.leading,
+                        )
                     });
 
                 let half_leading =
@@ -2231,18 +2234,15 @@ impl ParleyTextSystem {
             inline_text_bounds.push((text_top, text_bottom));
 
             width = width.max(line_advance);
-            ascent = ascent.max(px(metrics.ascent));
-            descent = descent.max(px(metrics.descent));
+            ascent = ascent.max(px(metrics.baseline - metrics.content_block_min_coord));
+            descent = descent.max(px(metrics.content_block_max_coord - metrics.baseline));
         }
 
         if visual_lines.is_empty() {
             anyhow::bail!("Parley produced no line");
         }
 
-        let mut size = size(
-            px(width_with_closing_whitespace(&layout, available_width)),
-            px(layout.height()),
-        );
+        let mut size = size(px(layout.width()), px(layout.height()));
 
         if empty_alignment.is_some() {
             size.width = Pixels::ZERO;
@@ -2335,28 +2335,6 @@ fn hang_trailing_whitespace(layout: &mut Layout<ParleyBrush>, text: &str, wrap_w
     }
 
     breaker.finish();
-}
-
-/// The paragraph’s width, counting the whitespace that ends it when it fits, as a text
-/// element’s width does. `Layout::width` leaves it out, so a block ending in a space lost it.
-fn width_with_closing_whitespace(
-    layout: &Layout<ParleyBrush>,
-    available_width: Option<Pixels>,
-) -> f32 {
-    let width = layout.width();
-    let Some(last_row) = layout.lines().last() else {
-        return width;
-    };
-    let metrics = last_row.metrics();
-    let closing_end = metrics.inline_min_coord + metrics.advance;
-    // Slack so a block laid out at its own measured width keeps the space.
-    let fits = available_width.is_none_or(|available| closing_end <= f32::from(available) + 0.01);
-
-    if metrics.trailing_whitespace > 0. && last_row.break_reason() == BreakReason::None && fits {
-        width.max(closing_end)
-    } else {
-        width
-    }
 }
 
 fn is_bidi_control(character: char) -> bool {
