@@ -22,7 +22,7 @@ use parley::{
     Cursor, FontContext, FontFamily, FontFamilyName, FontFeature, FontFeatures, FontStyle,
     FontVariation as ParleyFontVariation, FontWeight, FontWidth, GenericFamily, InlineBox,
     InlineBoxKind, Layout, LayoutContext, Line, LineHeight, PositionedLayoutItem, Selection,
-    StyleProperty,
+    StyleProperty, VerticalAlign,
 };
 use skrifa::instance::NormalizedCoord;
 use std::{
@@ -2073,7 +2073,7 @@ impl ParleyTextSystem {
                     width: f32::from(inline_box.size.width),
                     height: f32::from(inline_box.size.height),
                     baseline: None,
-                    vertical_align: Default::default(),
+                    vertical_align: VerticalAlign::BASELINE,
                 });
             }
 
@@ -2339,10 +2339,7 @@ impl ParleyTextSystem {
             anyhow::bail!("Parley produced no line");
         }
 
-        let mut size = size(
-            px(width_with_closing_whitespace(&layout, available_width)),
-            px(layout.height()),
-        );
+        let mut size = size(px(layout.width()), px(layout.height()));
 
         if empty_alignment.is_some() {
             size.width = Pixels::ZERO;
@@ -2435,28 +2432,6 @@ fn hang_trailing_whitespace(layout: &mut Layout<ParleyBrush>, text: &str, wrap_w
     }
 
     breaker.finish();
-}
-
-/// The paragraph’s width, counting the whitespace that ends it when it fits, as a text
-/// element’s width does. `Layout::width` leaves it out, so a block ending in a space lost it.
-fn width_with_closing_whitespace(
-    layout: &Layout<ParleyBrush>,
-    available_width: Option<Pixels>,
-) -> f32 {
-    let width = layout.width();
-    let Some(last_row) = layout.lines().last() else {
-        return width;
-    };
-    let metrics = last_row.metrics();
-    let closing_end = metrics.inline_min_coord + metrics.advance;
-    // Slack so a block laid out at its own measured width keeps the space.
-    let fits = available_width.is_none_or(|available| closing_end <= f32::from(available) + 0.01);
-
-    if metrics.trailing_whitespace > 0. && last_row.break_reason() == BreakReason::None && fits {
-        width.max(closing_end)
-    } else {
-        width
-    }
 }
 
 fn is_bidi_control(character: char) -> bool {
