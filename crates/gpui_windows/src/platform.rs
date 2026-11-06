@@ -1730,6 +1730,91 @@ mod tests {
         Ok(())
     }
 
+    /// A minimized window can get `WM_SIZE(SIZE_MINIMIZED)` again before it is restored. It must
+    /// still draw after the restore: losing its frame callback leaves the last frame on screen for
+    /// good while input still reaches it.
+    #[test]
+    fn a_window_minimized_twice_still_draws_after_restore() -> anyhow::Result<()> {
+        use super::WindowsPlatform;
+        use crate::WindowsWindow;
+        use gpui::{
+            AnyWindowHandle, Bounds, PlatformWindow as _, WindowHandle, WindowId, WindowKind,
+            WindowParams, point, px, size,
+        };
+        use std::{cell::Cell, rc::Rc};
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::Graphics::Gdi::{RDW_INVALIDATE, RDW_UPDATENOW, RedrawWindow};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            DestroyWindow, SIZE_MINIMIZED, SW_RESTORE, SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE,
+            SendMessageW, ShowWindow, WM_SIZE,
+        };
+
+        struct Root;
+        impl gpui::Render for Root {
+            fn render(
+                &mut self,
+                _: &mut gpui::Window,
+                _: &mut gpui::Context<Self>,
+            ) -> impl gpui::IntoElement {
+                gpui::Empty
+            }
+        }
+
+        let platform = WindowsPlatform::new(false)?;
+        let handle: AnyWindowHandle = WindowHandle::<Root>::new(WindowId::from(1)).into();
+        let window = WindowsWindow::new(
+            handle,
+            WindowParams {
+                bounds: Bounds::new(point(px(100.), px(100.)), size(px(400.), px(300.))),
+                titlebar: None,
+                kind: WindowKind::Normal,
+                is_movable: true,
+                app_owns_titlebar_drag: false,
+                is_resizable: true,
+                is_minimizable: true,
+                focus: false,
+                show: false,
+                icon: None,
+                display_id: None,
+                app_id: None,
+                window_min_size: None,
+                windows_renderer: Default::default(),
+            },
+            platform.generate_creation_info(),
+        )?;
+        let hwnd = window.get_raw_handle();
+        let frames = Rc::new(Cell::new(0));
+        window.on_request_frame(Box::new({
+            let frames = frames.clone();
+            move |_| frames.set(frames.get() + 1)
+        }));
+        let paint = || unsafe {
+            let _ = RedrawWindow(Some(hwnd), None, None, RDW_INVALIDATE | RDW_UPDATENOW);
+        };
+
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            let _ = ShowWindow(hwnd, SW_SHOWMINNOACTIVE);
+            SendMessageW(
+                hwnd,
+                WM_SIZE,
+                Some(WPARAM(SIZE_MINIMIZED as usize)),
+                Some(LPARAM(0)),
+            );
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+        let before = frames.get();
+        paint();
+
+        assert!(
+            frames.get() > before,
+            "the restored window must request a frame when it paints"
+        );
+
+        unsafe { DestroyWindow(hwnd)? };
+        Ok(())
+    }
+
     #[test]
     fn test_clipboard() {
         let item = ClipboardItem::new_string("你好，我是张小白".to_string());
