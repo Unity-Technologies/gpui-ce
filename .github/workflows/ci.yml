@@ -184,8 +184,10 @@ jobs:
       - run: just build
       - run: just test
       - run: just test-doc
+      # The Linux backends are opt-in on gpui_platform (upstream #379); without
+      # them gpui_linux has no renderer or text system.
       - name: Test TestAppContext headless rendering
-        run: GPUI_RUN_RENDERING_TESTS=1 cargo test -p gpui_ce_platform --features test-support --test test_app_context_render
+        run: GPUI_RUN_RENDERING_TESTS=1 cargo test -p gpui_ce_platform --features test-support,wayland,x11 --test test_app_context_render
 
   # macOS build + test
   test-mac:
