@@ -1,6 +1,6 @@
 [package]
 name = "gpui-ce"
-version = "0.2.2-unity.20261102"
+version = "0.2.2-unity.20261107"
 edition.workspace = true
 authors = ["Nathan Sobo <nathan@zed.dev>"]
 description = "A community fork of Zed's GPU-accelerated UI framework"
@@ -42,8 +42,8 @@ bench-support = ["profiler", "dep:criterion"]
 bench = ["bench-support"]
 inspector = ["gpui_macros/inspector"]
 leak-detection = ["backtrace"]
-wayland = []
-x11 = []
+wayland = ["gpui_platform/wayland"]
+x11 = ["gpui_platform/x11"]
 screen-capture = ["dep:windows-capture"]
 windows-manifest = ["dep:embed-resource"]
 profiler = ["dep:hdrhistogram"]
@@ -168,7 +168,7 @@ env_logger.workspace = true
 gpui_ce_elements = { path = "../gpui_elements" }
 # Path-only, so `cargo publish` strips it: gpui_ce_platform depends on gpui-ce,
 # and a versioned edge back would make a cycle no publish order satisfies.
-gpui_platform = { path = "../gpui_platform", package = "gpui_ce_platform", features = ["font-kit", "wayland", "x11"] }
+gpui_platform = { path = "../gpui_platform", package = "gpui_ce_platform", features = ["font-kit"] }
 gpui_fonts = { path = "../gpui_ce_fonts", package = "gpui-ce-fonts" }
 gpui_util = { workspace = true }
 lyon = { version = "1.0", features = ["extra"] }
