@@ -1,6 +1,6 @@
 [package]
 name = "gpui_ce_linux"
-version = "0.1.0-unity.20261102"
+version = "0.1.0-unity.20261107"
 description.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -73,7 +73,7 @@ url.workspace = true
 uuid.workspace = true
 
 # Always used
-oo7 = { version = "0.6", default-features = false, features = [
+oo7 = { version = "0.7", default-features = false, features = [
   "async-std",
   "native_crypto",
 ] }
