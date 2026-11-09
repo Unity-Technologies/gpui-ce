@@ -1,6 +1,6 @@
 [package]
 name = "gpui_ce_render"
-version = "0.1.0-unity.20261102"
+version = "0.1.0-unity.20261107"
 description.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -13,7 +13,7 @@ workspace = true
 path = "src/gpui_render.rs"
 
 [dependencies]
-gpui = { path = "../gpui", version = "=0.2.2-unity.20261102", registry = "unity", package = "gpui-ce", default-features = false }
+gpui = { path = "../gpui", version = "=0.2.2-unity.20261107", registry = "unity", package = "gpui-ce", default-features = false }
 smallvec.workspace = true
 wgsl-rs.workspace = true
 
@@ -31,7 +31,7 @@ naga-old = { package = "naga", version = "24.0.0", features = [
   "hlsl-out",
   "wgsl-in",
 ] }
-gpui = { path = "../gpui", version = "=0.2.2-unity.20261102", registry = "unity", package = "gpui-ce", default-features = false }
+gpui = { path = "../gpui", version = "=0.2.2-unity.20261107", registry = "unity", package = "gpui-ce", default-features = false }
 wgsl-rs.workspace = true
 
 [dev-dependencies]
