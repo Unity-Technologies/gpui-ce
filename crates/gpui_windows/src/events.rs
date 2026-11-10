@@ -240,9 +240,10 @@ impl WindowsWindowInner {
         // A minimized window has no client area to draw, so stop requesting frames until it is
         // restored. The renderer keeps its size: `WM_SIZE` reports 0x0 while minimized.
         if wparam.0 == SIZE_MINIMIZED as usize {
-            self.state
-                .restore_from_minimized
-                .set(self.state.callbacks.request_frame.take());
+            park_frame_callback(
+                &self.state.callbacks.request_frame,
+                &self.state.restore_from_minimized,
+            );
             return Some(0);
         }
 
@@ -1769,5 +1770,20 @@ fn notify_frame_changed(handle: HWND) {
                 | SWP_NOZORDER,
         )
         .log_err();
+    }
+}
+
+/// Move the frame callback into the minimized-window slot until the window is restored.
+///
+/// A window that is already minimized gets `WM_SIZE(SIZE_MINIMIZED)` again whenever it is moved,
+/// resized or minimized a second time while iconic, and Windows does that on its own when the
+/// display layout changes (a monitor sleeping, waking or reconnecting, a resolution change, a
+/// remote desktop session). The callback is then already parked and `request_frame` is empty, so
+/// parking unconditionally would overwrite the parked callback with `None`. The restore would
+/// find nothing to put back, and every later `WM_PAINT` would return before drawing: the window
+/// keeps its last frame forever while input still reaches it.
+fn park_frame_callback<T>(request_frame: &Cell<Option<T>>, parked: &Cell<Option<T>>) {
+    if let Some(callback) = request_frame.take() {
+        parked.set(Some(callback));
     }
 }
