@@ -15,7 +15,8 @@ use gpui::{
     GlyphRasterizer, GlyphRenderMode, InlineLayout, InlineLayoutRequest, LineLayout, Pixels,
     PlatformTextSystem, PreparedRasterStyle, RasterColorEffect, RasterFace, RasterStyleRequest,
     RasterizedGlyph, RenderGlyphParams, Rgba8, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, Size,
-    TextLayoutRequest, TextRenderingMode, apply_pixel_opacity, multiply_alpha, point, size,
+    TextLayoutRequest, TextRenderingMode, WordBreak, apply_pixel_opacity, multiply_alpha, point,
+    size,
 };
 use gpui_parley::ParleyTextSystem;
 use gpui_render::BitmapFallbackGlyphRasterizer;
@@ -123,6 +124,10 @@ impl PlatformTextSystem for DirectWriteTextSystem {
 
     fn font_generation(&self) -> u64 {
         self.parley.font_generation()
+    }
+
+    fn set_word_break(&self, word_break: WordBreak) {
+        self.parley.set_word_break(word_break);
     }
 
     fn font_id(&self, descriptor: &Font) -> Result<FontId> {
