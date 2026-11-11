@@ -78,7 +78,7 @@ pub(crate) mod a11y;
 mod prompts;
 
 use a11y::A11y;
-pub use a11y::A11ySubtreeBuilder;
+pub use a11y::{A11ySubtreeBuilder, A11yTextSelection};
 pub use prompts::*;
 
 fn quantize_glyph_origin(origin: Point<ScaledPixels>) -> (Point<ScaledPixels>, Point<u8>) {
@@ -7377,6 +7377,41 @@ impl Window {
             accesskit::Action::Blur => {
                 self.blur(cx);
             }
+            accesskit::Action::ScrollIntoView => {
+                let hint = match request.data {
+                    Some(accesskit::ActionData::ScrollHint(hint)) => Some(hint),
+                    _ => None,
+                };
+                self.a11y_scroll_into_view(request.target_node, hint);
+            }
+            accesskit::Action::ScrollUp
+            | accesskit::Action::ScrollDown
+            | accesskit::Action::ScrollLeft
+            | accesskit::Action::ScrollRight => {
+                let unit = match request.data {
+                    Some(accesskit::ActionData::ScrollUnit(unit)) => unit,
+                    _ => accesskit::ScrollUnit::Page,
+                };
+                self.a11y_scroll_by_unit(request.target_node, request.action, unit);
+            }
+            accesskit::Action::SetScrollOffset => {
+                if let Some(accesskit::ActionData::SetScrollOffset(offset)) = request.data
+                    && let Some(&index) = self.a11y.scroll.by_node.get(&request.target_node)
+                {
+                    let scale = self.scale_factor() as f64;
+                    let wanted = point(
+                        px(-(offset.x / scale) as f32),
+                        px(-(offset.y / scale) as f32),
+                    );
+                    self.a11y.scroll.containers[index].set_offset(wanted);
+                    self.refresh();
+                }
+            }
+            accesskit::Action::ReplaceSelectedText => {
+                if let Some(accesskit::ActionData::Value(text)) = request.data {
+                    self.a11y_replace_selected_text(request.target_node, &text, cx);
+                }
+            }
             _ => {
                 log::debug!(
                     "Unhandled a11y action: {:?} on {:?}",
@@ -7384,6 +7419,95 @@ impl Window {
                     request.target_node
                 );
             }
+        }
+    }
+
+    /// The byte-offset selection a `SetTextSelection` request names, when its
+    /// two ends fall in the `TextRun`s of one node built by
+    /// [`A11ySubtreeBuilder::push_text_runs`] in the last frame. For an
+    /// [`Self::on_a11y_action`] listener on `SetTextSelection`.
+    pub fn a11y_text_selection(
+        &self,
+        data: Option<&accesskit::ActionData>,
+    ) -> Option<A11yTextSelection> {
+        let Some(accesskit::ActionData::SetTextSelection(selection)) = data else {
+            return None;
+        };
+        self.a11y
+            .nodes
+            .text_runs
+            .selection(selection)
+            .map(|(_, selection)| selection)
+    }
+
+    /// Scroll every container around `target`, innermost first, until the
+    /// node's last-frame bounds are inside each viewport.
+    #[cfg(not(target_family = "wasm"))]
+    fn a11y_scroll_into_view(
+        &mut self,
+        target: accesskit::NodeId,
+        hint: Option<accesskit::ScrollHint>,
+    ) {
+        let Some(mut item) = self.a11y.node_bounds.get(&target).copied() else {
+            return;
+        };
+        let mut next = self.a11y.scroll.node_parent.get(&target).copied();
+        let mut moved = false;
+        while let Some(index) = next {
+            let container = &self.a11y.scroll.containers[index];
+            let wanted = a11y::scroll::reveal_delta(item, container.bounds, hint);
+            let applied = container.scroll_content_by(wanted);
+            item.origin += applied;
+            moved |= applied != Point::default();
+            next = container.parent;
+        }
+        if moved {
+            self.refresh();
+        }
+    }
+
+    /// Scroll the container `target` is by a line (`Item`) or a viewport less
+    /// one line (`Page`) in the action's direction.
+    #[cfg(not(target_family = "wasm"))]
+    fn a11y_scroll_by_unit(
+        &mut self,
+        target: accesskit::NodeId,
+        action: accesskit::Action,
+        unit: accesskit::ScrollUnit,
+    ) {
+        let Some(&index) = self.a11y.scroll.by_node.get(&target) else {
+            return;
+        };
+        let line = self.text_style().line_height_in_pixels(self.rem_size());
+        let viewport = self.a11y.scroll.containers[index].bounds.size;
+        let amount = |extent: Pixels| match unit {
+            accesskit::ScrollUnit::Item => line,
+            accesskit::ScrollUnit::Page => (extent - line).max(line),
+        };
+        // Content moves the opposite way to the scroll.
+        let delta = match action {
+            accesskit::Action::ScrollUp => point(px(0.), amount(viewport.height)),
+            accesskit::Action::ScrollDown => point(px(0.), -amount(viewport.height)),
+            accesskit::Action::ScrollLeft => point(amount(viewport.width), px(0.)),
+            _ => point(-amount(viewport.width), px(0.)),
+        };
+        if self.a11y.scroll.containers[index].scroll_content_by(delta) != Point::default() {
+            self.refresh();
+        }
+    }
+
+    /// Insert `text` over the selection of the focused text input, through the
+    /// same input handler the platform's text input uses. Only for the
+    /// focused node: the handler belongs to whatever has keyboard focus.
+    #[cfg(not(target_family = "wasm"))]
+    fn a11y_replace_selected_text(&mut self, target: accesskit::NodeId, text: &str, cx: &mut App) {
+        let focused = self.a11y.focus_ids.get(&target).copied();
+        if focused.is_none() || focused != self.focus {
+            return;
+        }
+        if let Some(mut handler) = self.platform_window.take_input_handler() {
+            handler.dispatch_input(text, self, cx);
+            self.platform_window.set_input_handler(handler);
         }
     }
 
