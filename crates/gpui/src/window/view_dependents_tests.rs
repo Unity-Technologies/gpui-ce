@@ -82,3 +82,90 @@ fn a_cached_view_renders_again_when_an_entity_it_read_notifies(cx: &mut TestAppC
         "the reader renders the model's new state, not its last frame"
     );
 }
+
+/// A cached view that holds a cached `Reader` and reads nothing itself.
+struct Middle {
+    reader: Entity<Reader>,
+    renders: Rc<Cell<usize>>,
+}
+
+impl Render for Middle {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.renders.set(self.renders.get() + 1);
+        div().child(
+            self.reader
+                .clone()
+                .cached(crate::StyleRefinement::default().size(px(10.))),
+        )
+    }
+}
+
+/// The window root: holds a cached `Middle`.
+struct Root {
+    middle: Entity<Middle>,
+}
+
+impl Render for Root {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().child(
+            self.middle
+                .clone()
+                .cached(crate::StyleRefinement::default().size(px(10.))),
+        )
+    }
+}
+
+#[gpui::test]
+fn a_nested_cached_view_keeps_its_dependencies_when_its_parent_is_reused(cx: &mut TestAppContext) {
+    let renders = Rc::new(Cell::new(0));
+    let seen = Rc::new(Cell::new(0));
+    let middle_renders = Rc::new(Cell::new(0));
+    let model = cx.new(|_| Model { value: 1 });
+    let window = cx.add_window({
+        let (renders, seen, model) = (renders.clone(), seen.clone(), model.clone());
+        let middle_renders = middle_renders.clone();
+        move |_, cx| {
+            let reader = cx.new(|_| Reader {
+                model,
+                renders,
+                seen,
+            });
+            Root {
+                middle: cx.new(|_| Middle {
+                    reader,
+                    renders: middle_renders,
+                }),
+            }
+        }
+    });
+    let draw = |cx: &mut TestAppContext| {
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+    };
+    draw(cx);
+    let first = renders.get();
+    let middle_first = middle_renders.get();
+    assert!(first > 0, "the reader rendered");
+
+    // The root renders again and reuses the cached middle whole, so the
+    // reader's prepaint never runs this frame.
+    window.update(cx, |_, _, cx| cx.notify()).unwrap();
+    draw(cx);
+    assert_eq!(
+        (middle_renders.get(), renders.get()),
+        (middle_first, first),
+        "a root notify reuses the middle and the reader"
+    );
+
+    model.update(cx, |model, cx| {
+        model.value = 2;
+        cx.notify();
+    });
+    draw(cx);
+    assert_eq!(
+        (renders.get(), seen.get()),
+        (first + 1, 2),
+        "the reader renders the model's new state after its parent was reused"
+    );
+}
