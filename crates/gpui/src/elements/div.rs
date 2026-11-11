@@ -1643,6 +1643,15 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Set the localized role description for this element (maps to AccessKit's
+    /// `role_description`, UIA `LocalizedControlType`). Windows Narrator reads a
+    /// `Role::Switch` as a button unless this is set. Use only where the
+    /// platform's own wording for the role is wrong; it overrides it.
+    fn aria_role_description(mut self, description: impl Into<SharedString>) -> Self {
+        self.interactivity().aria.role_description = Some(description.into());
+        self
+    }
+
     /// Set the keyboard shortcut(s) that activate this element, announced by
     /// assistive technology (maps to AccessKit's `keyboard_shortcut`).
     ///
@@ -2771,6 +2780,7 @@ pub(crate) struct AriaProperties {
     pub(crate) author_id: Option<SharedString>,
     pub(crate) label: Option<SharedString>,
     pub(crate) description: Option<SharedString>,
+    pub(crate) role_description: Option<SharedString>,
     pub(crate) keyshortcuts: Option<SharedString>,
     pub(crate) hidden: bool,
     pub(crate) selected: Option<bool>,
@@ -4401,6 +4411,9 @@ impl Interactivity {
         }
         if let Some(description) = &self.aria.description {
             node.set_description(description.to_string());
+        }
+        if let Some(role_description) = &self.aria.role_description {
+            node.set_role_description(role_description.to_string());
         }
         if let Some(keyshortcuts) = &self.aria.keyshortcuts {
             node.set_keyboard_shortcut(keyshortcuts.to_string());
@@ -6441,6 +6454,18 @@ mod tests {
         assert_eq!(node.min_numeric_value(), Some(6.0));
         assert_eq!(node.max_numeric_value(), Some(72.0));
         assert_eq!(node.numeric_value_step(), Some(1.0));
+    }
+
+    #[test]
+    fn test_write_a11y_info_role_description() {
+        let mut interactivity = Interactivity::default();
+        let mut node = accesskit::Node::new(accesskit::Role::Switch);
+        interactivity.write_a11y_info(&mut node);
+        assert_eq!(node.role_description(), None);
+
+        interactivity.aria.role_description = Some("switch".into());
+        interactivity.write_a11y_info(&mut node);
+        assert_eq!(node.role_description(), Some("switch"));
     }
 
     #[test]
