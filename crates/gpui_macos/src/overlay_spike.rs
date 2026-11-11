@@ -48,7 +48,12 @@ extern "C" fn hit_test(this: &AnyObject, _: Sel, point: NSPoint) -> *mut AnyObje
         let x = point.x - frame.origin.x;
         // GPUIView is not flipped: scene y runs down from the top.
         let y = frame.size.height - (point.y - frame.origin.y);
-        let hit = rects
+        let hit = (gpui::overlay_modal()
+            && x >= 0.0
+            && y >= 0.0
+            && x < frame.size.width
+            && y < frame.size.height)
+            || rects
             .lock()
             .map(|r| {
                 r.iter()
@@ -168,6 +173,19 @@ pub(crate) fn draw(
                 let nil: *const AnyObject = std::ptr::null();
                 let _: () = msg_send![sv, addSubview: &*o.view, positioned: 1isize, relativeTo: nil];
             }
+        }
+        static WAS_MODAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let modal = gpui::overlay_modal();
+        if modal && !WAS_MODAL.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            // Take keyboard focus back from a native child (WKWebView) so Escape reaches GPUI.
+            let win: *mut AnyObject = msg_send![native_view.as_ref(), window];
+            if !win.is_null() {
+                let ok: Bool = msg_send![win, makeFirstResponder: native_view.as_ptr()];
+                let fr: *mut AnyObject = msg_send![win, firstResponder];
+                eprintln!("modal: makeFirstResponder={ok:?} first={:?} gpuiview={:?}", fr, native_view.as_ptr());
+            }
+        } else if !modal {
+            WAS_MODAL.store(false, std::sync::atomic::Ordering::Relaxed);
         }
         if let Some(bl) = renderer.layer() {
             let ds = bl.drawable_size();

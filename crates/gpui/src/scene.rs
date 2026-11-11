@@ -18,6 +18,20 @@ use std::{
 
 mod plan;
 pub use plan::*;
+
+static OVERLAY_MODAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// HUB-8754 spike: while true, the macOS overlay view claims every click in the window (so an
+/// outside click reaches GPUI instead of a native child) and keyboard focus returns to GPUI.
+/// A real design derives this from block-mouse hitboxes instead of an app call.
+pub fn set_overlay_modal(modal: bool) {
+    OVERLAY_MODAL.store(modal, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// See [`set_overlay_modal`].
+pub fn overlay_modal() -> bool {
+    OVERLAY_MODAL.load(std::sync::atomic::Ordering::Relaxed)
+}
 mod abi;
 #[doc(hidden)]
 pub use abi::{SCENE_BUFFER_LAYOUTS, SceneBufferLayout};
