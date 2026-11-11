@@ -76,6 +76,11 @@ pub(crate) struct DirectXRenderer {
     width: u32,
     height: u32,
 
+    /// Set while the swap chain's buffers are released and the last resize
+    /// failed without the device being lost (an out-of-memory resize), so the
+    /// next resize or draw retries at the size already recorded.
+    resize_pending: bool,
+
     /// Whether we want to skip drawing due to device lost events.
     ///
     /// In that case we want to discard the first frame that we draw as we got reset in the middle of a frame
@@ -314,6 +319,7 @@ impl DirectXRenderer {
             font_info: Self::get_font_info(),
             width: 1,
             height: 1,
+            resize_pending: false,
             skip_draws: false,
             active_render_target: None,
             path_rasterization_vertices: Vec::new(),
@@ -465,6 +471,12 @@ impl DirectXRenderer {
         scene: &Scene,
         background_appearance: WindowBackgroundAppearance,
     ) -> Result<()> {
+        if self.resize_pending {
+            self.resize(Size {
+                width: DevicePixels(self.width as i32),
+                height: DevicePixels(self.height as i32),
+            })?;
+        }
         if self.skip_draws {
             // skip drawing this frame, we just recovered from a device lost event
             // and so likely do not have the textures anymore that are required for drawing
@@ -806,11 +818,12 @@ impl DirectXRenderer {
     pub(crate) fn resize(&mut self, new_size: Size<DevicePixels>) -> Result<()> {
         let width = new_size.width.0.max(1) as u32;
         let height = new_size.height.0.max(1) as u32;
-        if self.width == width && self.height == height {
+        if self.width == width && self.height == height && !self.resize_pending {
             return Ok(());
         }
         self.width = width;
         self.height = height;
+        self.resize_pending = true;
 
         // Clear the render target before resizing
         let devices = self.devices.as_ref().context("devices missing")?;
@@ -844,7 +857,17 @@ impl DirectXRenderer {
                 .OMSetRenderTargets(Some(slice::from_ref(&resources.render_target_view)), None);
         }
 
+        self.resize_pending = false;
         Ok(())
+    }
+
+    /// Whether the D3D device has been removed or reset. A failed resize is
+    /// device loss only when this is true; an out-of-memory resize leaves the
+    /// device healthy and is retried instead.
+    pub(crate) fn is_device_removed(&self) -> bool {
+        self.devices
+            .as_ref()
+            .is_some_and(|devices| unsafe { devices.device.GetDeviceRemovedReason() }.is_err())
     }
 
     fn upload_scene_buffers(&mut self, scene: &Scene) -> Result<()> {
