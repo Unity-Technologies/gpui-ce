@@ -169,3 +169,66 @@ fn a_nested_cached_view_keeps_its_dependencies_when_its_parent_is_reused(cx: &mu
         "the reader renders the model's new state after its parent was reused"
     );
 }
+
+/// Keeps a keyed state entity, and reports which one it got.
+struct Keeper {
+    state: Rc<Cell<Option<EntityId>>>,
+}
+
+impl Render for Keeper {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let state = window.use_keyed_state("kept", cx, |_, _| 0usize);
+        self.state.set(Some(state.entity_id()));
+        div().size(px(10.))
+    }
+}
+
+/// Holds a `Keeper` behind `.cached()`.
+struct KeeperHost {
+    keeper: Entity<Keeper>,
+}
+
+impl Render for KeeperHost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().child(
+            self.keeper
+                .clone()
+                .cached(crate::StyleRefinement::default().size(px(10.))),
+        )
+    }
+}
+
+/// A dirty cached view renders in `request_layout` (the direction probe),
+/// before the range a later reuse replays. The element state it read there
+/// must survive that reuse.
+#[gpui::test]
+fn a_reused_cached_view_keeps_the_state_it_read_while_probed(cx: &mut TestAppContext) {
+    let state = Rc::new(Cell::new(None));
+    let keeper = cx.new({
+        let state = state.clone();
+        |_| Keeper { state }
+    });
+    let window = cx.add_window({
+        let keeper = keeper.clone();
+        move |_, _| KeeperHost { keeper }
+    });
+    let draw = |cx: &mut TestAppContext| {
+        cx.run_until_parked();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+    };
+    draw(cx);
+    let first = state.get().expect("the keeper rendered");
+
+    // The host renders again and the keeper replays its last frame.
+    window.update(cx, |_, _, cx| cx.notify()).unwrap();
+    draw(cx);
+    // The keeper renders again and finds the same state.
+    keeper.update(cx, |_, cx| cx.notify());
+    draw(cx);
+    assert_eq!(
+        state.get(),
+        Some(first),
+        "the keyed state survived the reuse"
+    );
+}
