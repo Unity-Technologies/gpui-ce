@@ -502,6 +502,10 @@ impl<V: View> Element for ViewElement<V> {
                             window.reuse_prepaint(element_state.prepaint_range.clone());
                             cx.entities
                                 .extend_accessed(&element_state.accessed_entities);
+                            window.next_frame.record_view_dependencies(
+                                entity_id,
+                                &element_state.accessed_entities,
+                            );
                             let prepaint_end = window.prepaint_index();
                             element_state.prepaint_range = prepaint_start..prepaint_end;
 
@@ -542,6 +546,9 @@ impl<V: View> Element for ViewElement<V> {
 
                         let prepaint_end = window.prepaint_index();
                         window.refreshing = refreshing;
+                        window
+                            .next_frame
+                            .record_view_dependencies(entity_id, &accessed_entities);
 
                         (
                             Some(element),
