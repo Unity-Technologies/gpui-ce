@@ -263,7 +263,14 @@ impl X11ClientStatePtr {
             return;
         };
         let mut state = client.0.borrow_mut();
-        if state.composing || state.ximc.is_none() {
+        // SetIcValues names `ic_id`, which the handshake assigns in CreateIcReply.
+        // Before that it is 0, and fcitx5 answers a request for an input context
+        // that does not exist with an XIM_ERROR the client cannot parse, which
+        // drops XIM for the session.
+        if state.composing
+            || state.ximc.is_none()
+            || !xim_handshake_complete(state.xim_handler.as_ref())
+        {
             return;
         }
 
