@@ -5383,7 +5383,7 @@ impl ScrollHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Empty, InputEvent, Modifiers};
+    use crate::{Empty, Modifiers};
 
     struct DragProbe;
 
