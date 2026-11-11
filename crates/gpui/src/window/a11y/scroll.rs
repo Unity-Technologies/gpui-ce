@@ -7,6 +7,9 @@
 //! need not have an accessibility node of its own; `ScrollIntoView` walks a
 //! node's containers from the innermost out either way.
 
+// The action handlers that read these containers are native-only.
+#![cfg_attr(target_family = "wasm", allow(dead_code))]
+
 use crate::{Bounds, ListState, Pixels, Point, point, px};
 use accesskit::{NodeId, ScrollHint};
 use std::{cell::RefCell, rc::Rc};
