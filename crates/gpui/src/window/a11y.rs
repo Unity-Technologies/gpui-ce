@@ -101,6 +101,10 @@
 use crate::*;
 
 pub(crate) mod debug;
+pub(crate) mod scroll;
+pub(crate) mod text;
+
+pub use text::A11yTextSelection;
 
 use crate::{App, Bounds, FocusId, Pixels, SharedString, Window};
 use accesskit::{Action, NodeId, TreeUpdate};
@@ -154,6 +158,9 @@ pub(crate) struct A11y {
     pub(crate) focus_ids: FxHashMap<NodeId, FocusId>,
     pub(crate) node_bounds: FxHashMap<NodeId, Bounds<Pixels>>,
     pub(crate) action_listeners: FxHashMap<NodeId, Vec<(Action, A11yActionListener)>>,
+    /// Scroll containers met while building this frame's tree, for the
+    /// built-in scroll actions.
+    pub(crate) scroll: scroll::ScrollContainers,
     /// The window's title, used to label the root node so assistive
     /// technology can tell windows apart.
     window_title: Option<SharedString>,
@@ -184,6 +191,7 @@ impl A11y {
             focus_ids: FxHashMap::default(),
             node_bounds: FxHashMap::default(),
             action_listeners: FxHashMap::default(),
+            scroll: scroll::ScrollContainers::default(),
             window_title,
             last_focus_without_node: None,
             debug: debug::A11yDebug::default(),
@@ -286,6 +294,7 @@ impl A11y {
         self.focus_ids.clear();
         self.node_bounds.clear();
         self.action_listeners.clear();
+        self.scroll.clear();
         self.nodes.begin_frame(self.window_title.as_ref());
     }
 
@@ -383,6 +392,41 @@ impl<'a> A11ySubtreeBuilder<'a> {
         pushed
     }
 
+    /// Expose `text`, the parent's editable value, as `TextRun` children (one
+    /// per line) and place the parent's caret and selection on them.
+    ///
+    /// Screen readers follow a text field's caret only through these runs; a
+    /// field that sets just its value has no caret to read. Offsets in
+    /// `selection` are bytes into `text`. Call it once per element; the runs
+    /// are recorded so [`crate::Window::a11y_text_selection`] can map a
+    /// `SetTextSelection` request back to byte offsets.
+    pub fn push_text_runs(&mut self, text: &str, selection: Option<A11yTextSelection>) {
+        let owner = self.parent_id;
+        let mut pushed: Vec<NodeId> = Vec::new();
+        let mut infos = Vec::new();
+        for (index, run) in text::build_runs(owner, text).into_iter().enumerate() {
+            let id = self.synthetic_node_id(("gpui-text-run", index));
+            if self.push_child(id, run.node) {
+                pushed.push(id);
+                infos.push(run.info);
+            }
+        }
+        let table: Vec<_> = pushed.iter().copied().zip(infos.iter()).collect();
+        if let Some(selection) = selection {
+            let clamp = |offset: usize| offset.min(text.len());
+            if let (Some(anchor), Some(focus)) = (
+                text::position_of(&table, clamp(selection.anchor)),
+                text::position_of(&table, clamp(selection.focus)),
+            ) {
+                self.parent_node()
+                    .set_text_selection(accesskit::TextSelection { anchor, focus });
+            }
+        }
+        for (id, info) in pushed.into_iter().zip(infos) {
+            self.nodes.text_runs.insert(id, info);
+        }
+    }
+
     /// A mutable reference to the parent node.
     pub fn parent_node(&mut self) -> &mut accesskit::Node {
         self.nodes
@@ -406,6 +450,9 @@ pub(crate) struct A11yNodeBuilder {
     /// pattern, which allows a focused container to act as if a descendant is
     /// focused.
     active_descendant: Option<NodeId>,
+    /// `TextRun` nodes built this frame by [`A11ySubtreeBuilder::push_text_runs`],
+    /// kept until the next frame so a `SetTextSelection` can be decoded.
+    pub(crate) text_runs: text::TextRuns,
     #[cfg(debug_assertions)]
     node_info: FxHashMap<NodeId, debug::NodeDebugInfo>,
 }
@@ -419,6 +466,7 @@ impl A11yNodeBuilder {
             seen_ids: FxHashSet::default(),
             focus: None,
             active_descendant: None,
+            text_runs: text::TextRuns::default(),
             #[cfg(debug_assertions)]
             node_info: FxHashMap::default(),
         }
@@ -479,6 +527,12 @@ impl A11yNodeBuilder {
         true
     }
 
+    /// The id of the node on top of the stack: the element being prepainted,
+    /// when it has a node of its own.
+    pub(crate) fn current_id(&self) -> Option<NodeId> {
+        self.ids_stack.last().copied()
+    }
+
     pub(crate) fn current_node_mut(&mut self) -> Option<&mut accesskit::Node> {
         self.nodes_stack.last_mut()
     }
@@ -499,6 +553,7 @@ impl A11yNodeBuilder {
         self.ids_stack.clear();
         self.nodes_stack.clear();
         self.seen_ids.clear();
+        self.text_runs.clear();
         #[cfg(debug_assertions)]
         self.node_info.clear();
         let mut root_node = accesskit::Node::new(accesskit::Role::Window);
