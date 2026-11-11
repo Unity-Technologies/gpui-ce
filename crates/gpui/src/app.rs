@@ -7,7 +7,7 @@ use crate::{
     PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, Point, Priority,
     PromptBuilder, PromptButton, PromptHandle, PromptLevel, Render, RenderImage,
     RenderablePromptHandle, Reservation, ScreenCaptureSource, SharedString, SubscriberSet,
-    Subscription, SvgRenderer, SystemNotification, SystemNotificationResponse, Task,
+    Subscription, SvgRenderer, SystemColors, SystemNotification, SystemNotificationResponse, Task,
     TextRenderingMode, TextSystem, ThermalState, Window, WindowAppearance, WindowButtonLayout,
     WindowHandle, WindowId, WindowInvalidator,
     colors::{Colors, GlobalColors},
@@ -863,6 +863,7 @@ pub struct App {
     pub(crate) keyboard_layout_observers: SubscriberSet<(), Handler>,
     pub(crate) thermal_state_observers: SubscriberSet<(), Handler>,
     pub(crate) contrast_preference: ContrastPreference,
+    pub(crate) forced_colors: Option<SystemColors>,
     pub(crate) contrast_preference_observers: SubscriberSet<(), Handler>,
     pub(crate) system_wake_observers: SubscriberSet<(), Handler>,
     pub(crate) release_listeners: SubscriberSet<EntityId, ReleaseListener>,
@@ -1007,6 +1008,7 @@ impl App {
                 keyboard_layout_observers: SubscriberSet::new(),
                 thermal_state_observers: SubscriberSet::new(),
                 contrast_preference: platform.contrast_preference(),
+                forced_colors: platform.forced_colors(),
                 contrast_preference_observers: SubscriberSet::new(),
                 system_wake_observers: SubscriberSet::new(),
                 global_observers: SubscriberSet::new(),
@@ -1694,7 +1696,16 @@ impl App {
         self.contrast_preference
     }
 
-    /// Calls `callback` when the system's contrast setting changes.
+    /// Returns the palette the OS draws with while the contrast setting is
+    /// [`ContrastPreference::Forced`], or `None` when the platform reports none.
+    ///
+    /// Changes to it notify [`App::on_contrast_preference_change`] observers.
+    pub fn forced_colors(&self) -> Option<SystemColors> {
+        self.forced_colors
+    }
+
+    /// Calls `callback` when the system's contrast setting or forced-colors
+    /// palette changes.
     ///
     /// Every window is redrawn after the callbacks run. The subscription stays
     /// active while you hold it.
@@ -1720,10 +1731,12 @@ impl App {
     /// for unrelated toggles.
     pub(crate) fn contrast_preference_changed(&mut self) {
         let contrast = self.platform.contrast_preference();
-        if contrast == self.contrast_preference {
+        let forced_colors = self.platform.forced_colors();
+        if contrast == self.contrast_preference && forced_colors == self.forced_colors {
             return;
         }
         self.contrast_preference = contrast;
+        self.forced_colors = forced_colors;
         self.contrast_preference_observers
             .clone()
             .retain(&(), |callback| (callback)(self));

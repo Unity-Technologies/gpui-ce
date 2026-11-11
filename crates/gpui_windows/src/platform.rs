@@ -445,6 +445,10 @@ impl Platform for WindowsPlatform {
         system_contrast_preference().log_err().unwrap_or_default()
     }
 
+    fn forced_colors(&self) -> Option<SystemColors> {
+        (self.contrast_preference() == ContrastPreference::Forced).then(system_forced_colors)
+    }
+
     fn on_contrast_preference_change(&self, callback: Box<dyn FnMut()>) {
         self.inner
             .state

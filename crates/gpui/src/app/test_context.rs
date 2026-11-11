@@ -5,9 +5,9 @@ use crate::{
     Empty, EntityId, EventEmitter, ForegroundExecutor, Global, InputEvent, Keystroke, Modifiers,
     ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
     Platform, PlatformHeadlessRenderer, PlatformTextSystem, Point, Render, Result, SharedString,
-    Size, SystemNotification, SystemNotificationResponse, Task, TestDispatcher, TestPlatform,
-    TestScreenCaptureSource, TestTextSystem, TestWindow, TextSystem, VisualContext, Window,
-    WindowBounds, WindowHandle, WindowOptions, app::GpuiMode, window::ElementArenaScope,
+    Size, SystemColors, SystemNotification, SystemNotificationResponse, Task, TestDispatcher,
+    TestPlatform, TestScreenCaptureSource, TestTextSystem, TestWindow, TextSystem, VisualContext,
+    Window, WindowBounds, WindowHandle, WindowOptions, app::GpuiMode, window::ElementArenaScope,
 };
 use anyhow::{anyhow, bail};
 use futures::{Stream, StreamExt, channel::oneshot};
@@ -573,7 +573,15 @@ impl TestAppContext {
     /// Changes the contrast setting the test platform reports, as if the user
     /// toggled it in the OS accessibility settings.
     pub fn simulate_contrast_preference(&self, contrast: ContrastPreference) {
-        self.test_platform.simulate_contrast_preference(contrast);
+        self.test_platform
+            .simulate_contrast_preference(contrast, None);
+    }
+
+    /// Turns on [`ContrastPreference::Forced`] with `colors` as the palette, as
+    /// if the user picked a Windows contrast theme.
+    pub fn simulate_forced_colors(&self, colors: SystemColors) {
+        self.test_platform
+            .simulate_contrast_preference(ContrastPreference::Forced, Some(colors));
     }
 
     /// Resizes `window_handle` to `size`. See [`VisualTestContext::simulate_resize`].
@@ -1434,7 +1442,7 @@ mod tests {
     use crate::{
         AssetSource, Context, ContrastPreference, DevicePixels, IntoElement, ParentElement as _,
         PathPromptOptions, PlatformAtlas, PlatformHeadlessRenderer, Render, Scene, SharedString,
-        Size, Styled as _, SystemNotification, SystemNotificationAction,
+        Size, Styled as _, SystemColors, SystemNotification, SystemNotificationAction,
         SystemNotificationResponse, TestAppContext, TestAtlas, TestDispatcher, TestTextSystem,
         VisualTestContext, Window, div, px, size,
     };
@@ -1675,6 +1683,40 @@ mod tests {
             ]
         );
         assert!(!cx.update(|cx| cx.contrast_preference()).is_increased());
+    }
+
+    #[gpui::test]
+    fn test_forced_colors_palette_change_notifies(cx: &mut TestAppContext) {
+        let black = SystemColors {
+            canvas: crate::rgb(0x000000),
+            canvas_text: crate::rgb(0xffffff),
+            link_text: crate::rgb(0x75e9fc),
+            highlight: crate::rgb(0x8ee3f0),
+            highlight_text: crate::rgb(0x263b50),
+            button_face: crate::rgb(0x202020),
+            button_text: crate::rgb(0xffffff),
+            gray_text: crate::rgb(0xa6a6a6),
+        };
+        let white = SystemColors {
+            canvas: crate::rgb(0xffffff),
+            canvas_text: crate::rgb(0x000000),
+            ..black
+        };
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = cx.update(|cx| {
+            cx.on_contrast_preference_change({
+                let seen = seen.clone();
+                move |cx| seen.borrow_mut().push(cx.forced_colors())
+            })
+        });
+
+        cx.simulate_forced_colors(black);
+        cx.simulate_forced_colors(black);
+        // Switching contrast themes keeps `Forced` but changes the palette.
+        cx.simulate_forced_colors(white);
+        cx.simulate_contrast_preference(ContrastPreference::NoPreference);
+
+        assert_eq!(seen.borrow().as_slice(), &[Some(black), Some(white), None]);
     }
 
     #[gpui::test]

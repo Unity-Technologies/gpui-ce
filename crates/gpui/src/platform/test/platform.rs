@@ -3,8 +3,8 @@ use crate::{
     DevicePixels, DummyKeyboardMapper, ForegroundExecutor, Keymap, Platform, PlatformDisplay,
     PlatformHeadlessRenderer, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
     PromptButton, ScreenCaptureFrame, ScreenCaptureSource, ScreenCaptureStream, SharedString,
-    SourceMetadata, SystemNotification, SystemNotificationResponse, Task, TestDisplay, TestWindow,
-    ThermalState, WindowAppearance, WindowParams, size,
+    SourceMetadata, SystemColors, SystemNotification, SystemNotificationResponse, Task,
+    TestDisplay, TestWindow, ThermalState, WindowAppearance, WindowParams, size,
 };
 #[cfg(any(test, feature = "test-support"))]
 use crate::{PathPromptOptions, TestTextSystem};
@@ -45,6 +45,7 @@ pub(crate) struct TestPlatform {
     scale_factor: f32,
     contrast_preference: Cell<ContrastPreference>,
     contrast_preference_change: RefCell<Option<Box<dyn FnMut()>>>,
+    forced_colors: Cell<Option<SystemColors>>,
     weak: Weak<Self>,
 }
 
@@ -189,6 +190,7 @@ impl TestPlatform {
             scale_factor,
             contrast_preference: Cell::new(ContrastPreference::NoPreference),
             contrast_preference_change: RefCell::new(None),
+            forced_colors: Cell::new(None),
         })
     }
 
@@ -358,8 +360,13 @@ impl TestPlatform {
 
     /// Sets the contrast setting this platform reports, then fires the change
     /// callback the way an OS settings notification would.
-    pub(crate) fn simulate_contrast_preference(&self, contrast: ContrastPreference) {
+    pub(crate) fn simulate_contrast_preference(
+        &self,
+        contrast: ContrastPreference,
+        forced_colors: Option<SystemColors>,
+    ) {
         self.contrast_preference.set(contrast);
+        self.forced_colors.set(forced_colors);
         let callback = self.contrast_preference_change.borrow_mut().take();
         if let Some(mut callback) = callback {
             callback();
@@ -424,6 +431,10 @@ impl Platform for TestPlatform {
 
     fn on_contrast_preference_change(&self, callback: Box<dyn FnMut()>) {
         *self.contrast_preference_change.borrow_mut() = Some(callback);
+    }
+
+    fn forced_colors(&self) -> Option<SystemColors> {
+        self.forced_colors.get()
     }
 
     fn run(&self, on_finish_launching: Box<dyn FnOnce()>) {

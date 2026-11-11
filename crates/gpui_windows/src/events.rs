@@ -158,6 +158,11 @@ impl WindowsWindowInner {
             WM_IME_COMPOSITION => self.handle_ime_composition(handle, lparam),
             WM_SETCURSOR => self.handle_set_cursor(handle, lparam),
             WM_SETTINGCHANGE => self.handle_system_settings_changed(handle, wparam, lparam),
+            // Editing a contrast theme's colors sends only this, not `SPI_SETHIGHCONTRAST`.
+            WM_SYSCOLORCHANGE => {
+                self.post_contrast_changed();
+                None
+            }
             WM_INPUTLANGCHANGE => self.handle_input_language_changed(),
             WM_SHOWWINDOW => self.handle_window_visibility_changed(handle, wparam),
             WM_GPUI_CURSOR_STYLE_CHANGED => self.handle_cursor_changed(lparam),
