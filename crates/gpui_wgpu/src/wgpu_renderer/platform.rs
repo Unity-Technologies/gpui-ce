@@ -225,6 +225,66 @@ impl WgpuRenderer {
         }
     }
 
+    /// Destroys the presentation surface, keeping the device, pipelines and atlas.
+    ///
+    /// Call before the platform unmaps the window itself (a Wayland null-buffer attach).
+    /// Dropping the surface lets the driver tear down its own window-system state first.
+    /// NVIDIA's EGL otherwise keeps buffers and sync state for a surface it no longer
+    /// owns, and aborts inside `eglSwapBuffers` on a later present.
+    pub fn release_surface(&mut self) {
+        self.target.set_configured(false);
+        if let Some(resources) = self.resources.as_mut() {
+            resources.surface = None;
+            resources.invalidate_intermediate_textures();
+        }
+    }
+
+    /// Recreates a surface dropped by [`Self::release_surface`] on the same device.
+    /// Does nothing while a surface exists, including one that device recovery made.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn restore_surface<W: HasWindowHandle>(&mut self, window: &W) -> anyhow::Result<()> {
+        let Some(resources) = self.resources.as_ref() else {
+            return Ok(());
+        };
+        if resources.surface.is_some() {
+            return Ok(());
+        }
+        let window_handle = window
+            .window_handle()
+            .map_err(|error| anyhow::anyhow!("failed to get window handle: {error}"))?;
+        let surface = {
+            let context_slot = self
+                .context
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("surface restore requires a GPU context"))?
+                .borrow();
+            let context = context_slot
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("surface restore requires a live GPU context"))?;
+            let surface = create_surface(
+                &context.instance,
+                NativeSurfaceTarget::Window(window_handle.as_raw()),
+            )?;
+            let format = self.target.configuration().format;
+            if !surface
+                .get_capabilities(&context.adapter)
+                .formats
+                .contains(&format)
+            {
+                anyhow::bail!("restored surface no longer supports {format:?}");
+            }
+            surface
+        };
+        let config = self.target.configuration().clone();
+        let resources = self.resources_mut();
+        surface.configure(&resources.device, &config);
+        resources.surface = Some(surface);
+        resources.invalidate_intermediate_textures();
+        self.target.set_configured(true);
+        self.target.request_redraw();
+        Ok(())
+    }
+
     #[cfg(not(target_family = "wasm"))]
     pub fn replace_surface<W: HasWindowHandle>(
         &mut self,

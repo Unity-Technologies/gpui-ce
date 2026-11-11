@@ -668,6 +668,19 @@ impl WaylandWindowState {
         })
     }
 
+    fn raw_window(&self) -> RawWindow {
+        RawWindow {
+            window: self.surface.id().as_ptr().cast::<c_void>(),
+            display: self
+                .surface
+                .backend()
+                .upgrade()
+                .unwrap()
+                .display_ptr()
+                .cast::<c_void>(),
+        }
+    }
+
     pub fn is_transparent(&self) -> bool {
         self.decorations == WindowDecorations::Client || self.background_appearance.is_transparent()
     }
@@ -2008,6 +2021,8 @@ impl PlatformWindow for WaylandWindow {
             // Attaching a null buffer unmaps an xdg surface without destroying its role objects.
             // The next map must wait for a new configure before presenting another buffer.
             state.pending_frame_callback.take();
+            // The driver must drop its surface before the null attach (HUB-8810).
+            state.renderer.release_surface();
             state.surface.attach(None, 0, 0);
             state.surface.commit();
             state.presentation = PresentationState::Unpresented;
@@ -2111,16 +2126,7 @@ impl PlatformWindow for WaylandWindow {
         }
 
         if state.renderer.device_lost() {
-            let raw_window = RawWindow {
-                window: state.surface.id().as_ptr().cast::<std::ffi::c_void>(),
-                display: state
-                    .surface
-                    .backend()
-                    .upgrade()
-                    .unwrap()
-                    .display_ptr()
-                    .cast::<std::ffi::c_void>(),
-            };
+            let raw_window = state.raw_window();
             match state.renderer.recover(&raw_window) {
                 Ok(()) => {}
                 Err(err) => {
@@ -2128,6 +2134,14 @@ impl PlatformWindow for WaylandWindow {
                 }
             }
 
+            state.redraw_requested = true;
+            return;
+        }
+
+        // A hide released the surface; build a new one for this map.
+        let raw_window = state.raw_window();
+        if let Err(err) = state.renderer.restore_surface(&raw_window) {
+            log::warn!("Restoring the window surface failed, will retry on next frame: {err}");
             state.redraw_requested = true;
             return;
         }
