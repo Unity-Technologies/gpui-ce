@@ -389,6 +389,10 @@ struct ViewElementState {
     paint_range: Range<PaintIndex>,
     cache_key: ViewElementCacheKey,
     accessed_entities: FxHashSet<EntityId>,
+    /// Element states the view's subtree read while the direction probe
+    /// rendered it in `request_layout`, before `prepaint_range` began. A reuse
+    /// replays only that range, so these are carried over on their own.
+    layout_element_states: Vec<(GlobalElementId, TypeId)>,
 }
 
 /// The state that a [`ViewElement`] passes from `request_layout` to `prepaint` and `paint`.
@@ -402,6 +406,7 @@ pub struct ViewElementRequestLayoutState {
     element: Option<AnyElement>,
     detached_layout_id: Option<LayoutId>,
     accessed_entities: FxHashSet<EntityId>,
+    accessed_element_states: Vec<(GlobalElementId, TypeId)>,
 }
 
 #[derive(Default)]
@@ -464,6 +469,7 @@ impl<V: View> Element for ViewElement<V> {
                     !known || window.dirty_views.contains(&entity_id) || window.refreshing;
 
                 if should_probe {
+                    let element_states_start = window.next_frame.accessed_element_states.len();
                     let ((element, detached_layout_id), accessed_entities) = cx
                         .detect_accessed_entities(|cx| {
                             let mut element = render_view(self.view.take().unwrap(), window, cx);
@@ -475,6 +481,8 @@ impl<V: View> Element for ViewElement<V> {
                         layout_id,
                         std::slice::from_ref(&detached_layout_id),
                     );
+                    let accessed_element_states =
+                        window.next_frame.accessed_element_states[element_states_start..].to_vec();
 
                     return (
                         layout_id,
@@ -482,6 +490,7 @@ impl<V: View> Element for ViewElement<V> {
                             element: Some(element),
                             detached_layout_id: Some(detached_layout_id),
                             accessed_entities,
+                            accessed_element_states,
                         },
                     );
                 }
@@ -552,6 +561,10 @@ impl<V: View> Element for ViewElement<V> {
                         {
                             let prepaint_start = window.prepaint_index();
                             window.reuse_prepaint(element_state.prepaint_range.clone());
+                            window
+                                .next_frame
+                                .accessed_element_states
+                                .extend(element_state.layout_element_states.iter().cloned());
                             cx.entities
                                 .extend_accessed(&element_state.accessed_entities);
                             window.next_frame.record_view_dependencies(
@@ -568,6 +581,8 @@ impl<V: View> Element for ViewElement<V> {
                         let prepaint_start = window.prepaint_index();
                         let mut accessed_entities =
                             mem::take(&mut request_layout.accessed_entities);
+                        let layout_element_states =
+                            mem::take(&mut request_layout.accessed_element_states);
                         let (element, additional_entities) = cx.detect_accessed_entities(|cx| {
                             let mut element = request_layout.element.take().unwrap_or_else(|| {
                                 render_view(self.view.take().unwrap(), window, cx)
@@ -609,6 +624,7 @@ impl<V: View> Element for ViewElement<V> {
                                 prepaint_range: prepaint_start..prepaint_end,
                                 paint_range: PaintIndex::default()..PaintIndex::default(),
                                 cache_key,
+                                layout_element_states,
                             },
                         )
                     },
