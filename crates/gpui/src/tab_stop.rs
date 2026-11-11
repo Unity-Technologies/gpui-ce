@@ -13,6 +13,9 @@ pub(crate) struct TabStopMap {
     pub(crate) insertion_history: Vec<TabStopOperation>,
     by_id: FxHashMap<FocusId, TabStopNode>,
     order: SumTree<TabStopNode>,
+    /// Number of `by_id` entries that are tab stops, kept current by `insert`
+    /// so the per-frame a11y debug harvest is O(1) instead of a scan.
+    tab_stop_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -70,6 +73,7 @@ impl Default for TabStopMap {
             insertion_history: Vec::new(),
             by_id: FxHashMap::default(),
             order: SumTree::new(()),
+            tab_stop_count: 0,
         }
     }
 }
@@ -85,7 +89,13 @@ impl TabStopMap {
             tab_stop: focus_handle.tab_stop,
             path,
         };
-        self.by_id.insert(focus_handle.id, order.clone());
+        let replaced = self.by_id.insert(focus_handle.id, order.clone());
+        if replaced.is_some_and(|node| node.tab_stop) {
+            self.tab_stop_count -= 1;
+        }
+        if order.tab_stop {
+            self.tab_stop_count += 1;
+        }
         self.order.insert_or_replace(order, ());
     }
 
@@ -106,6 +116,7 @@ impl TabStopMap {
         self.insertion_history.clear();
         self.by_id.clear();
         self.order = SumTree::new(());
+        self.tab_stop_count = 0;
     }
 
     pub fn next(&self, focused_id: Option<&FocusId>) -> Option<FocusHandle> {
@@ -197,7 +208,7 @@ impl TabStopMap {
     }
 
     pub(crate) fn tab_stop_count(&self) -> usize {
-        self.by_id.values().filter(|node| node.tab_stop).count()
+        self.tab_stop_count
     }
 
     fn focus_handle_for_order(&self, order: &TabStopNode) -> Option<FocusHandle> {
@@ -315,13 +326,14 @@ mod sum_tree_impl {
 #[cfg(test)]
 mod tests {
     use itertools::Itertools as _;
+    use parking_lot::RwLock;
 
     use crate::{FocusHandle, FocusId, FocusMap, TabStopMap};
     use std::sync::Arc;
 
     #[test]
     fn test_tab_handles() {
-        let focus_map = Arc::new(FocusMap::default());
+        let focus_map = Arc::new(RwLock::new(FocusMap::default()));
         let mut tab_index_map = TabStopMap::default();
 
         let focus_handles = [
@@ -409,8 +421,33 @@ mod tests {
     }
 
     #[test]
+    fn test_tab_stop_count_tracks_inserts_replacements_and_clear() {
+        let focus_map = Arc::new(RwLock::new(FocusMap::default()));
+        let mut map = TabStopMap::default();
+        let stop = FocusHandle::new(&focus_map).tab_stop(true).tab_index(0);
+        let other_stop = FocusHandle::new(&focus_map).tab_stop(true).tab_index(1);
+        let non_stop = FocusHandle::new(&focus_map).tab_stop(false).tab_index(2);
+
+        map.insert(&stop);
+        map.insert(&non_stop);
+        map.insert(&other_stop);
+        assert_eq!(map.tab_stop_count(), 2);
+
+        // The same handle inserted again replaces its `by_id` entry.
+        map.insert(&stop);
+        assert_eq!(map.tab_stop_count(), 2);
+
+        let mut replayed = TabStopMap::default();
+        replayed.replay(&map.insertion_history);
+        assert_eq!(replayed.tab_stop_count(), 2);
+
+        map.clear();
+        assert_eq!(map.tab_stop_count(), 0);
+    }
+
+    #[test]
     fn test_tab_non_stop_filtering() {
-        let focus_map = Arc::new(FocusMap::default());
+        let focus_map = Arc::new(RwLock::new(FocusMap::default()));
         let mut tab_index_map = TabStopMap::default();
 
         // Check that we can query next from a non-stop tab
@@ -433,7 +470,7 @@ mod tests {
     #[must_use]
     struct TabStopMapTest {
         tab_map: TabStopMap,
-        focus_map: Arc<FocusMap>,
+        focus_map: Arc<RwLock<FocusMap>>,
         expected: Vec<(usize, FocusId)>,
     }
 
@@ -442,7 +479,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 tab_map: TabStopMap::default(),
-                focus_map: Arc::new(FocusMap::default()),
+                focus_map: Arc::new(RwLock::new(FocusMap::default())),
                 expected: Vec::default(),
             }
         }
