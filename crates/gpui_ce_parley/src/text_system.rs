@@ -11,7 +11,7 @@ use gpui::{
     PreparedRasterStyle, RasterStyleRequest, RasterizedGlyph, RenderGlyphParams, ResolvedDirection,
     ShapedGlyph, Size, TextAlign, TextBoundary as Boundary, TextDirection as Direction,
     TextLayoutOptions, TextLayoutRequest, TextMovement, TextRangeExt, TextRenderingMode, TextRun,
-    TextSelectionKind, UnicodeBidi, VisualDirection, VisualLine, align_inline_boxes,
+    TextSelectionKind, UnicodeBidi, VisualDirection, VisualLine, WordBreak, align_inline_boxes,
     is_paragraph_separator, point, px, size,
 };
 use parking_lot::{Mutex, RwLock};
@@ -76,6 +76,7 @@ struct ParagraphCacheKey {
     inline_boxes: Vec<InlineBoxRequest>,
     text_styles: Vec<InlineTextStyle>,
     line_height: Option<Pixels>,
+    word_break: WordBreak,
 }
 
 struct BoundedCache<Key, Value, const CAPACITY: usize> {
@@ -1363,6 +1364,16 @@ impl PlatformTextLayout for ParleyLayout {
     }
 }
 
+/// The Parley value for `word_break`, or `None` for Parley's own default, so a
+/// paragraph under [`WordBreak::Normal`] is built exactly as before the setting existed.
+fn parley_word_break(word_break: WordBreak) -> Option<parley::WordBreak> {
+    match word_break {
+        WordBreak::Normal => None,
+        WordBreak::BreakAll => Some(parley::WordBreak::BreakAll),
+        WordBreak::KeepAll => Some(parley::WordBreak::KeepAll),
+    }
+}
+
 impl ParleyState {
     fn new(system_fonts: SystemFonts) -> Self {
         Self {
@@ -1387,6 +1398,7 @@ pub struct ParleyTextSystem {
     paragraph_result_cache: Mutex<ParagraphResultCache>,
     system_font_fallback: String,
     additional_fallbacks: Vec<String>,
+    word_break: Mutex<WordBreak>,
 }
 
 impl ParleyTextSystem {
@@ -1440,6 +1452,7 @@ impl ParleyTextSystem {
             paragraph_result_cache: Mutex::default(),
             system_font_fallback: system_font_fallback.into(),
             additional_fallbacks: Vec::new(),
+            word_break: Mutex::new(WordBreak::Normal),
         }
     }
 
@@ -1806,6 +1819,7 @@ impl ParleyTextSystem {
             line_height
         };
         let paragraph_text: Arc<str> = text.into();
+        let word_break = *self.word_break.lock();
         let cache_key = ParagraphCacheKey {
             font_generation: self.font_generation.load(Ordering::Acquire),
             text: paragraph_text.clone(),
@@ -1814,6 +1828,7 @@ impl ParleyTextSystem {
             inline_boxes: inline_boxes.to_vec(),
             text_styles: text_styles.to_vec(),
             line_height,
+            word_break,
         };
         let result_cache_key = ParagraphResultCacheKey {
             paragraph: cache_key.clone(),
@@ -1885,6 +1900,9 @@ impl ParleyTextSystem {
             let mut builder = layout_context.ranged_builder(font_context, text, 1.0, false);
             builder.set_line_break_override(Some(CHROMIUM_LINE_BREAK_OVERRIDE));
             builder.push_default(StyleProperty::FontSize(f32::from(font_size)));
+            if let Some(word_break) = parley_word_break(word_break) {
+                builder.push_default(StyleProperty::WordBreak(word_break));
+            }
 
             let default_optical_settings = self.automatic_optical_sizing.then(|| {
                 [ParleyFontVariation::new(
@@ -2410,6 +2428,17 @@ impl PlatformTextSystem for ParleyTextSystem {
 
     fn font_generation(&self) -> u64 {
         self.font_generation.load(Ordering::Acquire)
+    }
+
+    fn set_word_break(&self, word_break: WordBreak) {
+        let mut current = self.word_break.lock();
+        if *current == word_break {
+            return;
+        }
+        *current = word_break;
+        // Paragraph caches key on the value; the generation tells GPUI's
+        // per-window line caches to drop layouts wrapped under the old one.
+        let _previous_generation = self.font_generation.fetch_add(1, Ordering::Release);
     }
 
     fn font_id(&self, descriptor: &Font) -> Result<FontId> {
@@ -4206,6 +4235,88 @@ mod tests {
                 previous_end = first_line_end;
             }
         }
+    }
+
+    /// Byte offsets where `layout` soft-wraps, one per row after the first.
+    fn soft_breaks(layout: &LineLayout) -> Vec<usize> {
+        layout
+            .visual_lines
+            .iter()
+            .skip(1)
+            .map(|line| line.text_range.start)
+            .collect()
+    }
+
+    #[test]
+    fn keep_all_wraps_korean_only_between_words() {
+        let system = test_system();
+        let text = "새 프로젝트를 만들려면 유니티 에디터를 먼저 설치하세요";
+        let runs = [text_run(text, IBM_PLEX.family)];
+        let after_space = |offset: usize| text[..offset].ends_with(' ');
+        let generation = system.font_generation();
+        let mut normal_split_a_word = false;
+
+        for width in (40..=400).step_by(7) {
+            let width = px(width as f32);
+            let normal = layout_wrapped(&system, text, px(16.0), &runs, width, None);
+            normal_split_a_word |= soft_breaks(&normal).into_iter().any(|at| !after_space(at));
+
+            system.set_word_break(WordBreak::KeepAll);
+            let keep_all = layout_wrapped(&system, text, px(16.0), &runs, width, None);
+            for at in soft_breaks(&keep_all) {
+                assert!(
+                    after_space(at),
+                    "keep-all split a word at byte {at} at {width:?}: {:?}",
+                    keep_all.visual_lines
+                );
+            }
+
+            system.set_word_break(WordBreak::Normal);
+            let normal_again = layout_wrapped(&system, text, px(16.0), &runs, width, None);
+            assert_eq!(
+                soft_breaks(&normal_again),
+                soft_breaks(&normal),
+                "switching back to normal at {width:?} brings back its breaks"
+            );
+        }
+
+        assert!(
+            normal_split_a_word,
+            "normal breaks between Hangul syllables"
+        );
+        assert!(
+            system.font_generation() > generation,
+            "a word-break change advances the layout generation"
+        );
+    }
+
+    #[test]
+    fn normal_word_break_still_wraps_between_ideographs() {
+        let system = test_system();
+        let text = "请先安装统一编辑器然后创建新项目";
+        let runs = [text_run(text, IBM_PLEX.family)];
+        system.set_word_break(WordBreak::KeepAll);
+        system.set_word_break(WordBreak::Normal);
+        let layout = layout_wrapped(&system, text, px(16.0), &runs, px(80.0), None);
+
+        assert!(
+            layout.visual_lines.len() > 1,
+            "an unspaced Chinese sentence wraps: {:?}",
+            layout.visual_lines
+        );
+    }
+
+    #[test]
+    fn setting_the_same_word_break_keeps_the_generation() {
+        let system = test_system();
+        let generation = system.font_generation();
+        system.set_word_break(WordBreak::Normal);
+        assert_eq!(system.font_generation(), generation);
+        system.set_word_break(WordBreak::KeepAll);
+        let keep_all = system.font_generation();
+        assert!(keep_all > generation);
+        system.set_word_break(WordBreak::KeepAll);
+        assert_eq!(system.font_generation(), keep_all);
     }
 
     #[test]
