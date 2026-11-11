@@ -272,12 +272,21 @@ impl WindowsWindowInner {
         let new_logical_size = device_size.to_pixels(scale_factor);
 
         self.state.logical_size.set(new_logical_size);
-        if let Err(e) = self.state.renderer.borrow_mut().resize(device_size) {
-            log::error!("Failed to resize renderer, invalidating devices: {}", e);
-            self.state
-                .invalidate_devices
-                .store(true, std::sync::atomic::Ordering::Release);
+        let mut renderer = self.state.renderer.borrow_mut();
+        if let Err(e) = renderer.resize(device_size) {
+            // Only a removed device needs recovery. Any other failure (an
+            // out-of-memory resize, say) leaves the device usable, and the
+            // renderer retries the resize on its next draw.
+            if renderer.is_device_removed() {
+                log::error!("Failed to resize renderer, invalidating devices: {}", e);
+                self.state
+                    .invalidate_devices
+                    .store(true, std::sync::atomic::Ordering::Release);
+            } else {
+                log::warn!("Failed to resize renderer, will retry: {}", e);
+            }
         }
+        drop(renderer);
         if let Some(mut callback) = self.state.callbacks.resize.take() {
             callback(new_logical_size, scale_factor);
             self.state.callbacks.resize.set(Some(callback));
