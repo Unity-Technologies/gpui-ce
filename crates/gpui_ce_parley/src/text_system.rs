@@ -2344,10 +2344,10 @@ impl ParleyTextSystem {
 
             width = width.max(line_advance);
             ascent = ascent.max(px(
-                (metrics.baseline - metrics.content_block_min_coord).max(0.),
+                (metrics.baseline - metrics.content_block_min_coord).max(0.)
             ));
             descent = descent.max(px(
-                (metrics.content_block_max_coord - metrics.baseline).max(0.),
+                (metrics.content_block_max_coord - metrics.baseline).max(0.)
             ));
         }
 
