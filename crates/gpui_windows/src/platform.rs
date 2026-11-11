@@ -89,6 +89,7 @@ struct PlatformCallbacks {
     will_open_app_menu: Cell<Option<Box<dyn FnMut()>>>,
     validate_app_menu_command: Cell<Option<Box<dyn FnMut(&dyn Action) -> bool>>>,
     keyboard_layout_change: Cell<Option<Box<dyn FnMut()>>>,
+    contrast_preference_change: Cell<Option<Box<dyn FnMut()>>>,
     system_wake: Cell<Option<Box<dyn FnMut()>>>,
 }
 
@@ -440,6 +441,22 @@ impl Platform for WindowsPlatform {
 
     fn on_thermal_state_change(&self, _callback: Box<dyn FnMut()>) {}
 
+    fn contrast_preference(&self) -> ContrastPreference {
+        system_contrast_preference().log_err().unwrap_or_default()
+    }
+
+    fn forced_colors(&self) -> Option<SystemColors> {
+        (self.contrast_preference() == ContrastPreference::Forced).then(system_forced_colors)
+    }
+
+    fn on_contrast_preference_change(&self, callback: Box<dyn FnMut()>) {
+        self.inner
+            .state
+            .callbacks
+            .contrast_preference_change
+            .set(Some(callback));
+    }
+
     fn thermal_state(&self) -> ThermalState {
         ThermalState::Nominal
     }
@@ -623,12 +640,8 @@ impl Platform for WindowsPlatform {
         options: PathPromptOptions,
     ) -> Receiver<Result<Option<Vec<PathBuf>>>> {
         let (tx, rx) = oneshot::channel();
-        let window = self.find_current_active_window();
-        self.foreground_executor()
-            .spawn(async move {
-                let _ = tx.send(file_open_dialog(options, window));
-            })
-            .detach();
+        let owner = self.find_current_active_window();
+        run_dialog_on_sta_thread(owner, tx, move |window| file_open_dialog(options, window));
 
         rx
     }
@@ -641,12 +654,10 @@ impl Platform for WindowsPlatform {
         let directory = directory.to_owned();
         let suggested_name = suggested_name.map(|s| s.to_owned());
         let (tx, rx) = oneshot::channel();
-        let window = self.find_current_active_window();
-        self.foreground_executor()
-            .spawn(async move {
-                let _ = tx.send(file_save_dialog(directory, suggested_name, window));
-            })
-            .detach();
+        let owner = self.find_current_active_window();
+        run_dialog_on_sta_thread(owner, tx, move |window| {
+            file_save_dialog(directory, suggested_name, window)
+        });
 
         rx
     }
@@ -1014,6 +1025,7 @@ impl WindowsPlatformInner {
             | WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD
             | WM_GPUI_DOCK_MENU_ACTION
             | WM_GPUI_KEYBOARD_LAYOUT_CHANGED
+            | WM_GPUI_CONTRAST_CHANGED
             | WM_GPUI_GPU_DEVICE_LOST
             | WM_GPUI_END_SESSION => self.handle_gpui_events(msg, wparam, lparam),
             WM_POWERBROADCAST => self.handle_power_broadcast(wparam),
@@ -1039,6 +1051,7 @@ impl WindowsPlatformInner {
             WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD => self.run_foreground_task(),
             WM_GPUI_DOCK_MENU_ACTION => self.handle_dock_action_event(lparam.0 as _),
             WM_GPUI_KEYBOARD_LAYOUT_CHANGED => self.handle_keyboard_layout_change(),
+            WM_GPUI_CONTRAST_CHANGED => self.handle_contrast_preference_change(),
             WM_GPUI_GPU_DEVICE_LOST => self.handle_device_lost(lparam),
             WM_GPUI_END_SESSION => self.handle_end_session(),
             _ => unreachable!(),
@@ -1167,6 +1180,14 @@ impl WindowsPlatformInner {
     fn handle_keyboard_layout_change(&self) -> Option<isize> {
         self.with_callback(
             |callbacks| &callbacks.keyboard_layout_change,
+            |callback| callback(),
+        );
+        Some(0)
+    }
+
+    fn handle_contrast_preference_change(&self) -> Option<isize> {
+        self.with_callback(
+            |callbacks| &callbacks.contrast_preference_change,
             |callback| callback(),
         );
         Some(0)
@@ -1313,6 +1334,59 @@ fn open_target_in_explorer(target: &Path) -> Result<()> {
             Err(anyhow::anyhow!("Can not open target path: {}", err))
         }
     })
+}
+
+/// One lock per owner window, so a second request for the same owner waits instead of stacking
+/// a second modal dialog on it.
+fn owner_dialog_lock(owner: isize) -> Arc<std::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<isize, Arc<std::sync::Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(owner)
+        .or_default()
+        .clone()
+}
+
+/// Runs a common file dialog on its own single-threaded-apartment thread, so the UI thread keeps
+/// pumping messages while the dialog is open. `owner` stays the dialog's owner window.
+///
+/// Dropping the receiver is the cancel flag: a request whose receiver is gone by the time it
+/// reaches the front of its owner's queue never shows a dialog.
+fn run_dialog_on_sta_thread<T: Send + 'static>(
+    owner: Option<HWND>,
+    tx: oneshot::Sender<Result<Option<T>>>,
+    dialog: impl FnOnce(Option<HWND>) -> Result<Option<T>> + Send + 'static,
+) {
+    let owner_raw = owner.map(|hwnd| hwnd.0 as isize);
+    let spawned = std::thread::Builder::new()
+        .name("FileDialog".to_string())
+        .spawn(move || {
+            let lock = owner_dialog_lock(owner_raw.unwrap_or(0));
+            let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if tx.is_canceled() {
+                return;
+            }
+            // Dialogs need an STA; the thread owns this apartment for its whole life.
+            let init = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+            let result = if init.is_ok() {
+                let owner = owner_raw.map(|raw| HWND(raw as *mut std::ffi::c_void));
+                let result = dialog(owner);
+                unsafe { CoUninitialize() };
+                result
+            } else {
+                Err(anyhow::anyhow!(
+                    "CoInitializeEx failed for the file dialog thread: {init:?}"
+                ))
+            };
+            let _ = tx.send(result);
+        });
+    if let Err(error) = spawned {
+        log::error!("failed to spawn the file dialog thread: {error}");
+    }
 }
 
 fn file_open_dialog(

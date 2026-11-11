@@ -913,6 +913,21 @@ impl WaylandClient {
                             }
                         }
                     }
+                    XDPEvent::Contrast(contrast) => {
+                        if let Some(client) = client.0.upgrade() {
+                            let callback =
+                                client.borrow_mut().common.set_contrast_preference(contrast);
+                            if let Some(mut callback) = callback {
+                                callback();
+                                client
+                                    .borrow_mut()
+                                    .common
+                                    .callbacks
+                                    .contrast_preference_change
+                                    .get_or_insert(callback);
+                            }
+                        }
+                    }
                     XDPEvent::CursorTheme(theme) => {
                         if let Some(client) = client.0.upgrade() {
                             let mut client = client.borrow_mut();

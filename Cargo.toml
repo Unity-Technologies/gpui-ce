@@ -242,6 +242,7 @@ objc2-core-media = { version = "0.3", default-features = false, features = [
 ] }
 objc2-quartz-core = { version = "0.3", default-features = false, features = [
   "CALayer",
+  "CAMetalDisplayLink",
   "CAMetalLayer",
 ] }
 objc2-screen-capture-kit = { version = "0.3", default-features = false, features = [

@@ -49,8 +49,13 @@ pub mod profiler;
 ))]
 #[expect(missing_docs)]
 pub mod queue;
+/// A seeded, mutable element tree for benchmarks and tests of GPUI rendering.
+#[cfg(any(test, feature = "bench-support"))]
+pub mod randomized_element_tree;
 mod resize;
 mod scene;
+#[cfg(any(test, feature = "test-support", feature = "bench-support"))]
+mod seeds;
 mod shared_uri;
 mod spring;
 mod style;
@@ -70,6 +75,8 @@ mod window;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use proptest;
+#[cfg(any(test, feature = "test-support", feature = "bench-support"))]
+pub use seeds::calculate_seeds;
 
 #[cfg(doc)]
 pub mod _accessibility;
@@ -81,6 +88,7 @@ pub mod _ownership_and_data_flow;
 pub mod private {
     pub use anyhow;
     pub use inventory;
+    pub use rand;
     pub use schemars;
     pub use serde;
     pub use serde_json;

@@ -281,12 +281,20 @@ impl InstanceBufferPool {
     }
 }
 
+enum DisplayLinkMode {
+    Detached,
+    Attached {
+        drawable: Option<metal::MetalDrawable>,
+    },
+}
+
 pub struct MetalRenderer {
     device: metal::Device,
     layer: Option<metal::MetalLayer>,
     is_apple_gpu: bool,
     is_unified_memory: bool,
     presents_with_transaction: bool,
+    display_link_mode: DisplayLinkMode,
     /// For headless rendering, tracks whether output should be opaque
     opaque: bool,
     command_queue: CommandQueue,
@@ -580,6 +588,7 @@ impl MetalRenderer {
             device,
             layer,
             presents_with_transaction: false,
+            display_link_mode: DisplayLinkMode::Detached,
             is_apple_gpu,
             is_unified_memory,
             opaque,
@@ -630,6 +639,45 @@ impl MetalRenderer {
 
     pub fn sprite_atlas(&self) -> &Arc<MetalAtlas> {
         &self.sprite_atlas
+    }
+
+    /// Whether a window can pace this renderer with a `CAMetalDisplayLink`.
+    pub const SUPPORTS_DISPLAY_LINK: bool = true;
+
+    /// Draw the next frame into `drawable` instead of asking the layer for one.
+    /// Pass `None` once the frame is done, so a drawable the frame did not use
+    /// goes back to the layer.
+    ///
+    /// Returns the drawable this replaces: after a frame, `Some` means the
+    /// frame neither drew nor presented. A setter rather than a frame-scoped
+    /// guard, because the window releases its lock on the renderer while
+    /// GPUI draws.
+    pub fn set_frame_drawable(
+        &mut self,
+        drawable: Option<metal::MetalDrawable>,
+    ) -> Option<metal::MetalDrawable> {
+        match &mut self.display_link_mode {
+            DisplayLinkMode::Attached { drawable: current } => mem::replace(current, drawable),
+            DisplayLinkMode::Detached => {
+                // Only a live link hands out drawables, and a link is detached
+                // only after it has been invalidated.
+                debug_assert!(
+                    drawable.is_none(),
+                    "received a display link drawable while detached"
+                );
+                None
+            }
+        }
+    }
+
+    /// Record whether a `CAMetalDisplayLink` drives the layer. While one
+    /// does, frames are drawn only into the drawables it hands out.
+    pub fn set_display_link_attached(&mut self, attached: bool) {
+        self.display_link_mode = if attached {
+            DisplayLinkMode::Attached { drawable: None }
+        } else {
+            DisplayLinkMode::Detached
+        };
     }
 
     pub fn set_presents_with_transaction(&mut self, presents_with_transaction: bool) {
@@ -779,20 +827,33 @@ impl MetalRenderer {
                 return;
             }
         };
-        let viewport_size = layer.drawable_size();
-        let viewport_size: Size<DevicePixels> = size(
-            (viewport_size.width.ceil() as i32).into(),
-            (viewport_size.height.ceil() as i32).into(),
-        );
-        let drawable = if let Some(drawable) = layer.next_drawable() {
-            drawable
-        } else {
-            log::error!(
-                "failed to retrieve next drawable, drawable size: {:?}",
-                viewport_size
-            );
-            return;
+        let drawable = match &mut self.display_link_mode {
+            DisplayLinkMode::Attached { drawable } => {
+                let Some(drawable) = drawable.take() else {
+                    log::error!("skipped a frame drawn outside its display link's update");
+                    return;
+                };
+                drawable
+            }
+            DisplayLinkMode::Detached => {
+                let Some(drawable) = layer.next_drawable() else {
+                    log::error!(
+                        "failed to retrieve next drawable, drawable size: {:?}",
+                        layer.drawable_size()
+                    );
+                    return;
+                };
+                drawable.to_owned()
+            }
         };
+        // A display link's drawable was sized when the link handed it out,
+        // which can be before a resize the layer has since taken.
+        let texture = drawable.texture();
+        let viewport_size: Size<DevicePixels> = size(
+            (texture.width() as i32).into(),
+            (texture.height() as i32).into(),
+        );
+        let drawable = &*drawable;
 
         let mut instance_buffer = self.acquire_instance_buffer(scene);
         let command_buffer =
@@ -837,50 +898,21 @@ impl MetalRenderer {
             (viewport_size.width.ceil() as i32).into(),
             (viewport_size.height.ceil() as i32).into(),
         );
-        let drawable = layer
-            .next_drawable()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get drawable for render_to_image"))?;
-
-        let mut instance_buffer = self.acquire_instance_buffer(scene);
-        let command_buffer =
-            self.draw_primitives(scene, &mut instance_buffer, drawable, viewport_size)?;
-
-        command_buffer.commit();
-        command_buffer.wait_until_completed();
-        self.instance_buffer_pool.lock().release(instance_buffer);
-
-        let texture = drawable.texture();
-        let width = texture.width() as u32;
-        let height = texture.height() as u32;
-        let bytes_per_row = width as usize * 4;
-        let buffer_size = height as usize * bytes_per_row;
-        let mut pixels = vec![0u8; buffer_size];
-        let region = metal::MTLRegion {
-            origin: metal::MTLOrigin { x: 0, y: 0, z: 0 },
-            size: metal::MTLSize {
-                width: width as u64,
-                height: height as u64,
-                depth: 1,
-            },
-        };
-        texture.get_bytes(
-            pixels.as_mut_ptr() as *mut std::ffi::c_void,
-            bytes_per_row as u64,
-            region,
-            0,
-        );
-        for chunk in pixels.chunks_exact_mut(4) {
-            chunk.swap(0, 2);
-        }
-        RgbaImage::from_raw(width, height, pixels)
-            .ok_or_else(|| anyhow::anyhow!("Failed to create RgbaImage from pixel data"))
+        // Never the layer's own drawable: while a CAMetalDisplayLink drives
+        // the layer, `nextDrawable` throws.
+        self.render_scene_to_image(scene, viewport_size)
     }
 
     /// Renders a scene to an image without requiring a window or CAMetalLayer.
     ///
     /// This is the primary method for headless rendering. It creates an offscreen
     /// texture, renders the scene to it, and returns the pixel data as an RGBA image.
-    #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
+    #[cfg(any(
+        test,
+        feature = "bench-support",
+        feature = "test-support",
+        feature = "render-to-image"
+    ))]
     pub fn render_scene_to_image(
         &mut self,
         scene: &Scene,
@@ -2340,6 +2372,54 @@ mod tests {
         pattern_slash, px, solid_background, white,
     };
     use std::borrow::Cow;
+
+    #[test]
+    fn display_link_mode_consumes_and_clears_drawables() {
+        let mut scene = Scene::default();
+        scene.finish();
+        let mut renderer = MetalRenderer::new(Default::default(), false).unwrap();
+        renderer.update_drawable_size(size(DevicePixels(64), DevicePixels(64)));
+        let drawable = renderer
+            .layer()
+            .and_then(|layer| layer.next_drawable())
+            .expect("window renderer must supply a drawable")
+            .to_owned();
+
+        renderer.set_display_link_attached(true);
+        assert!(matches!(
+            renderer.display_link_mode,
+            DisplayLinkMode::Attached { drawable: None }
+        ));
+        assert!(
+            renderer
+                .set_frame_drawable(Some(drawable.clone()))
+                .is_none()
+        );
+        renderer.draw(&scene);
+        assert!(matches!(
+            renderer.display_link_mode,
+            DisplayLinkMode::Attached { drawable: None }
+        ));
+        // A frame that drew consumed its drawable; one that didn't hands it back.
+        assert!(
+            renderer
+                .set_frame_drawable(Some(drawable.clone()))
+                .is_none()
+        );
+        assert!(renderer.set_frame_drawable(None).is_some());
+
+        // Drawing while attached without a drawable skips the frame.
+        renderer.draw(&scene);
+
+        renderer.set_frame_drawable(Some(drawable));
+        renderer.set_display_link_attached(false);
+        assert!(matches!(
+            renderer.display_link_mode,
+            DisplayLinkMode::Detached
+        ));
+        // Detached again, the renderer asks the layer for its own drawable.
+        renderer.draw(&scene);
+    }
 
     #[test]
     fn a_shader_library_the_device_refuses_is_an_error() {

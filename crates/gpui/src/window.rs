@@ -78,7 +78,7 @@ pub(crate) mod a11y;
 mod prompts;
 
 use a11y::A11y;
-pub use a11y::A11ySubtreeBuilder;
+pub use a11y::{A11ySubtreeBuilder, A11yTextSelection};
 pub use prompts::*;
 
 fn quantize_glyph_origin(origin: Point<ScaledPixels>) -> (Point<ScaledPixels>, Point<u8>) {
@@ -1145,7 +1145,7 @@ pub(crate) struct Frame {
     pub(crate) focus: Option<FocusId>,
     pub(crate) window_active: bool,
     pub(crate) element_states: FxHashMap<(GlobalElementId, TypeId), ElementStateBox>,
-    accessed_element_states: Vec<(GlobalElementId, TypeId)>,
+    pub(crate) accessed_element_states: Vec<(GlobalElementId, TypeId)>,
     pub(crate) mouse_listeners: Vec<Option<AnyMouseListener>>,
     pointer_observers: Rc<Vec<PointerObserver>>,
     pub(crate) dispatch_tree: DispatchTree,
@@ -1158,11 +1158,19 @@ pub(crate) struct Frame {
     cursor_styles: Vec<CursorStyleRequest>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) debug_bounds: FxHashMap<String, Bounds<Pixels>>,
+    /// Every `debug_bounds` insert this frame, in paint order, so a cached
+    /// view that reuses its paint can replay its own selectors.
+    #[cfg(any(test, feature = "test-support"))]
+    debug_bounds_log: Vec<(String, Bounds<Pixels>)>,
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) next_inspector_instance_ids: FxHashMap<Rc<crate::InspectorElementPath>, usize>,
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) inspector_hitboxes: FxHashMap<HitboxId, crate::InspectorElementId>,
     pub(crate) tab_stops: TabStopMap,
+    /// For each entity, the cached views that read it while drawing this
+    /// frame. A notify from the entity dirties them too: a reused view would
+    /// otherwise replay output built from the entity's old state.
+    pub(crate) view_dependents: FxHashMap<EntityId, SmallVec<[EntityId; 2]>>,
 }
 
 #[derive(Clone, Default)]
@@ -1185,9 +1193,19 @@ pub(crate) struct PaintIndex {
     accessed_element_states_index: usize,
     tab_handle_index: usize,
     line_layout_index: LineLayoutIndex,
+    #[cfg(any(test, feature = "test-support"))]
+    debug_bounds_index: usize,
 }
 
 impl Frame {
+    /// Records `selector`'s painted bounds for test lookups, replayed with the
+    /// rest of a cached view's paint when the view is reused.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn record_debug_bounds(&mut self, selector: String, bounds: Bounds<Pixels>) {
+        self.debug_bounds.insert(selector.clone(), bounds);
+        self.debug_bounds_log.push((selector, bounds));
+    }
+
     pub(crate) fn new(dispatch_tree: DispatchTree) -> Self {
         Frame {
             focus: None,
@@ -1207,6 +1225,8 @@ impl Frame {
 
             #[cfg(any(test, feature = "test-support"))]
             debug_bounds: FxHashMap::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            debug_bounds_log: Vec::new(),
 
             #[cfg(any(feature = "inspector", debug_assertions))]
             next_inspector_instance_ids: FxHashMap::default(),
@@ -1214,6 +1234,20 @@ impl Frame {
             #[cfg(any(feature = "inspector", debug_assertions))]
             inspector_hitboxes: FxHashMap::default(),
             tab_stops: TabStopMap::default(),
+            view_dependents: FxHashMap::default(),
+        }
+    }
+
+    /// Records that cached view `view` read each of `entities` this frame.
+    pub(crate) fn record_view_dependencies<'a>(
+        &mut self,
+        view: EntityId,
+        entities: impl IntoIterator<Item = &'a EntityId>,
+    ) {
+        for entity in entities {
+            if *entity != view {
+                self.view_dependents.entry(*entity).or_default().push(view);
+            }
         }
     }
 
@@ -1231,11 +1265,13 @@ impl Frame {
         self.window_control_hitboxes.clear();
         self.deferred_draws.clear();
         self.tab_stops.clear();
+        self.view_dependents.clear();
         self.focus = None;
 
         #[cfg(any(test, feature = "test-support"))]
         {
             self.debug_bounds.clear();
+            self.debug_bounds_log.clear();
         }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
@@ -1821,18 +1857,21 @@ impl Window {
                     .update(&mut cx, |_, _, cx| cx.thermal_state())
                     .log_err();
 
-                // Throttle frame rate based on conditions:
-                // - Thermal pressure (Serious/Critical): cap to ~60fps
-                // - Inactive window (not focused): cap to ~30fps to save energy
-                let min_frame_interval = if request_frame_options.require_presentation
+                // Throttle frame rate; see `frame_throttle_interval`.
+                let wants_frame = !(request_frame_options.require_presentation
                     || (!request_frame_options.force_render
-                        && next_frame_callbacks.borrow().is_empty())
-                {
-                    None
-                } else if !active.get() && !input_rate_tracker.borrow_mut().is_high_rate() {
-                    inactive_frame_interval
-                } else if let Some(ThermalState::Critical | ThermalState::Serious) = thermal_state {
-                    Some(Duration::from_micros(16667))
+                        && next_frame_callbacks.borrow().is_empty()));
+                let low_power_mode = handle
+                    .update(&mut cx, |_, _, cx| cx.low_power_mode())
+                    .unwrap_or(false);
+                let min_frame_interval = if wants_frame {
+                    frame_throttle_interval(
+                        active.get(),
+                        input_rate_tracker.borrow_mut().is_high_rate(),
+                        inactive_frame_interval,
+                        thermal_state,
+                        low_power_mode,
+                    )
                 } else {
                     None
                 };
@@ -1840,7 +1879,7 @@ impl Window {
                 let now = Instant::now();
                 if let Some(min_interval) = min_frame_interval {
                     if let Some(last_frame) = last_frame_time.get()
-                        && now.duration_since(last_frame) < min_interval
+                        && frame_arrived_too_soon(now.duration_since(last_frame), min_interval)
                     {
                         // Don't lose a pending forced render to throttling.
                         deferred_force_render |= force_render;
@@ -3412,6 +3451,11 @@ impl Window {
         let mut views = self.invalidator.take_views();
         for entity in views.drain() {
             self.mark_view_dirty(entity);
+            if let Some(dependents) = self.rendered_frame.view_dependents.get(&entity) {
+                for view in dependents.clone() {
+                    self.mark_view_dirty(view);
+                }
+            }
         }
         self.invalidator.replace_views(views);
     }
@@ -3435,11 +3479,7 @@ impl Window {
     }
 
     /// Presents the most recently drawn frame if it hasn't been presented yet.
-    ///
-    /// Benchmarks drive drawing synchronously rather than through a platform
-    /// frame-request loop, so they call this after each measured update to
-    /// submit the frame like production presentation would.
-    #[cfg(any(feature = "bench-support", all(test, feature = "profiler")))]
+    #[cfg(all(test, feature = "profiler"))]
     pub fn present_if_needed(&mut self) {
         if self.needs_present.get() {
             self.present();
@@ -3876,6 +3916,8 @@ impl Window {
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             tab_handle_index: self.next_frame.tab_stops.paint_index(),
             line_layout_index: self.text_system.layout_index(),
+            #[cfg(any(test, feature = "test-support"))]
+            debug_bounds_index: self.next_frame.debug_bounds_log.len(),
         }
     }
 
@@ -3914,6 +3956,13 @@ impl Window {
             &self.rendered_frame.tab_stops.insertion_history
                 [range.start.tab_handle_index..range.end.tab_handle_index],
         );
+        #[cfg(any(test, feature = "test-support"))]
+        for (selector, bounds) in &self.rendered_frame.debug_bounds_log
+            [range.start.debug_bounds_index..range.end.debug_bounds_index]
+        {
+            self.next_frame
+                .record_debug_bounds(selector.clone(), *bounds);
+        }
 
         self.text_system
             .reuse_layouts(range.start.line_layout_index..range.end.line_layout_index);
@@ -7381,6 +7430,41 @@ impl Window {
             accesskit::Action::Blur => {
                 self.blur(cx);
             }
+            accesskit::Action::ScrollIntoView => {
+                let hint = match request.data {
+                    Some(accesskit::ActionData::ScrollHint(hint)) => Some(hint),
+                    _ => None,
+                };
+                self.a11y_scroll_into_view(request.target_node, hint);
+            }
+            accesskit::Action::ScrollUp
+            | accesskit::Action::ScrollDown
+            | accesskit::Action::ScrollLeft
+            | accesskit::Action::ScrollRight => {
+                let unit = match request.data {
+                    Some(accesskit::ActionData::ScrollUnit(unit)) => unit,
+                    _ => accesskit::ScrollUnit::Page,
+                };
+                self.a11y_scroll_by_unit(request.target_node, request.action, unit);
+            }
+            accesskit::Action::SetScrollOffset => {
+                if let Some(accesskit::ActionData::SetScrollOffset(offset)) = request.data
+                    && let Some(&index) = self.a11y.scroll.by_node.get(&request.target_node)
+                {
+                    let scale = self.scale_factor() as f64;
+                    let wanted = point(
+                        px(-(offset.x / scale) as f32),
+                        px(-(offset.y / scale) as f32),
+                    );
+                    self.a11y.scroll.containers[index].set_offset(wanted);
+                    self.refresh();
+                }
+            }
+            accesskit::Action::ReplaceSelectedText => {
+                if let Some(accesskit::ActionData::Value(text)) = request.data {
+                    self.a11y_replace_selected_text(request.target_node, &text, cx);
+                }
+            }
             _ => {
                 log::debug!(
                     "Unhandled a11y action: {:?} on {:?}",
@@ -7388,6 +7472,95 @@ impl Window {
                     request.target_node
                 );
             }
+        }
+    }
+
+    /// The byte-offset selection a `SetTextSelection` request names, when its
+    /// two ends fall in the `TextRun`s of one node built by
+    /// [`A11ySubtreeBuilder::push_text_runs`] in the last frame. For an
+    /// [`Self::on_a11y_action`] listener on `SetTextSelection`.
+    pub fn a11y_text_selection(
+        &self,
+        data: Option<&accesskit::ActionData>,
+    ) -> Option<A11yTextSelection> {
+        let Some(accesskit::ActionData::SetTextSelection(selection)) = data else {
+            return None;
+        };
+        self.a11y
+            .nodes
+            .text_runs
+            .selection(selection)
+            .map(|(_, selection)| selection)
+    }
+
+    /// Scroll every container around `target`, innermost first, until the
+    /// node's last-frame bounds are inside each viewport.
+    #[cfg(not(target_family = "wasm"))]
+    fn a11y_scroll_into_view(
+        &mut self,
+        target: accesskit::NodeId,
+        hint: Option<accesskit::ScrollHint>,
+    ) {
+        let Some(mut item) = self.a11y.node_bounds.get(&target).copied() else {
+            return;
+        };
+        let mut next = self.a11y.scroll.node_parent.get(&target).copied();
+        let mut moved = false;
+        while let Some(index) = next {
+            let container = &self.a11y.scroll.containers[index];
+            let wanted = a11y::scroll::reveal_delta(item, container.bounds, hint);
+            let applied = container.scroll_content_by(wanted);
+            item.origin += applied;
+            moved |= applied != Point::default();
+            next = container.parent;
+        }
+        if moved {
+            self.refresh();
+        }
+    }
+
+    /// Scroll the container `target` is by a line (`Item`) or a viewport less
+    /// one line (`Page`) in the action's direction.
+    #[cfg(not(target_family = "wasm"))]
+    fn a11y_scroll_by_unit(
+        &mut self,
+        target: accesskit::NodeId,
+        action: accesskit::Action,
+        unit: accesskit::ScrollUnit,
+    ) {
+        let Some(&index) = self.a11y.scroll.by_node.get(&target) else {
+            return;
+        };
+        let line = self.text_style().line_height_in_pixels(self.rem_size());
+        let viewport = self.a11y.scroll.containers[index].bounds.size;
+        let amount = |extent: Pixels| match unit {
+            accesskit::ScrollUnit::Item => line,
+            accesskit::ScrollUnit::Page => (extent - line).max(line),
+        };
+        // Content moves the opposite way to the scroll.
+        let delta = match action {
+            accesskit::Action::ScrollUp => point(px(0.), amount(viewport.height)),
+            accesskit::Action::ScrollDown => point(px(0.), -amount(viewport.height)),
+            accesskit::Action::ScrollLeft => point(amount(viewport.width), px(0.)),
+            _ => point(-amount(viewport.width), px(0.)),
+        };
+        if self.a11y.scroll.containers[index].scroll_content_by(delta) != Point::default() {
+            self.refresh();
+        }
+    }
+
+    /// Insert `text` over the selection of the focused text input, through the
+    /// same input handler the platform's text input uses. Only for the
+    /// focused node: the handler belongs to whatever has keyboard focus.
+    #[cfg(not(target_family = "wasm"))]
+    fn a11y_replace_selected_text(&mut self, target: accesskit::NodeId, text: &str, cx: &mut App) {
+        let focused = self.a11y.focus_ids.get(&target).copied();
+        if focused.is_none() || focused != self.focus {
+            return;
+        }
+        if let Some(mut handler) = self.platform_window.take_input_handler() {
+            handler.dispatch_input(text, self, cx);
+            self.platform_window.set_input_handler(handler);
         }
     }
 
@@ -8118,6 +8291,92 @@ pub fn outline(
 
 #[cfg(test)]
 mod pointer_tests;
+
+/// Slack on the frame limiter. A vsync tick lands a hair before the nominal
+/// interval has elapsed; without slack that tick is dropped and the window
+/// presents at half the intended rate.
+const FRAME_INTERVAL_TOLERANCE: Duration = Duration::from_millis(1);
+
+/// Frame interval while the system is thermally constrained or in Low Power Mode.
+const CONSTRAINED_FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
+const LOW_POWER_FRAME_INTERVAL: Duration = Duration::from_micros(33_333);
+
+fn frame_arrived_too_soon(elapsed: Duration, min_interval: Duration) -> bool {
+    elapsed + FRAME_INTERVAL_TOLERANCE < min_interval
+}
+
+/// The minimum interval between presented frames, or `None` for no cap.
+/// - Inactive window without high-rate input: `inactive_interval` (~30fps).
+/// - Low Power Mode: ~30fps.
+/// - Thermal pressure (Serious/Critical): ~60fps.
+fn frame_throttle_interval(
+    active: bool,
+    high_rate_input: bool,
+    inactive_interval: Option<Duration>,
+    thermal_state: Option<ThermalState>,
+    low_power_mode: bool,
+) -> Option<Duration> {
+    if !active && !high_rate_input {
+        inactive_interval
+    } else if low_power_mode {
+        Some(LOW_POWER_FRAME_INTERVAL)
+    } else if let Some(ThermalState::Critical | ThermalState::Serious) = thermal_state {
+        Some(CONSTRAINED_FRAME_INTERVAL)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod frame_limiter_tests {
+    use super::*;
+
+    #[test]
+    fn frame_limiter_tolerates_one_millisecond_of_early_arrival() {
+        let min = Duration::from_micros(33_333);
+        assert!(!frame_arrived_too_soon(Duration::from_micros(32_400), min));
+        assert!(!frame_arrived_too_soon(min, min));
+        assert!(frame_arrived_too_soon(Duration::from_micros(32_000), min));
+    }
+
+    #[test]
+    fn low_power_mode_caps_an_active_window_to_30fps() {
+        let inactive = Some(Duration::from_micros(33_333));
+        assert_eq!(
+            frame_throttle_interval(true, false, inactive, None, true),
+            Some(Duration::from_micros(33_333))
+        );
+        assert_eq!(
+            frame_throttle_interval(true, false, inactive, None, false),
+            None
+        );
+    }
+
+    #[test]
+    fn low_power_mode_wins_over_thermal_cap_and_inactive_rules_hold() {
+        let inactive = Some(Duration::from_micros(40_000));
+        let serious = Some(ThermalState::Serious);
+        assert_eq!(
+            frame_throttle_interval(true, false, inactive, serious, true),
+            Some(Duration::from_micros(33_333))
+        );
+        assert_eq!(
+            frame_throttle_interval(true, false, inactive, serious, false),
+            Some(Duration::from_micros(16_667))
+        );
+        assert_eq!(
+            frame_throttle_interval(false, false, inactive, None, true),
+            inactive
+        );
+        assert_eq!(
+            frame_throttle_interval(false, true, inactive, None, true),
+            Some(Duration::from_micros(33_333))
+        );
+    }
+}
+
+#[cfg(test)]
+mod view_dependents_tests;
 
 #[cfg(test)]
 mod tests {
