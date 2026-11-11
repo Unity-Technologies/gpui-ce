@@ -548,7 +548,7 @@ mod tests {
 
     #[cfg(not(feature = "wgpu"))]
     #[test]
-    fn a_renderer_draws_normally_after_its_display_link_is_invalidated() {
+    fn a_renderer_draws_and_screenshots_around_its_display_link() {
         use foreign_types::ForeignTypeRef as _;
         use objc2::AnyThread as _;
         use objc2_quartz_core::{CAMetalDisplayLink, CAMetalLayer};
@@ -568,6 +568,10 @@ mod tests {
         let link = CAMetalDisplayLink::initWithMetalLayer(CAMetalDisplayLink::alloc(), layer);
         renderer.set_display_link_attached(true);
         renderer.draw(&scene);
+        // Screenshots must not ask the layer for a drawable: with a link
+        // attached, `nextDrawable` throws and aborts the process.
+        let image = renderer.render_to_image(&scene).unwrap();
+        assert_eq!(image.dimensions(), (64, 64));
 
         link.invalidate();
         renderer.set_display_link_attached(false);
