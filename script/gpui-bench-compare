@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""Build two revisions once, then alternate short runs of the GPUI tree benchmark.
+
+Usage: script/gpui-bench-compare BASELINE CANDIDATE
+       script/gpui-bench-compare BASELINE CANDIDATE --filter 'RandomizedTree/leaf style'
+
+Both revisions must contain the benchmark (crates/gpui/benches/randomized_element_tree.rs);
+use revisions that descend from the commit that added it, or cherry-pick it first.
+
+Each revision is archived and built once into its own target dir under
+target/gpui-bench-compare, so one revision's artifacts never stand in for the other's.
+The binaries are then run alternately (baseline, candidate, baseline, ...) for
+--repetitions rounds, so machine drift lands on both sides. The report shows the median
+wall time per iteration across rounds, the change, and the spread: the full range of
+round medians over their median. Spread is not a confidence interval; treat a change
+smaller than its spread as noise. Nothing switches the invoking checkout.
+
+Wall time only: this fork has no instruction-counting measurement. Run nothing else on
+the machine meanwhile. Requires Python 3.9+.
+"""
+
+import argparse
+import json
+import os
+import re
+import shutil
+import statistics
+import subprocess
+import sys
+import tarfile
+import time
+from pathlib import Path
+
+BENCH = "randomized_element_tree"
+FEATURES = "bench-support,gpui_platform/bench-support"
+CRITERION_FAST = [
+    "--warm-up-time", "0.2",
+    "--measurement-time", "0.6",
+    "--sample-size", "10",
+    "--noplot",
+]
+
+
+def run(command, *, cwd, env, log, timeout):
+    with log.open("w") as output:
+        process = subprocess.Popen(
+            command, cwd=cwd, env=env, stdout=output, stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        try:
+            code = process.wait(timeout=timeout)
+        except BaseException:
+            # Own session: kill the whole tree, not just cargo.
+            os.killpg(process.pid, 9)
+            process.wait()
+            raise
+    if code != 0:
+        raise RuntimeError(f"{command[0]} exited with {code}; see {log}")
+
+
+def git(root, *args):
+    return subprocess.check_output(["git", "-C", str(root), *args], text=True).strip()
+
+
+def build(root, cache, revision, timeout, env):
+    commit = git(root, "rev-parse", "--verify", f"{revision}^{{commit}}")
+    source = cache / "sources" / commit
+    if not (source / ".complete").exists():
+        source.mkdir(parents=True, exist_ok=True)
+        archive = cache / f"{commit}.tar"
+        with archive.open("wb") as out:
+            subprocess.run(["git", "-C", str(root), "archive", commit], stdout=out, check=True)
+        with tarfile.open(archive) as tar:
+            tar.extractall(source)
+        archive.unlink()
+        (source / ".complete").touch()
+    if not (source / "crates/gpui/benches" / f"{BENCH}.rs").exists():
+        raise RuntimeError(f"{revision} has no {BENCH} benchmark")
+    target = cache / "build" / commit
+    log = cache / "build" / f"{commit}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    env = dict(env, CARGO_TARGET_DIR=str(target))
+    run(["cargo", "bench", "-p", "gpui-ce", "--features", FEATURES, "--bench", BENCH,
+         "--no-run", "--message-format=json"],
+        cwd=source, env=env, log=log, timeout=timeout)
+    binary = None
+    for line in log.read_text().splitlines():
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if message.get("reason") == "compiler-artifact" and message.get("executable") \
+                and message["target"]["name"] == BENCH:
+            binary = message["executable"]
+    if binary is None:
+        raise RuntimeError(f"no benchmark executable in {log}")
+    kept = cache / "binaries" / f"{commit}-{BENCH}"
+    kept.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(binary, kept)
+    return {"revision": revision, "commit": commit, "binary": kept}
+
+
+def measure(revision, round_index, output, filter_regex, env, timeout):
+    home = output / f"{revision['commit'][:10]}-round{round_index}"
+    home.mkdir(parents=True, exist_ok=True)
+    env = dict(env, CRITERION_HOME=str(home / "criterion"))
+    command = [str(revision["binary"]), "--bench", *([filter_regex] if filter_regex else []),
+               *CRITERION_FAST]
+    run(command, cwd=home, env=env, log=home / "run.log", timeout=timeout)
+    medians = {}
+    for estimates in (home / "criterion").glob("**/new/estimates.json"):
+        name = str(estimates.parent.parent.relative_to(home / "criterion"))
+        medians[name] = json.loads(estimates.read_text())["median"]["point_estimate"]
+    if not medians:
+        raise RuntimeError(f"no benchmark results; see {home / 'run.log'}")
+    return medians
+
+
+def humanize(nanos):
+    for unit, size in (("s", 1e9), ("ms", 1e6), ("us", 1e3)):
+        if nanos >= size:
+            return f"{nanos / size:.2f} {unit}"
+    return f"{nanos:.0f} ns"
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("baseline")
+    parser.add_argument("candidate")
+    parser.add_argument("--filter", help="Criterion regex of benchmark ids")
+    parser.add_argument("--repetitions", type=int, default=3)
+    parser.add_argument("--timeout", type=int, default=600, help="seconds per build or run")
+    parser.add_argument("--cache", type=Path)
+    args = parser.parse_args()
+    if args.repetitions < 1:
+        parser.error("repetitions must be positive")
+
+    root = Path(git(Path(__file__).resolve().parent, "rev-parse", "--show-toplevel"))
+    cache = (args.cache or root / "target/gpui-bench-compare").resolve()
+    cache.mkdir(parents=True, exist_ok=True)
+    output = cache / "runs" / time.strftime("%Y%m%d-%H%M%S")
+    output.mkdir(parents=True)
+    env = dict(os.environ, SEED="0", ITERATIONS="1")
+    env["PATH"] = str(Path.home() / ".cargo/bin") + os.pathsep + env["PATH"]
+
+    revisions = []
+    for revision in (args.baseline, args.candidate):
+        print(f"Building {revision} once...", flush=True)
+        revisions.append(build(root, cache, revision, args.timeout, env))
+    if revisions[0]["commit"] == revisions[1]["commit"]:
+        print("NOTE: both revisions are the same commit; the change column shows noise.")
+
+    rounds = {0: [], 1: []}
+    for round_index in range(args.repetitions):
+        for side, revision in enumerate(revisions):
+            print(f"Round {round_index + 1}/{args.repetitions}: {revision['revision']}",
+                  flush=True)
+            rounds[side].append(
+                measure(revision, round_index, output, args.filter, env, args.timeout))
+
+    names = sorted(set(rounds[0][0]) & set(rounds[1][0]))
+    if not names:
+        raise RuntimeError("the revisions share no benchmark ids")
+    results = {}
+    print(f"\n{'benchmark':64} {'base':>10} {'new':>10} {'change':>8} {'spread':>8}")
+    for name in names:
+        series = [[r[name] for r in rounds[side] if name in r] for side in (0, 1)]
+        base, new = (statistics.median(values) for values in series)
+        spread = max(
+            (max(values) - min(values)) / statistics.median(values) * 100 for values in series)
+        change = (new - base) / base * 100
+        flag = " *" if abs(change) <= spread else ""
+        print(f"{name:64} {humanize(base):>10} {humanize(new):>10} {change:>+7.1f}% "
+              f"{spread:>7.1f}%{flag}")
+        results[name] = {"base_ns": base, "new_ns": new, "change_percent": change,
+                         "spread_percent": spread, "rounds": series}
+    print("\n* change within the spread: indistinguishable from noise")
+    (output / "summary.json").write_text(json.dumps({
+        "baseline": revisions[0]["commit"], "candidate": revisions[1]["commit"],
+        "repetitions": args.repetitions, "results": results}, indent=2, default=str))
+    print(f"Raw logs and summary.json: {output}")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (RuntimeError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        sys.exit(f"gpui-bench-compare: {error}")
