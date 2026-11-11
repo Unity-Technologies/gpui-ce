@@ -640,12 +640,8 @@ impl Platform for WindowsPlatform {
         options: PathPromptOptions,
     ) -> Receiver<Result<Option<Vec<PathBuf>>>> {
         let (tx, rx) = oneshot::channel();
-        let window = self.find_current_active_window();
-        self.foreground_executor()
-            .spawn(async move {
-                let _ = tx.send(file_open_dialog(options, window));
-            })
-            .detach();
+        let owner = self.find_current_active_window();
+        run_dialog_on_sta_thread(owner, tx, move |window| file_open_dialog(options, window));
 
         rx
     }
@@ -658,12 +654,10 @@ impl Platform for WindowsPlatform {
         let directory = directory.to_owned();
         let suggested_name = suggested_name.map(|s| s.to_owned());
         let (tx, rx) = oneshot::channel();
-        let window = self.find_current_active_window();
-        self.foreground_executor()
-            .spawn(async move {
-                let _ = tx.send(file_save_dialog(directory, suggested_name, window));
-            })
-            .detach();
+        let owner = self.find_current_active_window();
+        run_dialog_on_sta_thread(owner, tx, move |window| {
+            file_save_dialog(directory, suggested_name, window)
+        });
 
         rx
     }
@@ -1340,6 +1334,56 @@ fn open_target_in_explorer(target: &Path) -> Result<()> {
             Err(anyhow::anyhow!("Can not open target path: {}", err))
         }
     })
+}
+
+/// One lock per owner window, so a second request for the same owner waits instead of stacking
+/// a second modal dialog on it.
+fn owner_dialog_lock(owner: isize) -> Arc<std::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<isize, Arc<std::sync::Mutex<()>>>>> =
+        std::sync::OnceLock::new();
+    LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(owner)
+        .or_default()
+        .clone()
+}
+
+/// Runs a common file dialog on its own single-threaded-apartment thread, so the UI thread keeps
+/// pumping messages while the dialog is open. `owner` stays the dialog's owner window.
+///
+/// Dropping the receiver is the cancel flag: a request whose receiver is gone by the time it
+/// reaches the front of its owner's queue never shows a dialog.
+fn run_dialog_on_sta_thread<T: Send + 'static>(
+    owner: Option<HWND>,
+    tx: oneshot::Sender<Result<Option<T>>>,
+    dialog: impl FnOnce(Option<HWND>) -> Result<Option<T>> + Send + 'static,
+) {
+    let owner_raw = owner.map(|hwnd| hwnd.0 as isize);
+    let spawned = std::thread::Builder::new()
+        .name("FileDialog".to_string())
+        .spawn(move || {
+            let lock = owner_dialog_lock(owner_raw.unwrap_or(0));
+            let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if tx.is_canceled() {
+                return;
+            }
+            // Dialogs need an STA; the thread owns this apartment for its whole life.
+            let init = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+            let result = if init.is_ok() {
+                let owner = owner_raw.map(|raw| HWND(raw as *mut std::ffi::c_void));
+                let result = dialog(owner);
+                unsafe { CoUninitialize() };
+                result
+            } else {
+                Err(anyhow::anyhow!("CoInitializeEx failed for the file dialog thread: {init:?}"))
+            };
+            let _ = tx.send(result);
+        });
+    if let Err(error) = spawned {
+        log::error!("failed to spawn the file dialog thread: {error}");
+    }
 }
 
 fn file_open_dialog(
