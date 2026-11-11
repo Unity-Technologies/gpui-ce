@@ -504,6 +504,19 @@ impl X11Client {
                             window.window.set_button_layout();
                         }
                     }
+                    XDPEvent::Contrast(contrast) => {
+                        let callback =
+                            client.with_common(|common| common.set_contrast_preference(contrast));
+                        if let Some(mut callback) = callback {
+                            callback();
+                            client.with_common(|common| {
+                                common
+                                    .callbacks
+                                    .contrast_preference_change
+                                    .get_or_insert(callback);
+                            });
+                        }
+                    }
                     XDPEvent::CursorTheme(_) | XDPEvent::CursorSize(_) => {
                         // noop, X11 manages this for us.
                     }

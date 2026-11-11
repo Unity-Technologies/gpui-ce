@@ -1,13 +1,13 @@
 use crate::{
     Action, AnyView, AnyWindowHandle, App, AppCell, AppContext, AssetRegistry, AssetSource,
     AsyncApp, AvailableSpace, BackgroundExecutor, BorrowAppContext, Bounds, Capslock,
-    ClipboardItem, DEFAULT_TEST_SCALE_FACTOR, DrawPhase, Drawable, Element, Empty, EntityId,
-    EventEmitter, ForegroundExecutor, Global, InputEvent, Keystroke, Modifiers,
+    ClipboardItem, ContrastPreference, DEFAULT_TEST_SCALE_FACTOR, DrawPhase, Drawable, Element,
+    Empty, EntityId, EventEmitter, ForegroundExecutor, Global, InputEvent, Keystroke, Modifiers,
     ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
     Platform, PlatformHeadlessRenderer, PlatformTextSystem, Point, Render, Result, SharedString,
-    Size, SystemNotification, SystemNotificationResponse, Task, TestDispatcher, TestPlatform,
-    TestScreenCaptureSource, TestTextSystem, TestWindow, TextSystem, VisualContext, Window,
-    WindowBounds, WindowHandle, WindowOptions, app::GpuiMode, window::ElementArenaScope,
+    Size, SystemColors, SystemNotification, SystemNotificationResponse, Task, TestDispatcher,
+    TestPlatform, TestScreenCaptureSource, TestTextSystem, TestWindow, TextSystem, VisualContext,
+    Window, WindowBounds, WindowHandle, WindowOptions, app::GpuiMode, window::ElementArenaScope,
 };
 use anyhow::{anyhow, bail};
 use futures::{Stream, StreamExt, channel::oneshot};
@@ -568,6 +568,20 @@ impl TestAppContext {
     pub fn simulate_system_notification_response(&self, response: SystemNotificationResponse) {
         self.test_platform
             .simulate_system_notification_response(response);
+    }
+
+    /// Changes the contrast setting the test platform reports, as if the user
+    /// toggled it in the OS accessibility settings.
+    pub fn simulate_contrast_preference(&self, contrast: ContrastPreference) {
+        self.test_platform
+            .simulate_contrast_preference(contrast, None);
+    }
+
+    /// Turns on [`ContrastPreference::Forced`] with `colors` as the palette, as
+    /// if the user picked a Windows contrast theme.
+    pub fn simulate_forced_colors(&self, colors: SystemColors) {
+        self.test_platform
+            .simulate_contrast_preference(ContrastPreference::Forced, Some(colors));
     }
 
     /// Resizes `window_handle` to `size`. See [`VisualTestContext::simulate_resize`].
@@ -1445,14 +1459,15 @@ impl AnyWindowHandle {
 #[cfg(test)]
 mod tests {
     use crate::{
-        AssetSource, Context, DevicePixels, IntoElement, ParentElement as _, PathPromptOptions,
-        PlatformAtlas, PlatformHeadlessRenderer, Render, Scene, SharedString, Size, Styled as _,
-        SystemNotification, SystemNotificationAction, SystemNotificationResponse, TestAppContext,
-        TestAtlas, TestDispatcher, TestTextSystem, VisualTestContext, Window, div, px, size,
+        AssetSource, Context, ContrastPreference, DevicePixels, IntoElement, ParentElement as _,
+        PathPromptOptions, PlatformAtlas, PlatformHeadlessRenderer, Render, Scene, SharedString,
+        Size, Styled as _, SystemColors, SystemNotification, SystemNotificationAction,
+        SystemNotificationResponse, TestAppContext, TestAtlas, TestDispatcher, TestTextSystem,
+        VisualTestContext, Window, div, px, size,
     };
     use image::RgbaImage;
     use std::borrow::Cow;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::path::PathBuf;
     use std::rc::Rc;
     use std::sync::Arc;
@@ -1674,6 +1689,90 @@ mod tests {
         cx.update(|cx| cx.dismiss_system_notification("thread-1"));
         assert!(cx.delivered_system_notifications().is_empty());
         assert_eq!(cx.dismissed_system_notifications(), ["thread-1"]);
+    }
+
+    #[gpui::test]
+    fn test_contrast_preference_change_notifies_once_per_change(cx: &mut TestAppContext) {
+        assert_eq!(
+            cx.update(|cx| cx.contrast_preference()),
+            ContrastPreference::NoPreference
+        );
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = cx.update(|cx| {
+            cx.on_contrast_preference_change({
+                let seen = seen.clone();
+                move |cx| seen.borrow_mut().push(cx.contrast_preference())
+            })
+        });
+
+        cx.simulate_contrast_preference(ContrastPreference::More);
+        // An unrelated display-option change re-reads the same value.
+        cx.simulate_contrast_preference(ContrastPreference::More);
+        cx.simulate_contrast_preference(ContrastPreference::Forced);
+        cx.simulate_contrast_preference(ContrastPreference::NoPreference);
+
+        assert_eq!(
+            seen.borrow().as_slice(),
+            &[
+                ContrastPreference::More,
+                ContrastPreference::Forced,
+                ContrastPreference::NoPreference,
+            ]
+        );
+        assert!(!cx.update(|cx| cx.contrast_preference()).is_increased());
+    }
+
+    #[gpui::test]
+    fn test_forced_colors_palette_change_notifies(cx: &mut TestAppContext) {
+        let black = SystemColors {
+            canvas: crate::rgb(0x000000),
+            canvas_text: crate::rgb(0xffffff),
+            link_text: crate::rgb(0x75e9fc),
+            highlight: crate::rgb(0x8ee3f0),
+            highlight_text: crate::rgb(0x263b50),
+            button_face: crate::rgb(0x202020),
+            button_text: crate::rgb(0xffffff),
+            gray_text: crate::rgb(0xa6a6a6),
+        };
+        let white = SystemColors {
+            canvas: crate::rgb(0xffffff),
+            canvas_text: crate::rgb(0x000000),
+            ..black
+        };
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = cx.update(|cx| {
+            cx.on_contrast_preference_change({
+                let seen = seen.clone();
+                move |cx| seen.borrow_mut().push(cx.forced_colors())
+            })
+        });
+
+        cx.simulate_forced_colors(black);
+        cx.simulate_forced_colors(black);
+        // Switching contrast themes keeps `Forced` but changes the palette.
+        cx.simulate_forced_colors(white);
+        cx.simulate_contrast_preference(ContrastPreference::NoPreference);
+
+        assert_eq!(seen.borrow().as_slice(), &[Some(black), Some(white), None]);
+    }
+
+    #[gpui::test]
+    fn test_contrast_preference_subscription_drops(cx: &mut TestAppContext) {
+        let calls = Rc::new(Cell::new(0));
+        let subscription = cx.update(|cx| {
+            cx.on_contrast_preference_change({
+                let calls = calls.clone();
+                move |_| calls.set(calls.get() + 1)
+            })
+        });
+        cx.simulate_contrast_preference(ContrastPreference::More);
+        drop(subscription);
+        cx.simulate_contrast_preference(ContrastPreference::NoPreference);
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            cx.update(|cx| cx.contrast_preference()),
+            ContrastPreference::NoPreference
+        );
     }
 
     #[gpui::test]
