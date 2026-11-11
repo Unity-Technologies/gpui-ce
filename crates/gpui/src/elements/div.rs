@@ -65,7 +65,28 @@ type StackSafe<T> = stacksafe::StackSafe<T>;
 #[cfg(not(feature = "stacker"))]
 type StackSafe<T> = T;
 
-const DRAG_THRESHOLD: f64 = 2.;
+/// Pointer travel, in pixels, before a pressed element starts a drag. A hand
+/// click wobbles more than 2 px on a precision touchpad or a high-DPI mouse,
+/// and 4 px is also the Windows default for `SM_CXDRAG`.
+const DEFAULT_DRAG_THRESHOLD: f64 = 4.;
+
+/// The travel that starts a drag: on Windows the system drag rectangle, which
+/// the user can change, elsewhere [`DEFAULT_DRAG_THRESHOLD`].
+fn drag_threshold() -> f64 {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXDRAG, SM_CYDRAG};
+        // SAFETY: GetSystemMetrics takes no pointers and has no preconditions.
+        let (x, y) = unsafe { (GetSystemMetrics(SM_CXDRAG), GetSystemMetrics(SM_CYDRAG)) };
+        // Honour a wider system rectangle, never a narrower one: a failed
+        // query returns 0, and the default is already the Windows default.
+        (x.max(y) as f64).max(DEFAULT_DRAG_THRESHOLD)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        DEFAULT_DRAG_THRESHOLD
+    }
+}
 const DEFAULT_TOOLTIP_SHOW_DELAY: Duration = Duration::from_millis(500);
 const HOVERABLE_TOOLTIP_HIDE_DELAY: Duration = Duration::from_millis(500);
 
@@ -3772,7 +3793,7 @@ impl Interactivity {
                         if cx.has_active_drag() || mouse_down.button != MouseButton::Left {
                             return;
                         }
-                        if (event.position - mouse_down.position).magnitude() <= DRAG_THRESHOLD {
+                        if (event.position - mouse_down.position).magnitude() <= drag_threshold() {
                             return;
                         }
                         if let Some(listener) = drag_listener.take() {
@@ -5245,6 +5266,66 @@ impl ScrollHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Empty, InputEvent, Modifiers};
+
+    struct DragProbe;
+
+    impl Render for DragProbe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("drag-probe")
+                .size(px(100.))
+                .on_drag(7usize, |_, _, _, cx| cx.new(|_| Empty))
+        }
+    }
+
+    fn drag_started_after_moving(cx: &mut TestAppContext, travel: f32) -> bool {
+        let window: AnyWindowHandle = cx.add_window(|_, _| DragProbe).into();
+        cx.update_window(window, |_, window, cx| {
+            window.draw(cx).clear(cx);
+            window.dispatch_event(
+                MouseDownEvent {
+                    position: point(px(10.), px(10.)),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::default(),
+                    click_count: 1,
+                    first_mouse: false,
+                }
+                .to_platform_input(),
+                cx,
+            );
+            window.dispatch_event(
+                MouseMoveEvent {
+                    position: point(px(10. + travel), px(10.)),
+                    pressed_button: Some(MouseButton::Left),
+                    modifiers: Modifiers::default(),
+                }
+                .to_platform_input(),
+                cx,
+            );
+            cx.has_active_drag()
+        })
+        .unwrap()
+    }
+
+    #[gpui::test]
+    fn a_press_wobble_below_the_system_threshold_is_not_a_drag(cx: &mut TestAppContext) {
+        let below = (drag_threshold() - 0.5) as f32;
+        assert!(!drag_started_after_moving(cx, below));
+        // 3 px used to start a drag (the old threshold was 2 px).
+        assert!(drag_threshold() > 3.);
+    }
+
+    #[gpui::test]
+    fn travel_past_the_system_threshold_starts_a_drag(cx: &mut TestAppContext) {
+        let past = (drag_threshold() + 1.) as f32;
+        assert!(drag_started_after_moving(cx, past));
+    }
+
+    #[test]
+    fn the_drag_threshold_is_at_least_four_pixels() {
+        assert!(drag_threshold() >= DEFAULT_DRAG_THRESHOLD);
+    }
 
     #[gpui::test]
     fn inline_div_places_element_children_in_text_flow(cx: &mut TestAppContext) {
