@@ -84,4 +84,5 @@ url.workspace = true
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 gpui = { workspace = true, features = ["test-support"], default-features = false }
 gpui_apple = { workspace = true, features = ["test-support"] }
+objc2-quartz-core.workspace = true
 gpui_fonts = { path = "../gpui_ce_fonts", package = "gpui-ce-fonts" }

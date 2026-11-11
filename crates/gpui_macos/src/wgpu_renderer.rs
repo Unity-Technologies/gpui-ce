@@ -58,6 +58,19 @@ impl MacWgpuRenderer {
         Ok(Self { renderer, layer })
     }
 
+    /// wgpu acquires its own surface textures, so windows keep the
+    /// `CVDisplayLink` path for this renderer.
+    pub const SUPPORTS_DISPLAY_LINK: bool = false;
+
+    pub fn set_display_link_attached(&mut self, _attached: bool) {}
+
+    pub fn set_frame_drawable(
+        &mut self,
+        drawable: Option<metal::MetalDrawable>,
+    ) -> Option<metal::MetalDrawable> {
+        drawable
+    }
+
     pub fn layer(&self) -> Option<&MetalLayerRef> {
         Some(&self.layer)
     }
