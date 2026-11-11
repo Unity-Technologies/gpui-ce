@@ -177,15 +177,25 @@ fn is_image_format(format: u32) -> bool {
     IMAGE_FORMATS_MAP.contains_key(&format) || format == CF_DIB.0 as u32
 }
 
+/// UTF-16 with a terminating NUL. Windows reads CF_UNICODETEXT up to the first
+/// NUL, so an embedded one would cut the text there; each becomes a space.
+fn to_wide_nul_terminated(text: &str) -> Vec<u16> {
+    text.encode_utf16()
+        .map(|unit| if unit == 0 { u16::from(b' ') } else { unit })
+        .chain(Some(0))
+        .collect_vec()
+}
+
 fn write_string(item: &ClipboardString) -> Result<()> {
-    let wide: Vec<u16> = item.text.encode_utf16().chain(Some(0)).collect_vec();
+    let wide = to_wide_nul_terminated(&item.text);
     set_clipboard_bytes(&wide, CF_UNICODETEXT.0 as u32)?;
 
     if let Some(metadata) = item.metadata.as_ref() {
-        let hash_bytes = ClipboardString::text_hash(&item.text).to_ne_bytes();
+        // Hash what was written, since reading back yields the scrubbed text.
+        let hash_bytes = ClipboardString::text_hash(&item.text.replace('\0', " ")).to_ne_bytes();
         set_clipboard_bytes(&hash_bytes, *CLIPBOARD_HASH_FORMAT)?;
 
-        let wide: Vec<u16> = metadata.encode_utf16().chain(Some(0)).collect_vec();
+        let wide = to_wide_nul_terminated(metadata);
         set_clipboard_bytes(&wide, *CLIPBOARD_METADATA_FORMAT)?;
     }
     Ok(())
@@ -384,5 +394,16 @@ impl LockedGlobal {
 impl Drop for LockedGlobal {
     fn drop(&mut self) {
         unsafe { GlobalUnlock(self.global).ok() };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::to_wide_nul_terminated;
+
+    #[test]
+    fn embedded_nul_becomes_a_space_and_one_terminator_remains() {
+        let wide = to_wide_nul_terminated("a\0b");
+        assert_eq!(wide, vec![u16::from(b'a'), u16::from(b' '), u16::from(b'b'), 0]);
     }
 }
