@@ -802,7 +802,7 @@ impl Platform for WindowsPlatform {
         if self.inner.state.current_cursor.get().map(|c| c.0) != hcursor.map(|c| c.0) {
             self.post_message(
                 WM_GPUI_CURSOR_STYLE_CHANGED,
-                WPARAM(0),
+                WPARAM(self.inner.validation_number),
                 LPARAM(hcursor.map_or(0, |c| c.0 as isize)),
             );
             self.inner.state.current_cursor.set(hcursor);
