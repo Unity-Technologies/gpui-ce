@@ -3596,19 +3596,28 @@ unsafe extern "C" fn do_command_by_selector(this: &Objc2Object, _: Sel, _: Sel) 
 unsafe extern "C" fn view_did_change_effective_appearance(this: &Objc2Object, _: Sel) {
     unsafe {
         let state = get_window_state(this);
-        let appearance_changed_callback = {
-            let mut lock = state.as_ref().lock();
-            lock.appearance_changed_callback.take()
-        };
-
-        if let Some(mut callback) = appearance_changed_callback {
-            callback();
-            state.lock().appearance_changed_callback = Some(callback);
-        }
 
         // AppKit can relayout the standard traffic light buttons as part of
         // applying a new appearance, so reapply GPUI's custom position.
         state.lock().move_traffic_light();
+
+        // This can fire while the App is already borrowed (for example inside
+        // a window update), so run the callback from the foreground executor.
+        let (executor, closed) = {
+            let lock = state.as_ref().lock();
+            (lock.foreground_executor.clone(), lock.closed.clone())
+        };
+        executor
+            .spawn(async move {
+                if_window_not_closed(closed, move || {
+                    let callback = state.as_ref().lock().appearance_changed_callback.take();
+                    if let Some(mut callback) = callback {
+                        callback();
+                        state.lock().appearance_changed_callback = Some(callback);
+                    }
+                });
+            })
+            .detach();
     }
 }
 
