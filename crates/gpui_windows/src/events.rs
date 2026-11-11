@@ -29,6 +29,7 @@ pub(crate) const WM_GPUI_KEYBOARD_LAYOUT_CHANGED: u32 = WM_USER + 6;
 pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
 pub(crate) const WM_GPUI_KEYDOWN: u32 = WM_USER + 8;
 pub(crate) const WM_GPUI_END_SESSION: u32 = WM_USER + 9;
+pub(crate) const WM_GPUI_CONTRAST_CHANGED: u32 = WM_USER + 10;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
 
@@ -157,6 +158,11 @@ impl WindowsWindowInner {
             WM_IME_COMPOSITION => self.handle_ime_composition(handle, lparam),
             WM_SETCURSOR => self.handle_set_cursor(handle, lparam),
             WM_SETTINGCHANGE => self.handle_system_settings_changed(handle, wparam, lparam),
+            // Editing a contrast theme's colors sends only this, not `SPI_SETHIGHCONTRAST`.
+            WM_SYSCOLORCHANGE => {
+                self.post_contrast_changed();
+                None
+            }
             WM_INPUTLANGCHANGE => self.handle_input_language_changed(),
             WM_SHOWWINDOW => self.handle_window_visibility_changed(handle, wparam),
             WM_GPUI_CURSOR_STYLE_CHANGED => self.handle_cursor_changed(wparam, lparam),
@@ -1237,6 +1243,9 @@ impl WindowsWindowInner {
         lparam: LPARAM,
     ) -> Option<isize> {
         if wparam.0 != 0 {
+            if wparam.0 == SPI_SETHIGHCONTRAST.0 as usize {
+                self.post_contrast_changed();
+            }
             self.state.click_state.system_update(wparam.0);
             self.state.border_offset.update(handle).log_err();
             // system settings may emit a window message which wants to take the refcell self.state, so drop it
@@ -1273,6 +1282,20 @@ impl WindowsWindowInner {
             }
         }
         Some(0)
+    }
+
+    /// `WM_SETTINGCHANGE` is broadcast to top-level windows only, never to the
+    /// platform's message-only window, so a window forwards the contrast change.
+    fn post_contrast_changed(&self) {
+        unsafe {
+            PostMessageW(
+                Some(self.platform_window_handle),
+                WM_GPUI_CONTRAST_CHANGED,
+                WPARAM(self.validation_number),
+                LPARAM(0),
+            )
+            .log_err();
+        }
     }
 
     fn handle_input_language_changed(&self) -> Option<isize> {

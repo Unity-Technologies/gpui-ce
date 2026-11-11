@@ -1,13 +1,13 @@
 use crate::{
     Action, ActionBuildError, ActionRegistry, Any, AnyView, AnyWindowHandle, AppContext, Arena,
     ArenaBox, Asset, AssetRegistry, BackgroundExecutor, Bounds, ClipboardItem, ClipboardReadError,
-    CursorStyle, DispatchPhase, DisplayId, EventEmitter, ExternalDragPayload, FocusHandle,
-    FocusMap, ForegroundExecutor, Global, HapticFeedbackStyle, KeyBinding, KeyContext, Keymap,
-    Keystroke, LayoutId, Menu, MenuItem, OwnedMenu, PathPromptOptions, Pixels, Platform,
+    ContrastPreference, CursorStyle, DispatchPhase, DisplayId, EventEmitter, ExternalDragPayload,
+    FocusHandle, FocusMap, ForegroundExecutor, Global, HapticFeedbackStyle, KeyBinding, KeyContext,
+    Keymap, Keystroke, LayoutId, Menu, MenuItem, OwnedMenu, PathPromptOptions, Pixels, Platform,
     PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, Point, Priority,
     PromptBuilder, PromptButton, PromptHandle, PromptLevel, Render, RenderImage,
     RenderablePromptHandle, Reservation, ScreenCaptureSource, SharedString, SubscriberSet,
-    Subscription, SvgRenderer, SystemNotification, SystemNotificationResponse, Task,
+    Subscription, SvgRenderer, SystemColors, SystemNotification, SystemNotificationResponse, Task,
     TextRenderingMode, TextSystem, ThermalState, Window, WindowAppearance, WindowButtonLayout,
     WindowHandle, WindowId, WindowInvalidator,
     colors::{Colors, GlobalColors},
@@ -862,6 +862,9 @@ pub struct App {
     pub(crate) keystroke_interceptors: SubscriberSet<(), KeystrokeObserver>,
     pub(crate) keyboard_layout_observers: SubscriberSet<(), Handler>,
     pub(crate) thermal_state_observers: SubscriberSet<(), Handler>,
+    pub(crate) contrast_preference: ContrastPreference,
+    pub(crate) forced_colors: Option<SystemColors>,
+    pub(crate) contrast_preference_observers: SubscriberSet<(), Handler>,
     pub(crate) system_wake_observers: SubscriberSet<(), Handler>,
     /// Whether the platform wake callback is registered. It is added with the
     /// first observer, so an app with none never subscribes to wake events.
@@ -1007,6 +1010,9 @@ impl App {
                 keystroke_interceptors: SubscriberSet::new(),
                 keyboard_layout_observers: SubscriberSet::new(),
                 thermal_state_observers: SubscriberSet::new(),
+                contrast_preference: platform.contrast_preference(),
+                forced_colors: platform.forced_colors(),
+                contrast_preference_observers: SubscriberSet::new(),
                 system_wake_observers: SubscriberSet::new(),
                 system_wake_registered: Cell::new(false),
                 global_observers: SubscriberSet::new(),
@@ -1065,6 +1071,15 @@ impl App {
                     cx.thermal_state_observers
                         .clone()
                         .retain(&(), move |callback| (callback)(cx));
+                }
+            }
+        }));
+
+        platform.on_contrast_preference_change(Box::new({
+            let app = Rc::downgrade(&app);
+            move || {
+                if let Some(app) = app.upgrade() {
+                    app.borrow_mut().contrast_preference_changed();
                 }
             }
         }));
@@ -1664,6 +1679,61 @@ impl App {
         );
         activate();
         subscription
+    }
+
+    /// Returns the user's system-wide contrast setting.
+    ///
+    /// Read it when you pick theme colors, and subscribe with
+    /// [`App::on_contrast_preference_change`] to follow changes.
+    pub fn contrast_preference(&self) -> ContrastPreference {
+        self.contrast_preference
+    }
+
+    /// Returns the palette the OS draws with while the contrast setting is
+    /// [`ContrastPreference::Forced`], or `None` when the platform reports none.
+    ///
+    /// Changes to it notify [`App::on_contrast_preference_change`] observers.
+    pub fn forced_colors(&self) -> Option<SystemColors> {
+        self.forced_colors
+    }
+
+    /// Calls `callback` when the system's contrast setting or forced-colors
+    /// palette changes.
+    ///
+    /// Every window is redrawn after the callbacks run. The subscription stays
+    /// active while you hold it.
+    pub fn on_contrast_preference_change<F>(&self, mut callback: F) -> Subscription
+    where
+        F: 'static + FnMut(&mut App),
+    {
+        let (subscription, activate) = self.contrast_preference_observers.insert(
+            (),
+            Box::new(move |cx| {
+                callback(cx);
+                true
+            }),
+        );
+        activate();
+        subscription
+    }
+
+    /// Re-reads the platform's contrast setting and notifies observers if it changed.
+    ///
+    /// Platforms report any display-option change here (macOS posts one
+    /// notification for all of them), so the comparison keeps observers quiet
+    /// for unrelated toggles.
+    pub(crate) fn contrast_preference_changed(&mut self) {
+        let contrast = self.platform.contrast_preference();
+        let forced_colors = self.platform.forced_colors();
+        if contrast == self.contrast_preference && forced_colors == self.forced_colors {
+            return;
+        }
+        self.contrast_preference = contrast;
+        self.forced_colors = forced_colors;
+        self.contrast_preference_observers
+            .clone()
+            .retain(&(), |callback| (callback)(self));
+        self.refresh_windows();
     }
 
     fn register_system_wake_handler(&self) {

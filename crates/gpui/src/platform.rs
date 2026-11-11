@@ -281,6 +281,24 @@ pub trait Platform: 'static {
     fn thermal_state(&self) -> ThermalState;
     fn on_thermal_state_change(&self, callback: Box<dyn FnMut()>);
 
+    /// Returns the user's system-wide contrast setting.
+    fn contrast_preference(&self) -> ContrastPreference {
+        ContrastPreference::NoPreference
+    }
+
+    /// Registers a callback invoked when the contrast setting may have changed.
+    ///
+    /// Platforms may call it for unrelated display changes; the app layer
+    /// compares [`Platform::contrast_preference`] before notifying observers.
+    fn on_contrast_preference_change(&self, _callback: Box<dyn FnMut()>) {}
+
+    /// Returns the palette the OS draws with while
+    /// [`ContrastPreference::Forced`] is on, or `None` when it is off or the
+    /// platform cannot report one.
+    fn forced_colors(&self) -> Option<SystemColors> {
+        None
+    }
+
     /// Sets the application's process-wide identity and user-visible name.
     ///
     /// The identifier is used for platform identity mechanisms such as the
@@ -456,6 +474,53 @@ pub struct SystemNotificationResponse {
     /// The pressed action button's [`SystemNotificationAction::id`], or
     /// `None` when the user activated the notification body itself.
     pub action_id: Option<SharedString>,
+}
+
+/// The user's system-wide contrast setting, read from the OS accessibility settings.
+///
+/// Maps to the CSS media features a browser derives from the same settings:
+/// [`ContrastPreference::More`] is `prefers-contrast: more` and
+/// [`ContrastPreference::Forced`] is `forced-colors: active`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum ContrastPreference {
+    /// The user asked for no contrast change.
+    #[default]
+    NoPreference,
+    /// The user asked for more contrast: macOS "Increase contrast", or the
+    /// XDG desktop portal's `org.freedesktop.appearance` `contrast` set to high.
+    More,
+    /// The OS draws with a user-chosen palette and expects apps to follow it:
+    /// Windows High Contrast (contrast themes on Windows 11).
+    Forced,
+}
+
+impl ContrastPreference {
+    /// Returns whether the user asked for any contrast change.
+    pub fn is_increased(self) -> bool {
+        self != Self::NoPreference
+    }
+}
+
+/// The user's forced-colors palette: the CSS system colors a browser resolves
+/// for a page under `forced-colors: active`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SystemColors {
+    /// `Canvas`: the background of the app and its controls.
+    pub canvas: crate::Rgba,
+    /// `CanvasText`: text and borders on [`SystemColors::canvas`].
+    pub canvas_text: crate::Rgba,
+    /// `LinkText`: links.
+    pub link_text: crate::Rgba,
+    /// `Highlight`: the background of selected items.
+    pub highlight: crate::Rgba,
+    /// `HighlightText`: text on [`SystemColors::highlight`].
+    pub highlight_text: crate::Rgba,
+    /// `ButtonFace`: the background of buttons.
+    pub button_face: crate::Rgba,
+    /// `ButtonText`: text on [`SystemColors::button_face`].
+    pub button_text: crate::Rgba,
+    /// `GrayText`: disabled text.
+    pub gray_text: crate::Rgba,
 }
 
 /// Thermal state of the system
