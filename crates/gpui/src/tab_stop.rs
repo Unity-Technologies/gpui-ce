@@ -473,7 +473,11 @@ mod tests {
         const FRAMES: usize = 100;
         let focus_map = Arc::new(FocusMap::default());
         let handles: Vec<FocusHandle> = (0..HANDLES)
-            .map(|i| FocusHandle::new(&focus_map).tab_stop(true).tab_index((i % 7) as isize))
+            .map(|i| {
+                FocusHandle::new(&focus_map)
+                    .tab_stop(true)
+                    .tab_index((i % 7) as isize)
+            })
             .collect();
         let frame = |map: &mut TabStopMap, query: bool| {
             map.clear();
