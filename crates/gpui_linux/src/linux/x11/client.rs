@@ -735,6 +735,13 @@ impl X11Client {
         if !state.has_xim() {
             return;
         }
+        // CreateIc is only valid once the handshake's OpenReply has assigned
+        // the input method id. The handshake creates the first input context
+        // itself; creating one earlier names input method 0, which fcitx5
+        // answers with an unparseable XIM_ERROR that drops XIM for the session.
+        if !xim_handshake_complete(state.xim_handler.as_ref()) {
+            return;
+        }
 
         let Some((mut ximc, xim_handler)) = state.take_xim() else {
             return;
@@ -2530,6 +2537,21 @@ enum DpiMode {
     NotSet,
 }
 
+/// GDK scales windows by whole numbers only. A value that is not a positive
+/// whole number is left to the other sources rather than guessed at.
+fn parse_gdk_scale(value: &str) -> Option<f32> {
+    match value.trim().parse::<u32>() {
+        Ok(scale) if scale > 0 => Some(scale as f32),
+        _ => None,
+    }
+}
+
+/// Whether the XIM handshake has created its input context, so that a focused
+/// window may create its own.
+fn xim_handshake_complete(handler: Option<&XimHandler>) -> bool {
+    handler.is_some_and(|handler| handler.connected)
+}
+
 fn get_scale_factor(
     connection: &XCBConnection,
     resource_database: &Database,
@@ -2593,6 +2615,17 @@ fn get_scale_factor(
     {
         let scale = dpi / 96.0; // base dpi
         log::info!("Using scale factor from Xft.dpi: {}", scale);
+        return scale;
+    }
+
+    // Xft.dpi wins above, so only sessions that would have guessed a DPI
+    // change. A compositor that leaves XWayland unscaled states the scale in
+    // GDK_SCALE and often sets no Xft.dpi.
+    if let Some(scale) = std::env::var("GDK_SCALE")
+        .ok()
+        .and_then(|value| parse_gdk_scale(&value))
+    {
+        log::info!("Using scale factor from GDK_SCALE: {}", scale);
         return scale;
     }
 
@@ -2812,6 +2845,28 @@ fn xkb_state_for_key_event(xkb: &xkbc::State, event_state: xproto::KeyButMask) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_whole_gdk_scale_is_the_scale_factor() {
+        assert_eq!(parse_gdk_scale("2"), Some(2.0));
+        assert_eq!(parse_gdk_scale(" 1 "), Some(1.0));
+    }
+
+    #[test]
+    fn a_gdk_scale_that_is_not_a_positive_whole_number_is_ignored() {
+        for value in ["", "0", "1.5", "-2", "auto"] {
+            assert_eq!(parse_gdk_scale(value), None, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn focus_waits_for_the_xim_handshake() {
+        assert!(!xim_handshake_complete(None));
+        assert!(!xim_handshake_complete(Some(&XimHandler::new())));
+        let mut handler = XimHandler::new();
+        handler.connected = true;
+        assert!(xim_handshake_complete(Some(&handler)));
+    }
 
     fn test_keymap(layouts: &str) -> xkbc::Keymap {
         test_keymap_with_variant(layouts, "")
