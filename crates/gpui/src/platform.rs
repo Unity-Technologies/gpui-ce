@@ -292,6 +292,13 @@ pub trait Platform: 'static {
     /// compares [`Platform::contrast_preference`] before notifying observers.
     fn on_contrast_preference_change(&self, _callback: Box<dyn FnMut()>) {}
 
+    /// Returns the palette the OS draws with while
+    /// [`ContrastPreference::Forced`] is on, or `None` when it is off or the
+    /// platform cannot report one.
+    fn forced_colors(&self) -> Option<SystemColors> {
+        None
+    }
+
     /// Sets the application's process-wide identity and user-visible name.
     ///
     /// The identifier is used for platform identity mechanisms such as the
@@ -492,6 +499,28 @@ impl ContrastPreference {
     pub fn is_increased(self) -> bool {
         self != Self::NoPreference
     }
+}
+
+/// The user's forced-colors palette: the CSS system colors a browser resolves
+/// for a page under `forced-colors: active`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SystemColors {
+    /// `Canvas`: the background of the app and its controls.
+    pub canvas: crate::Rgba,
+    /// `CanvasText`: text and borders on [`SystemColors::canvas`].
+    pub canvas_text: crate::Rgba,
+    /// `LinkText`: links.
+    pub link_text: crate::Rgba,
+    /// `Highlight`: the background of selected items.
+    pub highlight: crate::Rgba,
+    /// `HighlightText`: text on [`SystemColors::highlight`].
+    pub highlight_text: crate::Rgba,
+    /// `ButtonFace`: the background of buttons.
+    pub button_face: crate::Rgba,
+    /// `ButtonText`: text on [`SystemColors::button_face`].
+    pub button_text: crate::Rgba,
+    /// `GrayText`: disabled text.
+    pub gray_text: crate::Rgba,
 }
 
 /// Thermal state of the system

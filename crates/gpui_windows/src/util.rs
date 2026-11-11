@@ -8,7 +8,13 @@ use windows::{
     },
     Win32::{
         Foundation::*,
-        Graphics::Dwm::*,
+        Graphics::{
+            Dwm::*,
+            Gdi::{
+                COLOR_BTNFACE, COLOR_BTNTEXT, COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT,
+                COLOR_HOTLIGHT, COLOR_WINDOW, COLOR_WINDOWTEXT, GetSysColor, SYS_COLOR_INDEX,
+            },
+        },
         UI::{
             Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW, HIGHCONTRASTW_FLAGS},
             WindowsAndMessaging::*,
@@ -192,6 +198,28 @@ pub(crate) fn system_contrast_preference() -> Result<ContrastPreference> {
     Ok(contrast_preference_from_flags(high_contrast.dwFlags))
 }
 
+/// Reads the active contrast theme's colors, the `GetSysColor` entries
+/// Chromium resolves CSS system colors from under `forced-colors: active`.
+pub(crate) fn system_forced_colors() -> SystemColors {
+    let color = |index: SYS_COLOR_INDEX| colorref_to_rgba(unsafe { GetSysColor(index) });
+    SystemColors {
+        canvas: color(COLOR_WINDOW),
+        canvas_text: color(COLOR_WINDOWTEXT),
+        link_text: color(COLOR_HOTLIGHT),
+        highlight: color(COLOR_HIGHLIGHT),
+        highlight_text: color(COLOR_HIGHLIGHTTEXT),
+        button_face: color(COLOR_BTNFACE),
+        button_text: color(COLOR_BTNTEXT),
+        gray_text: color(COLOR_GRAYTEXT),
+    }
+}
+
+/// A `COLORREF` is `0x00BBGGRR`.
+fn colorref_to_rgba(colorref: u32) -> Rgba {
+    let [r, g, b, _] = colorref.to_le_bytes();
+    rgb(u32::from_be_bytes([0, r, g, b]))
+}
+
 fn contrast_preference_from_flags(flags: HIGHCONTRASTW_FLAGS) -> ContrastPreference {
     if flags.contains(HCF_HIGHCONTRASTON) {
         ContrastPreference::Forced
@@ -209,8 +237,15 @@ fn is_color_light(color: &Color) -> bool {
 mod tests {
     // Not `super::*`: that glob pulls in `gpui::test`, which shadows `#[test]`.
     use super::{
-        ContrastPreference, HCF_HIGHCONTRASTON, HIGHCONTRASTW_FLAGS, contrast_preference_from_flags,
+        ContrastPreference, HCF_HIGHCONTRASTON, HIGHCONTRASTW_FLAGS, colorref_to_rgba,
+        contrast_preference_from_flags, rgb,
     };
+
+    #[test]
+    fn colorref_is_blue_green_red() {
+        assert_eq!(colorref_to_rgba(0x00_33_22_11), rgb(0x112233));
+        assert_eq!(colorref_to_rgba(0x00_ff_ff_00), rgb(0x00ffff));
+    }
 
     #[test]
     fn high_contrast_flag_maps_to_forced_colors() {
