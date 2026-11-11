@@ -236,6 +236,19 @@ mod tests {
         window.update(cx, |_, _, cx| cx.notify()).unwrap();
         cx.run_until_parked();
 
+        // A reused paint replays its debug selectors, so a test can still find
+        // an element inside a cached view on a frame that did not render it.
+        let reused_bounds = window
+            .update(cx, |_, window, _| {
+                window
+                    .rendered_frame
+                    .debug_bounds
+                    .get("NESTED_MENU")
+                    .copied()
+            })
+            .unwrap();
+        assert_eq!(reused_bounds, Some(menu_bounds));
+
         // Re-render the panel itself again to prove the popovers still draw.
         window
             .update(cx, |root, _, cx| {
