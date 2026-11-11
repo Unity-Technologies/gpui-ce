@@ -66,7 +66,10 @@ impl WgpuRenderer {
         instances: &mut InstanceUpload,
         pass: &mut wgpu::RenderPass<'_>,
     ) -> frame::DrawResult {
-        let texture = self.atlas.get_texture_info(texture_id);
+        let Some(texture) = self.atlas.get_texture_info(texture_id) else {
+            log::warn!("skipping sprite batch: atlas texture {texture_id:?} was released");
+            return Ok(());
+        };
         self.draw_instances_with_texture(
             sprites,
             texture_id,
@@ -84,7 +87,10 @@ impl WgpuRenderer {
         instances: &mut InstanceUpload,
         pass: &mut wgpu::RenderPass<'_>,
     ) -> frame::DrawResult {
-        let texture = self.atlas.get_texture_info(texture_id);
+        let Some(texture) = self.atlas.get_texture_info(texture_id) else {
+            log::warn!("skipping sprite batch: atlas texture {texture_id:?} was released");
+            return Ok(());
+        };
         let resources = self.resources();
         let pipeline = resources
             .pipelines
@@ -102,7 +108,10 @@ impl WgpuRenderer {
         instances: &mut InstanceUpload,
         pass: &mut wgpu::RenderPass<'_>,
     ) -> frame::DrawResult {
-        let texture = self.atlas.get_texture_info(texture_id);
+        let Some(texture) = self.atlas.get_texture_info(texture_id) else {
+            log::warn!("skipping sprite batch: atlas texture {texture_id:?} was released");
+            return Ok(());
+        };
         let pipelines = &self.resources().pipelines;
         let pipeline = if smoothed {
             &pipelines.smoothed_polychrome_sprites

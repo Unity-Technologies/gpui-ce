@@ -1078,7 +1078,10 @@ impl DirectXRenderer {
         texture_id: AtlasTextureId,
         instances: InstanceRange,
     ) -> Result<()> {
-        let texture_view = self.atlas.get_texture_view(texture_id);
+        let Some(texture_view) = self.atlas.get_texture_view(texture_id) else {
+            log::warn!("skipping sprite batch: atlas texture {texture_id:?} was released");
+            return Ok(());
+        };
         self.pipelines.mono_sprites.draw_instances(
             &self.frame_bindings()?,
             Some(&texture_view),
@@ -1091,7 +1094,10 @@ impl DirectXRenderer {
         texture_id: AtlasTextureId,
         instances: InstanceRange,
     ) -> Result<()> {
-        let texture_view = self.atlas.get_texture_view(texture_id);
+        let Some(texture_view) = self.atlas.get_texture_view(texture_id) else {
+            log::warn!("skipping sprite batch: atlas texture {texture_id:?} was released");
+            return Ok(());
+        };
         self.pipelines.subpixel_sprites.draw_instances(
             &self.frame_bindings()?,
             Some(&texture_view),
@@ -1105,7 +1111,10 @@ impl DirectXRenderer {
         instances: InstanceRange,
         smoothed: bool,
     ) -> Result<()> {
-        let texture_view = self.atlas.get_texture_view(texture_id);
+        let Some(texture_view) = self.atlas.get_texture_view(texture_id) else {
+            log::warn!("skipping sprite batch: atlas texture {texture_id:?} was released");
+            return Ok(());
+        };
         self.pipelines.poly_sprites.draw_instances_variant(
             &self.frame_bindings()?,
             Some(&texture_view),
