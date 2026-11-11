@@ -718,8 +718,17 @@ impl<E: Element> Drawable<E> {
                             if hidden {
                                 node.set_hidden();
                             }
+                            // Inside something that scrolls, the built-in
+                            // handling can bring this node into view.
+                            let scroll_parent = window.a11y.scroll.current();
+                            if window.a11y.scroll.current_chain_scrollable() {
+                                node.add_action(accesskit::Action::ScrollIntoView);
+                            }
                             window.a11y.node_bounds.insert(node_id, bounds);
                             pushed_a11y_node = window.a11y.nodes.push(node_id, node);
+                            if pushed_a11y_node && let Some(parent) = scroll_parent {
+                                window.a11y.scroll.node_parent.insert(node_id, parent);
+                            }
                             #[cfg(debug_assertions)]
                             if pushed_a11y_node {
                                 let view = window
