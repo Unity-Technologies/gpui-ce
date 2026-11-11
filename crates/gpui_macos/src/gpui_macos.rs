@@ -10,6 +10,7 @@ mod display_link;
 mod events;
 mod haptic_feedback;
 mod keyboard;
+mod overlay_spike;
 mod pasteboard;
 mod system_notifications;
 mod text_system;
