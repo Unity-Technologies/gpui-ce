@@ -85,13 +85,14 @@ impl WgpuAtlas {
         lock.flush_uploads();
     }
 
-    pub fn get_texture_info(&self, id: AtlasTextureId) -> WgpuTextureInfo {
+    /// The texture info for `id`, or `None` once the atlas released that texture.
+    pub fn get_texture_info(&self, id: AtlasTextureId) -> Option<WgpuTextureInfo> {
         let lock = self.0.lock();
-        let texture = &lock.storage[id];
-        WgpuTextureInfo {
+        let texture = lock.storage.get(id)?;
+        Some(WgpuTextureInfo {
             view: texture.view.clone(),
             identity: texture.identity,
-        }
+        })
     }
 
     /// Clears all cached textures and tiles, forcing them to be recreated.
@@ -588,12 +589,39 @@ mod tests {
         };
 
         let first = insert(&key(1));
-        let identity = atlas.get_texture_info(first.texture_id).identity;
+        let identity = atlas.get_texture_info(first.texture_id).unwrap().identity;
         atlas.remove(&key(1));
         let second = insert(&key(2));
 
         assert_eq!(first.texture_id, second.texture_id);
-        assert_ne!(atlas.get_texture_info(second.texture_id).identity, identity);
+        assert_ne!(atlas.get_texture_info(second.texture_id).unwrap().identity, identity);
+        Ok(())
+    }
+
+    #[test]
+    fn texture_info_is_none_once_the_texture_is_released() -> anyhow::Result<()> {
+        let (device, queue) = test_device_and_queue()?;
+        let atlas = WgpuAtlas::new(device, queue, wgpu::TextureFormat::Bgra8Unorm);
+        let key = AtlasKey::Image(RenderImageParams {
+            image_id: ImageId(1),
+            frame_index: 0,
+            downscale_level: 0,
+        });
+        let tile = atlas
+            .get_or_insert_with(&key, &mut || {
+                Ok(Some((
+                    Size {
+                        width: DevicePixels(1),
+                        height: DevicePixels(1),
+                    },
+                    Cow::Owned(vec![0, 0, 0, 255]),
+                )))
+            })?
+            .expect("callback returns Some");
+        assert!(atlas.get_texture_info(tile.texture_id).is_some());
+
+        atlas.remove(&key);
+        assert!(atlas.get_texture_info(tile.texture_id).is_none());
         Ok(())
     }
 
