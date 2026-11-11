@@ -33,7 +33,6 @@ use objc2_app_kit::{
     NSMenuDelegate, NSMenuItem, NSModalResponseOK, NSOpenPanel, NSResponder, NSSavePanel,
     NSScroller, NSWorkspace,
 };
-#[cfg(feature = "screen-capture")]
 use objc2_foundation::NSOperatingSystemVersion;
 use objc2_foundation::{
     NSArray, NSAutoreleasePool, NSBundle, NSInteger, NSNotification, NSNotificationCenter,
@@ -1052,6 +1051,17 @@ impl Platform for MacPlatform {
             3 => ThermalState::Critical,
             _ => ThermalState::Nominal,
         }
+    }
+
+    fn low_power_mode(&self) -> bool {
+        // `isLowPowerModeEnabled` is macOS 12+; the deployment target is 10.15, where
+        // calling it raises an unrecognized-selector exception every frame.
+        let process_info = NSProcessInfo::processInfo();
+        process_info.isOperatingSystemAtLeastVersion(NSOperatingSystemVersion {
+            majorVersion: 12,
+            minorVersion: 0,
+            patchVersion: 0,
+        }) && process_info.isLowPowerModeEnabled()
     }
 
     fn show_system_notification(&self, notification: gpui::SystemNotification) {

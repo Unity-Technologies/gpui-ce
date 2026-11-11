@@ -279,6 +279,10 @@ pub trait Platform: 'static {
     fn on_validate_app_menu_command(&self, callback: Box<dyn FnMut(&dyn Action) -> bool>);
 
     fn thermal_state(&self) -> ThermalState;
+    /// Whether the OS asks apps to save power (macOS Low Power Mode). Defaults to `false`.
+    fn low_power_mode(&self) -> bool {
+        false
+    }
     fn on_thermal_state_change(&self, callback: Box<dyn FnMut()>);
 
     /// Returns the user's system-wide contrast setting.

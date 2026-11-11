@@ -1663,6 +1663,13 @@ impl App {
         self.platform.thermal_state()
     }
 
+    /// Whether the system is in a low power mode (macOS Low Power Mode).
+    ///
+    /// The frame limiter caps presentation to ~30fps while it is on.
+    pub fn low_power_mode(&self) -> bool {
+        self.platform.low_power_mode()
+    }
+
     /// Calls `callback` when the system's thermal state changes.
     ///
     /// The subscription stays active while you hold it.
