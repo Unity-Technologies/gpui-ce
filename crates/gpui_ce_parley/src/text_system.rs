@@ -1983,7 +1983,7 @@ impl ParleyTextSystem {
                     width: f32::from(inline_box.size.width),
                     height: f32::from(inline_box.size.height),
                     baseline: None,
-                    vertical_align: VerticalAlign::BASELINE,
+                    vertical_align: VerticalAlign::default(),
                 });
             }
 
@@ -2234,8 +2234,12 @@ impl ParleyTextSystem {
             inline_text_bounds.push((text_top, text_bottom));
 
             width = width.max(line_advance);
-            ascent = ascent.max(px(metrics.baseline - metrics.content_block_min_coord));
-            descent = descent.max(px(metrics.content_block_max_coord - metrics.baseline));
+            ascent = ascent.max(px(
+                (metrics.baseline - metrics.content_block_min_coord).max(0.),
+            ));
+            descent = descent.max(px(
+                (metrics.content_block_max_coord - metrics.baseline).max(0.),
+            ));
         }
 
         if visual_lines.is_empty() {
