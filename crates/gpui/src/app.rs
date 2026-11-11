@@ -38,7 +38,7 @@ use std::{
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     rc::{Rc, Weak},
-    sync::{Arc, atomic::Ordering::SeqCst},
+    sync::Arc,
     time::Duration,
 };
 
@@ -848,7 +848,7 @@ pub struct App {
     pub(crate) new_entity_observers: SubscriberSet<TypeId, NewEntityListener>,
     pub(crate) windows: SlotMap<WindowId, Option<Box<Window>>>,
     pub(crate) window_handles: FxHashMap<WindowId, AnyWindowHandle>,
-    pub(crate) focus_handles: Arc<FocusMap>,
+    pub(crate) focus_handles: Arc<RwLock<FocusMap>>,
     pub(crate) keymap: Rc<RefCell<Keymap>>,
     pub(crate) keyboard_layout: Box<dyn PlatformKeyboardLayout>,
     pub(crate) keyboard_mapper: Rc<dyn PlatformKeyboardMapper>,
@@ -863,6 +863,9 @@ pub struct App {
     pub(crate) keyboard_layout_observers: SubscriberSet<(), Handler>,
     pub(crate) thermal_state_observers: SubscriberSet<(), Handler>,
     pub(crate) system_wake_observers: SubscriberSet<(), Handler>,
+    /// Whether the platform wake callback is registered. It is added with the
+    /// first observer, so an app with none never subscribes to wake events.
+    system_wake_registered: Cell<bool>,
     pub(crate) release_listeners: SubscriberSet<EntityId, ReleaseListener>,
     pub(crate) global_observers: SubscriberSet<TypeId, Handler>,
     pub(crate) quit_observers: SubscriberSet<(), QuitHandler>,
@@ -986,7 +989,7 @@ impl App {
                 windows: SlotMap::with_key(),
                 window_update_stack: Vec::new(),
                 window_handles: FxHashMap::default(),
-                focus_handles: Arc::new(RwLock::new(SlotMap::with_key())),
+                focus_handles: Arc::new(RwLock::new(FocusMap::default())),
                 keymap: Rc::new(RefCell::new(Keymap::default())),
                 keyboard_layout,
                 keyboard_mapper,
@@ -1005,6 +1008,7 @@ impl App {
                 keyboard_layout_observers: SubscriberSet::new(),
                 thermal_state_observers: SubscriberSet::new(),
                 system_wake_observers: SubscriberSet::new(),
+                system_wake_registered: Cell::new(false),
                 global_observers: SubscriberSet::new(),
                 quit_observers: SubscriberSet::new(),
                 restart_observers: SubscriberSet::new(),
@@ -1059,18 +1063,6 @@ impl App {
                 if let Some(app) = app.upgrade() {
                     let cx = &mut app.borrow_mut();
                     cx.thermal_state_observers
-                        .clone()
-                        .retain(&(), move |callback| (callback)(cx));
-                }
-            }
-        }));
-
-        platform.on_system_wake(Box::new({
-            let app = Rc::downgrade(&app);
-            move || {
-                if let Some(app) = app.upgrade() {
-                    let cx = &mut app.borrow_mut();
-                    cx.system_wake_observers
                         .clone()
                         .retain(&(), move |callback| (callback)(cx));
                 }
@@ -1674,6 +1666,40 @@ impl App {
         subscription
     }
 
+    fn register_system_wake_handler(&self) {
+        if self.system_wake_registered.replace(true) {
+            return;
+        }
+        fn notify(cx: &mut App) {
+            cx.system_wake_observers
+                .clone()
+                .retain(&(), move |callback| (callback)(cx));
+        }
+        let app = self.this.clone();
+        let executor = self.foreground_executor.clone();
+        self.platform.on_system_wake(Box::new(move || {
+            let Some(strong) = app.upgrade() else {
+                return;
+            };
+            match strong.try_borrow_mut() {
+                Ok(mut cx) => notify(&mut cx),
+                Err(_) => {
+                    // The wake message arrived in a message pump nested inside a
+                    // callback that holds the App, so run the observers once it
+                    // is free instead of panicking on the borrow.
+                    let app = app.clone();
+                    executor
+                        .spawn(async move {
+                            if let Some(app) = app.upgrade() {
+                                notify(&mut app.borrow_mut());
+                            }
+                        })
+                        .detach();
+                }
+            }
+        }));
+    }
+
     /// Calls `callback` when the system wakes from sleep.
     ///
     /// Use it to reconnect to network services or refresh data that went stale
@@ -1682,6 +1708,7 @@ impl App {
     where
         F: 'static + FnMut(&mut App),
     {
+        self.register_system_wake_handler();
         let (subscription, activate) = self.system_wake_observers.insert(
             (),
             Box::new(move |cx| {
@@ -2123,25 +2150,36 @@ impl App {
 
     /// Repeatedly called during `flush_effects` to handle a focused handle being dropped.
     fn release_dropped_focus_handles(&mut self) {
-        self.focus_handles
-            .clone()
-            .write()
-            .retain(|handle_id, focus| {
-                if focus.ref_count.load(SeqCst) == 0 {
-                    for window_handle in self.windows() {
-                        window_handle
-                            .update(self, |_, window, cx| {
-                                if window.focus == Some(handle_id) {
-                                    window.blur(cx);
-                                }
-                            })
-                            .unwrap();
-                    }
-                    false
-                } else {
-                    true
-                }
-            });
+        let focus_handles = self.focus_handles.clone();
+        let mut focus_handles = focus_handles.write();
+        let FocusMap {
+            handles,
+            dropped_handles,
+        } = &mut *focus_handles;
+        if dropped_handles.is_empty() {
+            return;
+        }
+
+        let windows = self
+            .windows
+            .values()
+            .filter_map(|window| {
+                let window = window.as_ref()?;
+                dropped_handles
+                    .contains(&window.focus?)
+                    .then_some(window.handle)
+            })
+            .collect::<SmallVec<[_; 1]>>();
+        for handle_id in dropped_handles.drain(..) {
+            handles.remove(handle_id);
+        }
+        drop(focus_handles);
+
+        for window_handle in windows {
+            window_handle
+                .update(self, |_, window, cx| window.blur(cx))
+                .ok();
+        }
     }
 
     fn apply_notify_effect(&mut self, emitter: EntityId) {

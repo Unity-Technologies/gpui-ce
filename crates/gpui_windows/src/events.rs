@@ -159,7 +159,7 @@ impl WindowsWindowInner {
             WM_SETTINGCHANGE => self.handle_system_settings_changed(handle, wparam, lparam),
             WM_INPUTLANGCHANGE => self.handle_input_language_changed(),
             WM_SHOWWINDOW => self.handle_window_visibility_changed(handle, wparam),
-            WM_GPUI_CURSOR_STYLE_CHANGED => self.handle_cursor_changed(lparam),
+            WM_GPUI_CURSOR_STYLE_CHANGED => self.handle_cursor_changed(wparam, lparam),
             WM_GPUI_FORCE_UPDATE_WINDOW => self.draw_window(handle, true),
             WM_GPUI_GPU_DEVICE_LOST => self.handle_device_lost(lparam),
             DM_POINTERHITTEST => self.handle_dm_pointer_hit_test(wparam),
@@ -272,12 +272,21 @@ impl WindowsWindowInner {
         let new_logical_size = device_size.to_pixels(scale_factor);
 
         self.state.logical_size.set(new_logical_size);
-        if let Err(e) = self.state.renderer.borrow_mut().resize(device_size) {
-            log::error!("Failed to resize renderer, invalidating devices: {}", e);
-            self.state
-                .invalidate_devices
-                .store(true, std::sync::atomic::Ordering::Release);
+        let mut renderer = self.state.renderer.borrow_mut();
+        if let Err(e) = renderer.resize(device_size) {
+            // Only a removed device needs recovery. Any other failure (an
+            // out-of-memory resize, say) leaves the device usable, and the
+            // renderer retries the resize on its next draw.
+            if renderer.is_device_removed() {
+                log::error!("Failed to resize renderer, invalidating devices: {}", e);
+                self.state
+                    .invalidate_devices
+                    .store(true, std::sync::atomic::Ordering::Release);
+            } else {
+                log::warn!("Failed to resize renderer, will retry: {}", e);
+            }
         }
+        drop(renderer);
         if let Some(mut callback) = self.state.callbacks.resize.take() {
             callback(new_logical_size, scale_factor);
             self.state.callbacks.resize.set(Some(callback));
@@ -366,6 +375,14 @@ impl WindowsWindowInner {
 
     fn handle_mouse_move_msg(&self, handle: HWND, lparam: LPARAM, wparam: WPARAM) -> Option<isize> {
         self.start_tracking_mouse(handle, TME_LEAVE);
+
+        // Windows also sends WM_MOUSEMOVE when content moves under a still
+        // pointer (a list scrolling, a window appearing). Forwarding those would
+        // let hover steal keyboard selection and un-hide a hidden cursor.
+        let position = (lparam.signed_loword(), lparam.signed_hiword());
+        if self.state.last_mouse_position.replace(Some(position)) == Some(position) {
+            return Some(0);
+        }
         self.restore_cursor_after_hide();
 
         let Some(mut func) = self.state.callbacks.input.take() else {
@@ -400,6 +417,7 @@ impl WindowsWindowInner {
 
     fn handle_mouse_leave_msg(&self) -> Option<isize> {
         self.state.hovered.set(false);
+        self.state.last_mouse_position.set(None);
         // The next window's `WM_SETCURSOR` picks its own cursor, so we just clear
         // the flag for tight `is_cursor_visible()` semantics.
         self.state.cursor_visible.store(true, Ordering::Relaxed);
@@ -1163,7 +1181,13 @@ impl WindowsWindowInner {
         None
     }
 
-    fn handle_cursor_changed(&self, lparam: LPARAM) -> Option<isize> {
+    fn handle_cursor_changed(&self, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
+        // lparam is read as an HCURSOR handle, so only trust a message that
+        // carries this app's token, as the platform-window messages do.
+        if wparam.0 != self.validation_number {
+            log::error!("Wrong validation number while processing cursor style message");
+            return None;
+        }
         let had_cursor = self.state.current_cursor.get().is_some();
 
         self.state.current_cursor.set(if lparam.0 == 0 {
