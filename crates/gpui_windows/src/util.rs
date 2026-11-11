@@ -6,7 +6,14 @@ use windows::{
         Color,
         ViewManagement::{UIColorType, UISettings},
     },
-    Win32::{Foundation::*, Graphics::Dwm::*, UI::WindowsAndMessaging::*},
+    Win32::{
+        Foundation::*,
+        Graphics::Dwm::*,
+        UI::{
+            Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW, HIGHCONTRASTW_FLAGS},
+            WindowsAndMessaging::*,
+        },
+    },
     core::BOOL,
 };
 
@@ -167,7 +174,63 @@ pub(crate) fn system_appearance() -> Result<WindowAppearance> {
     }
 }
 
+/// Reads Windows High Contrast (contrast themes on Windows 11) from
+/// `SPI_GETHIGHCONTRAST`, the setting Chromium maps to `forced-colors: active`.
+pub(crate) fn system_contrast_preference() -> Result<ContrastPreference> {
+    let mut high_contrast = HIGHCONTRASTW {
+        cbSize: std::mem::size_of::<HIGHCONTRASTW>() as u32,
+        ..Default::default()
+    };
+    unsafe {
+        SystemParametersInfoW(
+            SPI_GETHIGHCONTRAST,
+            high_contrast.cbSize,
+            Some(&mut high_contrast as *mut HIGHCONTRASTW as *mut _),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )?;
+    }
+    Ok(contrast_preference_from_flags(high_contrast.dwFlags))
+}
+
+fn contrast_preference_from_flags(flags: HIGHCONTRASTW_FLAGS) -> ContrastPreference {
+    if flags.contains(HCF_HIGHCONTRASTON) {
+        ContrastPreference::Forced
+    } else {
+        ContrastPreference::NoPreference
+    }
+}
+
 #[inline(always)]
 fn is_color_light(color: &Color) -> bool {
     ((5 * color.G as u32) + (2 * color.R as u32) + color.B as u32) > (8 * 128)
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: that glob pulls in `gpui::test`, which shadows `#[test]`.
+    use super::{
+        ContrastPreference, HCF_HIGHCONTRASTON, HIGHCONTRASTW_FLAGS, contrast_preference_from_flags,
+    };
+
+    #[test]
+    fn high_contrast_flag_maps_to_forced_colors() {
+        assert_eq!(
+            contrast_preference_from_flags(HIGHCONTRASTW_FLAGS(0)),
+            ContrastPreference::NoPreference
+        );
+        assert_eq!(
+            contrast_preference_from_flags(HCF_HIGHCONTRASTON),
+            ContrastPreference::Forced
+        );
+        // HCF_AVAILABLE (2) and HCF_HOTKEYACTIVE (4) alone mean the feature is
+        // reachable, not on.
+        assert_eq!(
+            contrast_preference_from_flags(HIGHCONTRASTW_FLAGS(0x2 | 0x4)),
+            ContrastPreference::NoPreference
+        );
+        assert_eq!(
+            contrast_preference_from_flags(HIGHCONTRASTW_FLAGS(0x1 | 0x2)),
+            ContrastPreference::Forced
+        );
+    }
 }

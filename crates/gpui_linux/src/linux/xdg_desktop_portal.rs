@@ -2,12 +2,12 @@
 //!
 //! This module uses the [ashpd] crate
 
-use ashpd::desktop::settings::{ColorScheme, Settings};
+use ashpd::desktop::settings::{ColorScheme, Contrast, Settings};
 use calloop::channel::Channel;
 use calloop::{EventSource, Poll, PostAction, Readiness, Token, TokenFactory};
 use smol::stream::StreamExt;
 
-use gpui::{BackgroundExecutor, WindowAppearance};
+use gpui::{BackgroundExecutor, ContrastPreference, WindowAppearance};
 
 pub enum Event {
     WindowAppearance(WindowAppearance),
@@ -16,6 +16,7 @@ pub enum Event {
     #[cfg_attr(feature = "x11", allow(dead_code))]
     CursorSize(u32),
     ButtonLayout(String),
+    Contrast(ContrastPreference),
 }
 
 pub struct XDPEventSource {
@@ -57,6 +58,26 @@ impl XDPEventSource {
                     .await
                 {
                     sender.send(Event::ButtonLayout(initial_layout))?;
+                }
+
+                if let Ok(initial_contrast) = settings.contrast().await {
+                    sender.send(Event::Contrast(contrast_preference_from_portal(
+                        initial_contrast,
+                    )))?;
+                }
+
+                if let Ok(mut contrast_changed) = settings.receive_contrast_changed().await {
+                    let sender = sender.clone();
+                    background
+                        .spawn(async move {
+                            while let Some(contrast) = contrast_changed.next().await {
+                                sender.send(Event::Contrast(contrast_preference_from_portal(
+                                    contrast,
+                                )))?;
+                            }
+                            anyhow::Ok(())
+                        })
+                        .detach();
                 }
 
                 if let Ok(mut cursor_theme_changed) = settings
@@ -182,10 +203,36 @@ impl EventSource for XDPEventSource {
     }
 }
 
+/// `org.freedesktop.appearance` `contrast`: `0` no preference, `1` high.
+/// Chromium maps the same key to `prefers-contrast: more`.
+fn contrast_preference_from_portal(contrast: Contrast) -> ContrastPreference {
+    match contrast {
+        Contrast::High => ContrastPreference::More,
+        Contrast::NoPreference => ContrastPreference::NoPreference,
+    }
+}
+
 fn window_appearance_from_color_scheme(cs: ColorScheme) -> WindowAppearance {
     match cs {
         ColorScheme::PreferDark => WindowAppearance::Dark,
         ColorScheme::PreferLight => WindowAppearance::Light,
         ColorScheme::NoPreference => WindowAppearance::Light,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn portal_contrast_maps_to_contrast_preference() {
+        assert_eq!(
+            contrast_preference_from_portal(Contrast::High),
+            ContrastPreference::More
+        );
+        assert_eq!(
+            contrast_preference_from_portal(Contrast::NoPreference),
+            ContrastPreference::NoPreference
+        );
     }
 }

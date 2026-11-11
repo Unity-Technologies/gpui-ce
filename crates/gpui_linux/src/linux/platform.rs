@@ -24,8 +24,8 @@ use xkbcommon::xkb::{self, Keycode, Keysym, State};
 
 use crate::linux::{LinuxDispatcher, PriorityQueueCalloopReceiver};
 use gpui::{
-    Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, DisplayId,
-    ForegroundExecutor, Keymap, Menu, MenuItem, OwnedMenu, PathPromptOptions, Platform,
+    Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, ContrastPreference, CursorStyle,
+    DisplayId, ForegroundExecutor, Keymap, Menu, MenuItem, OwnedMenu, PathPromptOptions, Platform,
     PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
     PlatformWindow, Result, RunnableVariant, SharedString, Task, ThermalState, WindowAppearance,
     WindowButtonLayout, WindowParams,
@@ -95,6 +95,7 @@ pub(crate) struct PlatformHandlers {
     pub(crate) will_open_app_menu: Option<Box<dyn FnMut()>>,
     pub(crate) validate_app_menu_command: Option<Box<dyn FnMut(&dyn Action) -> bool>>,
     pub(crate) keyboard_layout_change: Option<Box<dyn FnMut()>>,
+    pub(crate) contrast_preference_change: Option<Box<dyn FnMut()>>,
     pub(crate) system_wake: Option<Box<dyn FnMut()>>,
 }
 
@@ -103,6 +104,7 @@ pub(crate) struct LinuxCommon {
     pub(crate) foreground_executor: ForegroundExecutor,
     pub(crate) text_system: Arc<dyn PlatformTextSystem>,
     pub(crate) appearance: WindowAppearance,
+    pub(crate) contrast_preference: ContrastPreference,
     pub(crate) auto_hide_scrollbars: bool,
     pub(crate) button_layout: WindowButtonLayout,
     pub(crate) callbacks: PlatformHandlers,
@@ -159,6 +161,7 @@ impl LinuxCommon {
             foreground_executor: ForegroundExecutor::new(dispatcher),
             text_system,
             appearance: WindowAppearance::Light,
+            contrast_preference: ContrastPreference::NoPreference,
             auto_hide_scrollbars: false,
             button_layout: WindowButtonLayout::linux_default(),
             callbacks,
@@ -173,6 +176,20 @@ impl LinuxCommon {
         };
 
         (common, main_receiver, wake_receiver)
+    }
+
+    /// Stores the portal's contrast setting. Returns the change callback, taken
+    /// out so the caller can run it after releasing its borrow, when the value moved.
+    #[cfg_attr(not(any(feature = "wayland", feature = "x11")), allow(dead_code))]
+    pub(crate) fn set_contrast_preference(
+        &mut self,
+        contrast: ContrastPreference,
+    ) -> Option<Box<dyn FnMut()>> {
+        if self.contrast_preference == contrast {
+            return None;
+        }
+        self.contrast_preference = contrast;
+        self.callbacks.contrast_preference_change.take()
     }
 
     pub(crate) fn start_wake_listener(&mut self) {
@@ -257,6 +274,15 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
     }
 
     fn on_thermal_state_change(&self, _callback: Box<dyn FnMut()>) {}
+
+    fn contrast_preference(&self) -> ContrastPreference {
+        self.inner.with_common(|common| common.contrast_preference)
+    }
+
+    fn on_contrast_preference_change(&self, callback: Box<dyn FnMut()>) {
+        self.inner
+            .with_common(|common| common.callbacks.contrast_preference_change = Some(callback));
+    }
 
     fn thermal_state(&self) -> ThermalState {
         ThermalState::Nominal
