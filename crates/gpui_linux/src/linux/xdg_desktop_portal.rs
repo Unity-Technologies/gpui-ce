@@ -2,7 +2,9 @@
 //!
 //! This module uses the [ashpd] crate
 
-use ashpd::desktop::settings::{ColorScheme, Contrast, Settings};
+use ashpd::desktop::settings::{
+    APPEARANCE_NAMESPACE, CONTRAST_KEY, ColorScheme, Contrast, Settings,
+};
 use calloop::channel::Channel;
 use calloop::{EventSource, Poll, PostAction, Readiness, Token, TokenFactory};
 use smol::stream::StreamExt;
@@ -66,11 +68,21 @@ impl XDPEventSource {
                     )))?;
                 }
 
-                if let Ok(mut contrast_changed) = settings.receive_contrast_changed().await {
+                // `receive_contrast_changed` returns a stream that borrows `settings`, which
+                // cannot move into a 'static task; this form does not borrow it.
+                if let Ok(mut contrast_changed) = settings
+                    .receive_setting_changed_with_args::<Contrast>(
+                        APPEARANCE_NAMESPACE,
+                        CONTRAST_KEY,
+                    )
+                    .await
+                {
                     let sender = sender.clone();
                     background
                         .spawn(async move {
                             while let Some(contrast) = contrast_changed.next().await {
+                                // Skip an unparsable value, as ashpd's own helper does.
+                                let Ok(contrast) = contrast else { continue };
                                 sender.send(Event::Contrast(contrast_preference_from_portal(
                                     contrast,
                                 )))?;
