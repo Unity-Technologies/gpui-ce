@@ -863,6 +863,9 @@ pub struct App {
     pub(crate) keyboard_layout_observers: SubscriberSet<(), Handler>,
     pub(crate) thermal_state_observers: SubscriberSet<(), Handler>,
     pub(crate) system_wake_observers: SubscriberSet<(), Handler>,
+    /// Whether the platform wake callback is registered. It is added with the
+    /// first observer, so an app with none never subscribes to wake events.
+    system_wake_registered: Cell<bool>,
     pub(crate) release_listeners: SubscriberSet<EntityId, ReleaseListener>,
     pub(crate) global_observers: SubscriberSet<TypeId, Handler>,
     pub(crate) quit_observers: SubscriberSet<(), QuitHandler>,
@@ -1005,6 +1008,7 @@ impl App {
                 keyboard_layout_observers: SubscriberSet::new(),
                 thermal_state_observers: SubscriberSet::new(),
                 system_wake_observers: SubscriberSet::new(),
+                system_wake_registered: Cell::new(false),
                 global_observers: SubscriberSet::new(),
                 quit_observers: SubscriberSet::new(),
                 restart_observers: SubscriberSet::new(),
@@ -1059,18 +1063,6 @@ impl App {
                 if let Some(app) = app.upgrade() {
                     let cx = &mut app.borrow_mut();
                     cx.thermal_state_observers
-                        .clone()
-                        .retain(&(), move |callback| (callback)(cx));
-                }
-            }
-        }));
-
-        platform.on_system_wake(Box::new({
-            let app = Rc::downgrade(&app);
-            move || {
-                if let Some(app) = app.upgrade() {
-                    let cx = &mut app.borrow_mut();
-                    cx.system_wake_observers
                         .clone()
                         .retain(&(), move |callback| (callback)(cx));
                 }
@@ -1673,6 +1665,40 @@ impl App {
         subscription
     }
 
+    fn register_system_wake_handler(&self) {
+        if self.system_wake_registered.replace(true) {
+            return;
+        }
+        fn notify(cx: &mut App) {
+            cx.system_wake_observers
+                .clone()
+                .retain(&(), move |callback| (callback)(cx));
+        }
+        let app = self.this.clone();
+        let executor = self.foreground_executor.clone();
+        self.platform.on_system_wake(Box::new(move || {
+            let Some(strong) = app.upgrade() else {
+                return;
+            };
+            match strong.try_borrow_mut() {
+                Ok(mut cx) => notify(&mut cx),
+                Err(_) => {
+                    // The wake message arrived in a message pump nested inside a
+                    // callback that holds the App, so run the observers once it
+                    // is free instead of panicking on the borrow.
+                    let app = app.clone();
+                    executor
+                        .spawn(async move {
+                            if let Some(app) = app.upgrade() {
+                                notify(&mut app.borrow_mut());
+                            }
+                        })
+                        .detach();
+                }
+            }
+        }));
+    }
+
     /// Calls `callback` when the system wakes from sleep.
     ///
     /// Use it to reconnect to network services or refresh data that went stale
@@ -1681,6 +1707,7 @@ impl App {
     where
         F: 'static + FnMut(&mut App),
     {
+        self.register_system_wake_handler();
         let (subscription, activate) = self.system_wake_observers.insert(
             (),
             Box::new(move |cx| {
