@@ -1,3 +1,4 @@
+use std::cell::OnceCell;
 use std::fmt::Debug;
 
 use ::sum_tree::SumTree;
@@ -7,14 +8,21 @@ use sum_tree::Bias;
 use crate::{FocusHandle, FocusId};
 
 /// Represents a collection of focus handles using the tab-index APIs.
-#[derive(Debug)]
+///
+/// Painting only records `insertion_history`; the sorted order and the id
+/// lookup are built on the first query after a change (a Tab press, or the a11y
+/// debug harvest), so a frame nobody tabs through never pays for them.
+#[derive(Debug, Default)]
 pub(crate) struct TabStopMap {
-    current_path: TabStopPath,
     pub(crate) insertion_history: Vec<TabStopOperation>,
+    built: OnceCell<BuiltTabStops>,
+}
+
+#[derive(Debug)]
+struct BuiltTabStops {
     by_id: FxHashMap<FocusId, TabStopNode>,
     order: SumTree<TabStopNode>,
-    /// Number of `by_id` entries that are tab stops, kept current by `insert`
-    /// so the per-frame a11y debug harvest is O(1) instead of a scan.
+    /// Number of `by_id` entries that are tab stops.
     tab_stop_count: usize,
 }
 
@@ -66,62 +74,73 @@ impl PartialOrd for TabStopNode {
     }
 }
 
-impl Default for TabStopMap {
-    fn default() -> Self {
-        Self {
-            current_path: TabStopPath::default(),
-            insertion_history: Vec::new(),
-            by_id: FxHashMap::default(),
-            order: SumTree::new(()),
-            tab_stop_count: 0,
-        }
-    }
-}
-
 impl TabStopMap {
     pub fn insert(&mut self, focus_handle: &FocusHandle) {
+        self.built.take();
         self.insertion_history
             .push(TabStopOperation::Insert(focus_handle.clone()));
-        let mut path = self.current_path.clone();
-        path.0.push(focus_handle.tab_index);
-        let order = TabStopNode {
-            node_insertion_index: self.insertion_history.len() - 1,
-            tab_stop: focus_handle.tab_stop,
-            path,
-        };
-        let replaced = self.by_id.insert(focus_handle.id, order.clone());
-        if replaced.is_some_and(|node| node.tab_stop) {
-            self.tab_stop_count -= 1;
-        }
-        if order.tab_stop {
-            self.tab_stop_count += 1;
-        }
-        self.order.insert_or_replace(order, ());
     }
 
     pub fn begin_group(&mut self, tab_index: isize) {
+        self.built.take();
         self.insertion_history
             .push(TabStopOperation::Group(tab_index));
-        self.current_path.0.push(tab_index);
     }
 
     pub fn end_group(&mut self) {
+        self.built.take();
         self.insertion_history.push(TabStopOperation::GroupEnd);
-        self.current_path.0.pop();
     }
 
     pub fn clear(&mut self) {
-        *self = Self::default();
-        self.current_path.0.clear();
+        self.built.take();
         self.insertion_history.clear();
-        self.by_id.clear();
-        self.order = SumTree::new(());
-        self.tab_stop_count = 0;
+    }
+
+    fn built(&self) -> &BuiltTabStops {
+        self.built.get_or_init(|| {
+            let mut path = TabStopPath::default();
+            let mut nodes = Vec::new();
+            let mut by_id = FxHashMap::default();
+            let mut tab_stop_count = 0;
+            for (index, operation) in self.insertion_history.iter().enumerate() {
+                match operation {
+                    TabStopOperation::Insert(focus_handle) => {
+                        let mut node_path = path.clone();
+                        node_path.0.push(focus_handle.tab_index);
+                        let node = TabStopNode {
+                            node_insertion_index: index,
+                            tab_stop: focus_handle.tab_stop,
+                            path: node_path,
+                        };
+                        let replaced = by_id.insert(focus_handle.id, node.clone());
+                        if replaced.is_some_and(|node: TabStopNode| node.tab_stop) {
+                            tab_stop_count -= 1;
+                        }
+                        if node.tab_stop {
+                            tab_stop_count += 1;
+                        }
+                        nodes.push(node);
+                    }
+                    TabStopOperation::Group(tab_index) => path.0.push(*tab_index),
+                    TabStopOperation::GroupEnd => {
+                        path.0.pop();
+                    }
+                }
+            }
+            // `node_insertion_index` is unique, so no two nodes compare equal.
+            nodes.sort();
+            BuiltTabStops {
+                by_id,
+                order: SumTree::from_iter(nodes, ()),
+                tab_stop_count,
+            }
+        })
     }
 
     pub fn next(&self, focused_id: Option<&FocusId>) -> Option<FocusHandle> {
         let Some(focused_id) = focused_id else {
-            let first = self.order.first()?;
+            let first = self.built().order.first()?;
             if first.tab_stop {
                 return self.focus_handle_for_order(first);
             } else {
@@ -144,7 +163,7 @@ impl TabStopMap {
     }
 
     fn next_inner(&self, node: &TabStopNode) -> Option<&TabStopNode> {
-        let mut cursor = self.order.cursor::<TabStopNode>(());
+        let mut cursor = self.built().order.cursor::<TabStopNode>(());
         cursor.seek(&node, Bias::Left);
         cursor.next();
         while let Some(item) = cursor.item()
@@ -158,7 +177,7 @@ impl TabStopMap {
 
     pub fn prev(&self, focused_id: Option<&FocusId>) -> Option<FocusHandle> {
         let Some(focused_id) = focused_id else {
-            let last = self.order.last()?;
+            let last = self.built().order.last()?;
             if last.tab_stop {
                 return self.focus_handle_for_order(last);
             } else {
@@ -181,7 +200,7 @@ impl TabStopMap {
     }
 
     fn prev_inner(&self, node: &TabStopNode) -> Option<&TabStopNode> {
-        let mut cursor = self.order.cursor::<TabStopNode>(());
+        let mut cursor = self.built().order.cursor::<TabStopNode>(());
         cursor.seek(&node, Bias::Left);
         cursor.prev();
         while let Some(item) = cursor.item()
@@ -208,7 +227,7 @@ impl TabStopMap {
     }
 
     pub(crate) fn tab_stop_count(&self) -> usize {
-        self.tab_stop_count
+        self.built().tab_stop_count
     }
 
     fn focus_handle_for_order(&self, order: &TabStopNode) -> Option<FocusHandle> {
@@ -221,7 +240,7 @@ impl TabStopMap {
     }
 
     fn tab_node_for_focus_id(&self, focused_id: &FocusId) -> Option<&TabStopNode> {
-        let Some(order) = self.by_id.get(focused_id) else {
+        let Some(order) = self.built().by_id.get(focused_id) else {
             return None;
         };
         Some(order)
