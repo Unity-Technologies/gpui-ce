@@ -445,6 +445,48 @@ mod tests {
         assert_eq!(map.tab_stop_count(), 0);
     }
 
+    /// Timing probe, not a pass/fail test: `cargo test -p gpui-ce --lib
+    /// bench_tab_stop_map -- --ignored --nocapture`. A frame inserts every
+    /// focusable (groups every 10th), and only a Tab press asks for the order.
+    #[test]
+    #[ignore]
+    fn bench_tab_stop_map_frame_cost() {
+        const HANDLES: usize = 5_000;
+        const FRAMES: usize = 100;
+        let focus_map = Arc::new(FocusMap::default());
+        let handles: Vec<FocusHandle> = (0..HANDLES)
+            .map(|i| FocusHandle::new(&focus_map).tab_stop(true).tab_index((i % 7) as isize))
+            .collect();
+        let frame = |map: &mut TabStopMap, query: bool| {
+            map.clear();
+            for (i, handle) in handles.iter().enumerate() {
+                if i % 10 == 0 {
+                    map.begin_group(i as isize % 3);
+                }
+                map.insert(handle);
+                if i % 10 == 9 {
+                    map.end_group();
+                }
+            }
+            if query {
+                std::hint::black_box(map.next(Some(&handles[HANDLES / 2].id)));
+                std::hint::black_box(map.tab_stop_count());
+            }
+        };
+        for query in [false, true] {
+            let mut map = TabStopMap::default();
+            frame(&mut map, query);
+            let start = std::time::Instant::now();
+            for _ in 0..FRAMES {
+                frame(&mut map, query);
+            }
+            println!(
+                "tab_stop_map query_every_frame={query}: {:?}/frame ({HANDLES} handles)",
+                start.elapsed() / FRAMES as u32
+            );
+        }
+    }
+
     #[test]
     fn test_tab_non_stop_filtering() {
         let focus_map = Arc::new(RwLock::new(FocusMap::default()));
