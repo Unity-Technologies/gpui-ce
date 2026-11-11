@@ -14,11 +14,11 @@ use windows::Win32::{
         },
         Dxgi::{
             CreateDXGIFactory2, DXGI_CREATE_FACTORY_DEBUG, DXGI_CREATE_FACTORY_FLAGS,
-            DXGI_ERROR_NOT_FOUND, IDXGIAdapter1, IDXGIFactory6,
+            DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_NOT_FOUND, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+            IDXGIAdapter1, IDXGIFactory6,
         },
     },
 };
-use windows::core::Interface;
 
 pub(crate) fn try_to_recover_from_device_lost<T>(mut f: impl FnMut() -> Result<T>) -> Result<T> {
     (0..5)
@@ -110,12 +110,12 @@ fn get_adapter(
 )> {
     // Every adapter that was tried and why it was refused, so the final error names them.
     let mut refusals: Vec<String> = Vec::new();
-    for adapter_index in 0.. {
-        let adapter: IDXGIAdapter1 = match unsafe { dxgi_factory.EnumAdapters(adapter_index) } {
-            Ok(adapter) => adapter.cast()?,
-            Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
-            Err(error) => return Err(error.into()),
-        };
+    // Hardware adapters first, in DXGI's high-performance order (discrete before integrated).
+    // Software adapters (WARP, the Basic Render Driver) only run if no hardware adapter works.
+    let (hardware, software): (Vec<_>, Vec<_>) = enumerate_by_preference(dxgi_factory)?
+        .into_iter()
+        .partition(|adapter| !is_software_adapter(adapter));
+    for adapter in hardware.into_iter().chain(software) {
         let gpu_name = adapter_description(&adapter);
         // Check to see whether the adapter supports Direct3D 11 and create
         // the device if it does.
@@ -146,6 +146,29 @@ fn get_adapter(
         "No compatible Direct3D 11 adapter found. Tried: {}",
         refusals.join("; ")
     )
+}
+
+fn enumerate_by_preference(dxgi_factory: &IDXGIFactory6) -> Result<Vec<IDXGIAdapter1>> {
+    let mut adapters = Vec::new();
+    for adapter_index in 0.. {
+        match unsafe {
+            dxgi_factory.EnumAdapterByGpuPreference::<IDXGIAdapter1>(
+                adapter_index,
+                DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+            )
+        } {
+            Ok(adapter) => adapters.push(adapter),
+            Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(adapters)
+}
+
+fn is_software_adapter(adapter: &IDXGIAdapter1) -> bool {
+    unsafe { adapter.GetDesc1() }
+        .map(|desc| desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0)
+        .unwrap_or(false)
 }
 
 fn adapter_description(adapter: &IDXGIAdapter1) -> String {
