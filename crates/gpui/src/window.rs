@@ -3954,11 +3954,11 @@ impl Window {
                 [range.start.tab_handle_index..range.end.tab_handle_index],
         );
         #[cfg(any(test, feature = "test-support"))]
-        for (selector, bounds) in self.rendered_frame.debug_bounds_log
+        for (selector, bounds) in &self.rendered_frame.debug_bounds_log
             [range.start.debug_bounds_index..range.end.debug_bounds_index]
-            .to_vec()
         {
-            self.next_frame.record_debug_bounds(selector, bounds);
+            self.next_frame
+                .record_debug_bounds(selector.clone(), *bounds);
         }
 
         self.text_system
