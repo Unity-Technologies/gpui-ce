@@ -9,7 +9,7 @@ use std::ptr::NonNull;
 use std::sync::{Arc, Mutex, Once};
 
 use foreign_types::{ForeignType, ForeignTypeRef};
-use gpui::{Scene, ScaledPixels};
+use gpui::{ScaledPixels, Scene};
 use objc2::{
     class, msg_send,
     rc::Retained,
@@ -54,13 +54,17 @@ extern "C" fn hit_test(this: &AnyObject, _: Sel, point: NSPoint) -> *mut AnyObje
             && x < frame.size.width
             && y < frame.size.height)
             || rects
-            .lock()
-            .map(|r| {
-                r.iter()
-                    .any(|[rx, ry, rw, rh]| x >= *rx && x < rx + rw && y >= *ry && y < ry + rh)
-            })
-            .unwrap_or(false);
-        if hit { this as *const AnyObject as *mut AnyObject } else { std::ptr::null_mut() }
+                .lock()
+                .map(|r| {
+                    r.iter()
+                        .any(|[rx, ry, rw, rh]| x >= *rx && x < rx + rw && y >= *ry && y < ry + rh)
+                })
+                .unwrap_or(false);
+        if hit {
+            this as *const AnyObject as *mut AnyObject
+        } else {
+            std::ptr::null_mut()
+        }
     }
 }
 
@@ -171,7 +175,8 @@ pub(crate) fn draw(
             let last: *mut AnyObject = msg_send![subs, lastObject];
             if last != Retained::as_ptr(&o.view) as *mut AnyObject {
                 let nil: *const AnyObject = std::ptr::null();
-                let _: () = msg_send![sv, addSubview: &*o.view, positioned: 1isize, relativeTo: nil];
+                let _: () =
+                    msg_send![sv, addSubview: &*o.view, positioned: 1isize, relativeTo: nil];
             }
         }
         static WAS_MODAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -182,7 +187,11 @@ pub(crate) fn draw(
             if !win.is_null() {
                 let ok: Bool = msg_send![win, makeFirstResponder: native_view.as_ptr()];
                 let fr: *mut AnyObject = msg_send![win, firstResponder];
-                eprintln!("modal: makeFirstResponder={ok:?} first={:?} gpuiview={:?}", fr, native_view.as_ptr());
+                eprintln!(
+                    "modal: makeFirstResponder={ok:?} first={:?} gpuiview={:?}",
+                    fr,
+                    native_view.as_ptr()
+                );
             }
         } else if !modal {
             WAS_MODAL.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -198,7 +207,14 @@ pub(crate) fn draw(
             let to_pt = |v: ScaledPixels| f64::from(v.0) / scale;
             *o.rects.lock().unwrap() = rects
                 .iter()
-                .map(|b| [to_pt(b.origin.x), to_pt(b.origin.y), to_pt(b.size.width), to_pt(b.size.height)])
+                .map(|b| {
+                    [
+                        to_pt(b.origin.x),
+                        to_pt(b.origin.y),
+                        to_pt(b.size.width),
+                        to_pt(b.size.height),
+                    ]
+                })
                 .collect();
         }
     }
@@ -210,7 +226,12 @@ pub(crate) fn draw(
             let subs: *mut AnyObject = msg_send![sv, subviews];
             let n: usize = msg_send![subs, count];
             let hidden: Bool = msg_send![&*o.view, isHidden];
-            eprintln!("overlay: frame={:?} subviews={n} hidden={hidden:?} rects={} ds={:?}", f, rects.len(), o.layer.drawable_size());
+            eprintln!(
+                "overlay: frame={:?} subviews={n} hidden={hidden:?} rects={} ds={:?}",
+                f,
+                rects.len(),
+                o.layer.drawable_size()
+            );
         }
     }
     renderer.draw(&base);

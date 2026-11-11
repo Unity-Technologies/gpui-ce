@@ -751,7 +751,10 @@ impl MetalRenderer {
         // `new_window_layer` leaves device and pixel format to the renderer: without a device
         // the layer never vends a drawable, so the overlay silently never draws.
         let current: *mut objc2::runtime::AnyObject = unsafe {
-            objc2::msg_send![&*(overlay.as_ptr() as *const objc2::runtime::AnyObject), device]
+            objc2::msg_send![
+                &*(overlay.as_ptr() as *const objc2::runtime::AnyObject),
+                device
+            ]
         };
         if current as *mut std::ffi::c_void != self.device.as_ptr() as *mut std::ffi::c_void {
             overlay.set_device(&self.device);

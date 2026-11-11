@@ -142,7 +142,8 @@ impl Scene {
     /// a content-filter (`filter`) order range left behind by the main scene.
     pub fn raise_order_floor(&mut self) {
         self.is_finished = false;
-        self.overlay_start.get_or_insert(self.paint_operations.len());
+        self.overlay_start
+            .get_or_insert(self.paint_operations.len());
         let floor = self.primitive_bounds.max_order() + 1;
         self.primitive_bounds.set_order_floor(floor);
     }
