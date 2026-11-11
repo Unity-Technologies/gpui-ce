@@ -1054,6 +1054,10 @@ impl Platform for MacPlatform {
         }
     }
 
+    fn low_power_mode(&self) -> bool {
+        NSProcessInfo::processInfo().isLowPowerModeEnabled()
+    }
+
     fn show_system_notification(&self, notification: gpui::SystemNotification) {
         let mut state = self.0.lock();
         let executor = state.foreground_executor.clone();
