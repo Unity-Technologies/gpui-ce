@@ -366,6 +366,14 @@ impl WindowsWindowInner {
 
     fn handle_mouse_move_msg(&self, handle: HWND, lparam: LPARAM, wparam: WPARAM) -> Option<isize> {
         self.start_tracking_mouse(handle, TME_LEAVE);
+
+        // Windows also sends WM_MOUSEMOVE when content moves under a still
+        // pointer (a list scrolling, a window appearing). Forwarding those would
+        // let hover steal keyboard selection and un-hide a hidden cursor.
+        let position = (lparam.signed_loword(), lparam.signed_hiword());
+        if self.state.last_mouse_position.replace(Some(position)) == Some(position) {
+            return Some(0);
+        }
         self.restore_cursor_after_hide();
 
         let Some(mut func) = self.state.callbacks.input.take() else {
@@ -400,6 +408,7 @@ impl WindowsWindowInner {
 
     fn handle_mouse_leave_msg(&self) -> Option<isize> {
         self.state.hovered.set(false);
+        self.state.last_mouse_position.set(None);
         // The next window's `WM_SETCURSOR` picks its own cursor, so we just clear
         // the flag for tight `is_cursor_visible()` semantics.
         self.state.cursor_visible.store(true, Ordering::Relaxed);
