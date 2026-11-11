@@ -1158,6 +1158,10 @@ pub(crate) struct Frame {
     cursor_styles: Vec<CursorStyleRequest>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) debug_bounds: FxHashMap<String, Bounds<Pixels>>,
+    /// Every `debug_bounds` insert this frame, in paint order, so a cached
+    /// view that reuses its paint can replay its own selectors.
+    #[cfg(any(test, feature = "test-support"))]
+    debug_bounds_log: Vec<(String, Bounds<Pixels>)>,
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) next_inspector_instance_ids: FxHashMap<Rc<crate::InspectorElementPath>, usize>,
     #[cfg(any(feature = "inspector", debug_assertions))]
@@ -1185,9 +1189,19 @@ pub(crate) struct PaintIndex {
     accessed_element_states_index: usize,
     tab_handle_index: usize,
     line_layout_index: LineLayoutIndex,
+    #[cfg(any(test, feature = "test-support"))]
+    debug_bounds_index: usize,
 }
 
 impl Frame {
+    /// Records `selector`'s painted bounds for test lookups, replayed with the
+    /// rest of a cached view's paint when the view is reused.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn record_debug_bounds(&mut self, selector: String, bounds: Bounds<Pixels>) {
+        self.debug_bounds.insert(selector.clone(), bounds);
+        self.debug_bounds_log.push((selector, bounds));
+    }
+
     pub(crate) fn new(dispatch_tree: DispatchTree) -> Self {
         Frame {
             focus: None,
@@ -1207,6 +1221,8 @@ impl Frame {
 
             #[cfg(any(test, feature = "test-support"))]
             debug_bounds: FxHashMap::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            debug_bounds_log: Vec::new(),
 
             #[cfg(any(feature = "inspector", debug_assertions))]
             next_inspector_instance_ids: FxHashMap::default(),
@@ -1236,6 +1252,7 @@ impl Frame {
         #[cfg(any(test, feature = "test-support"))]
         {
             self.debug_bounds.clear();
+            self.debug_bounds_log.clear();
         }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
@@ -3872,6 +3889,8 @@ impl Window {
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             tab_handle_index: self.next_frame.tab_stops.paint_index(),
             line_layout_index: self.text_system.layout_index(),
+            #[cfg(any(test, feature = "test-support"))]
+            debug_bounds_index: self.next_frame.debug_bounds_log.len(),
         }
     }
 
@@ -3910,6 +3929,13 @@ impl Window {
             &self.rendered_frame.tab_stops.insertion_history
                 [range.start.tab_handle_index..range.end.tab_handle_index],
         );
+        #[cfg(any(test, feature = "test-support"))]
+        for (selector, bounds) in self.rendered_frame.debug_bounds_log
+            [range.start.debug_bounds_index..range.end.debug_bounds_index]
+            .to_vec()
+        {
+            self.next_frame.record_debug_bounds(selector, bounds);
+        }
 
         self.text_system
             .reuse_layouts(range.start.line_layout_index..range.end.line_layout_index);
