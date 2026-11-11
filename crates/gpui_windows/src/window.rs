@@ -59,6 +59,9 @@ pub struct WindowsWindowState {
     pub last_reported_modifiers: Cell<Option<Modifiers>>,
     pub last_reported_capslock: Cell<Option<Capslock>>,
     pub hovered: Cell<bool>,
+    /// Client-area position of the last `WM_MOUSEMOVE` forwarded, to drop the
+    /// synthetic ones Windows sends when the pointer has not moved.
+    pub last_mouse_position: Cell<Option<(i16, i16)>>,
     pub direct_manipulation: DirectManipulationHandler,
 
     pub renderer: RefCell<WindowRenderer>,
@@ -181,6 +184,7 @@ impl WindowsWindowState {
             last_reported_modifiers: Cell::new(last_reported_modifiers),
             last_reported_capslock: Cell::new(last_reported_capslock),
             hovered: Cell::new(hovered),
+            last_mouse_position: Cell::new(None),
             renderer: RefCell::new(renderer),
             force_render_pending: Cell::new(false),
             click_state,

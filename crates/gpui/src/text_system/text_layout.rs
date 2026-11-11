@@ -22,6 +22,23 @@ impl From<ResolvedDirection> for ParagraphDirection {
     }
 }
 
+/// Where soft wrapping may break a line inside a run of letters, as CSS `word-break`.
+///
+/// A text system applies one value to every paragraph it lays out; see
+/// [`crate::TextSystem::set_word_break`].
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum WordBreak {
+    /// Break where the Unicode line-breaking rules allow, including between
+    /// ideographs and between Hangul syllables.
+    #[default]
+    Normal,
+    /// Also break between any two letters of a word.
+    BreakAll,
+    /// Never break between letters of CJK text, so Korean words stay whole and
+    /// lines break at spaces and punctuation, as Korean UIs expect.
+    KeepAll,
+}
+
 /// Direction, wrapping, and alignment options for a complete text document.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
