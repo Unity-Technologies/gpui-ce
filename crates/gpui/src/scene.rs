@@ -77,11 +77,14 @@ pub struct Scene {
     pub filter_boundaries: Vec<FilterBoundary>,
     render_plan: ScenePlan,
     is_finished: bool,
+    /// HUB-8754 spike: index into `paint_operations` where deferred draws begin.
+    overlay_start: Option<usize>,
 }
 
 #[expect(missing_docs)]
 impl Scene {
     pub fn clear(&mut self) {
+        self.overlay_start = None;
         self.paint_operations.clear();
         self.primitive_bounds.clear();
         self.layer_stack.clear();
@@ -125,6 +128,7 @@ impl Scene {
     /// a content-filter (`filter`) order range left behind by the main scene.
     pub fn raise_order_floor(&mut self) {
         self.is_finished = false;
+        self.overlay_start.get_or_insert(self.paint_operations.len());
         let floor = self.primitive_bounds.max_order() + 1;
         self.primitive_bounds.set_order_floor(floor);
     }
@@ -247,6 +251,28 @@ impl Scene {
                 PaintOperation::EndLayer => self.pop_layer(),
             }
         }
+    }
+
+    /// HUB-8754 spike: split a finished scene into (base, overlay, overlay_rects). The overlay
+    /// holds everything painted by deferred draws (menus, tooltips, popovers).
+    pub fn split_overlay(&self) -> Option<(Scene, Scene, Vec<Bounds<ScaledPixels>>)> {
+        let start = self.overlay_start?;
+        let mut base = Scene::default();
+        base.replay(0..start, self);
+        base.finish();
+        let mut overlay = Scene::default();
+        overlay.replay(start..self.paint_operations.len(), self);
+        let rects = overlay
+            .paint_operations
+            .iter()
+            .filter_map(|op| match op {
+                PaintOperation::Primitive(Primitive::Quad(q)) => Some(q.bounds),
+                PaintOperation::Primitive(Primitive::Shadow(s)) => Some(s.bounds),
+                _ => None,
+            })
+            .collect();
+        overlay.finish();
+        Some((base, overlay, rects))
     }
 
     pub fn finish(&mut self) {

@@ -745,6 +745,27 @@ impl MetalRenderer {
         // nothing to do
     }
 
+    /// HUB-8754 spike: draw `scene` into a second, transparent layer (the overlay surface)
+    /// using this renderer's pipelines and atlas. Clears to alpha 0.
+    pub fn draw_overlay(&mut self, scene: &Scene, overlay: &metal::MetalLayer) {
+        // `new_window_layer` leaves device and pixel format to the renderer: without a device
+        // the layer never vends a drawable, so the overlay silently never draws.
+        let current: *mut objc2::runtime::AnyObject = unsafe {
+            objc2::msg_send![&*(overlay.as_ptr() as *const objc2::runtime::AnyObject), device]
+        };
+        if current as *mut std::ffi::c_void != self.device.as_ptr() as *mut std::ffi::c_void {
+            overlay.set_device(&self.device);
+            overlay.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+            overlay.set_maximum_drawable_count(3);
+        }
+        let saved = (self.opaque, self.layer.take());
+        self.opaque = std::env::var_os("OVERLAY_SPIKE_DEBUG").is_some();
+        self.layer = Some(overlay.clone());
+        self.draw(scene);
+        self.opaque = saved.0;
+        self.layer = saved.1;
+    }
+
     pub fn draw(&mut self, scene: &Scene) {
         let layer = match &self.layer {
             Some(l) => l.clone(),

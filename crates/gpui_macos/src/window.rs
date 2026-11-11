@@ -821,6 +821,8 @@ struct MacWindowState {
     cursor_visible: Arc<AtomicBool>,
     frame_source: Option<WindowFrameSource>,
     renderer: renderer::Renderer,
+    #[cfg(not(feature = "wgpu"))]
+    overlay_spike: Option<crate::overlay_spike::Overlay>,
     /// Forces an uncached scene after GPU recovery or a transient presentation failure.
     force_render_pending: bool,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
@@ -1263,6 +1265,8 @@ impl MacWindow {
                 frame_source: None,
                 renderer,
                 force_render_pending: false,
+                #[cfg(not(feature = "wgpu"))]
+                overlay_spike: None,
                 request_frame_callback: None,
                 event_callback: None,
                 activate_callback: None,
@@ -2155,7 +2159,17 @@ impl PlatformWindow for MacWindow {
             this.force_render_pending = true;
         }
         #[cfg(not(feature = "wgpu"))]
-        this.renderer.draw(scene);
+        {
+            let this = &mut *this;
+            if !crate::overlay_spike::draw(
+                &mut this.overlay_spike,
+                this.native_view,
+                &mut this.renderer,
+                scene,
+            ) {
+                this.renderer.draw(scene);
+            }
+        }
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
