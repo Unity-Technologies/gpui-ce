@@ -367,11 +367,18 @@ impl ForegroundRunnableCounter {
     }
 
     fn finished(&self) {
-        let _ = self
-            .0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                count.checked_sub(1)
-            });
+        // A compare-exchange loop: `fetch_update` is deprecated for
+        // `try_update` on newer toolchains, and `try_update` is missing on older.
+        let mut count = self.0.load(Ordering::Acquire);
+        while let Some(next) = count.checked_sub(1) {
+            match self
+                .0
+                .compare_exchange_weak(count, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => break,
+                Err(seen) => count = seen,
+            }
+        }
     }
 
     fn has_runnables(&self) -> bool {
