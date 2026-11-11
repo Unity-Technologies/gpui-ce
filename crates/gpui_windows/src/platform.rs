@@ -1312,8 +1312,9 @@ fn open_target_in_explorer(target: &Path) -> Result<()> {
 /// One lock per owner window, so a second request for the same owner waits instead of stacking
 /// a second modal dialog on it.
 fn owner_dialog_lock(owner: isize) -> Arc<std::sync::Mutex<()>> {
-    static LOCKS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<isize, Arc<std::sync::Mutex<()>>>>> =
-        std::sync::OnceLock::new();
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<isize, Arc<std::sync::Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
     LOCKS
         .get_or_init(Default::default)
         .lock()
@@ -1350,7 +1351,9 @@ fn run_dialog_on_sta_thread<T: Send + 'static>(
                 unsafe { CoUninitialize() };
                 result
             } else {
-                Err(anyhow::anyhow!("CoInitializeEx failed for the file dialog thread: {init:?}"))
+                Err(anyhow::anyhow!(
+                    "CoInitializeEx failed for the file dialog thread: {init:?}"
+                ))
             };
             let _ = tx.send(result);
         });
