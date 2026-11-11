@@ -1535,6 +1535,9 @@ impl Drop for MacWindow {
             this.native_window.setDelegate_(NIL);
         }
         this.input_handler.take();
+        // The adapter holds the content view, whose ivar holds this state:
+        // dropping it here breaks that cycle so the view tree can be freed.
+        drop(this.accesskit_adapter.take());
         this.foreground_executor
             .spawn(async move {
                 unsafe {
