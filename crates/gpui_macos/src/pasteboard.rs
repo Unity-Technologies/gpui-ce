@@ -18,14 +18,20 @@ pub struct Pasteboard {
 }
 
 impl Pasteboard {
-    pub fn general() -> Self {
-        Self::new(NSPasteboard::generalPasteboard())
+    /// AppKit can return nil here (no pasteboard server, sandbox denial), which
+    /// the non-optional objc2 binding turns into a panic. Callers treat `None`
+    /// as an empty, write-ignoring clipboard.
+    pub fn general() -> Option<Self> {
+        let inner: Option<Retained<NSPasteboard>> =
+            unsafe { objc2::msg_send![objc2::class!(NSPasteboard), generalPasteboard] };
+        inner.map(Self::new)
     }
 
-    pub fn find() -> Self {
-        Self::new(NSPasteboard::pasteboardWithName(unsafe {
-            NSPasteboardNameFind
-        }))
+    pub fn find() -> Option<Self> {
+        let inner: Option<Retained<NSPasteboard>> = unsafe {
+            objc2::msg_send![objc2::class!(NSPasteboard), pasteboardWithName: NSPasteboardNameFind]
+        };
+        inner.map(Self::new)
     }
 
     #[cfg(test)]
