@@ -2136,3 +2136,36 @@ impl accesskit::DeactivationHandler for TrivialDeactivationHandler {
         (self.callback)();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::normal_hints;
+    use gpui::{px, size};
+
+    #[test]
+    fn the_minimum_is_scaled_to_physical_pixels() {
+        let hints = normal_hints(Some(size(px(400.), px(300.))), 2.0, [0; 4], 8192);
+        assert_eq!(hints.min_size, Some((800, 600)));
+        assert_eq!(hints.max_size, Some((8192, 8192)));
+    }
+
+    #[test]
+    fn a_fractional_scale_rounds_the_minimum_up() {
+        let hints = normal_hints(Some(size(px(401.), px(301.))), 1.5, [0; 4], 8192);
+        assert_eq!(hints.min_size, Some((602, 452)));
+    }
+
+    #[test]
+    fn the_shadow_inset_on_each_side_is_added_after_scaling() {
+        // left, right, top, bottom
+        let hints = normal_hints(Some(size(px(400.), px(300.))), 2.0, [10, 12, 4, 6], 8192);
+        assert_eq!(hints.min_size, Some((822, 610)));
+    }
+
+    #[test]
+    fn no_minimum_leaves_the_hint_unset() {
+        let hints = normal_hints(None, 2.0, [10, 10, 10, 10], 8192);
+        assert_eq!(hints.min_size, None);
+        assert_eq!(hints.max_size, Some((8192, 8192)));
+    }
+}
