@@ -472,7 +472,7 @@ mod tests {
     fn bench_tab_stop_map_frame_cost() {
         const HANDLES: usize = 5_000;
         const FRAMES: usize = 100;
-        let focus_map = Arc::new(FocusMap::default());
+        let focus_map = Arc::new(RwLock::new(FocusMap::default()));
         let handles: Vec<FocusHandle> = (0..HANDLES)
             .map(|i| {
                 FocusHandle::new(&focus_map)
