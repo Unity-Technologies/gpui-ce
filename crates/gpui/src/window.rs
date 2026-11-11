@@ -1733,13 +1733,15 @@ impl Window {
                 // example from inside a window update), so defer the cleanup
                 // to the foreground executor instead of updating in place.
                 let mut cx = cx.clone();
-                cx.foreground_executor().clone().spawn(async move {
-                    let _ = handle.update(&mut cx, |_, window, _| window.remove_window());
-                    let _ = cx.update(|cx| {
-                        SystemWindowTabController::remove_tab(cx, window_id);
-                    });
-                })
-                .detach();
+                cx.foreground_executor()
+                    .clone()
+                    .spawn(async move {
+                        let _ = handle.update(&mut cx, |_, window, _| window.remove_window());
+                        let _ = cx.update(|cx| {
+                            SystemWindowTabController::remove_tab(cx, window_id);
+                        });
+                    })
+                    .detach();
             }
         }));
         #[cfg(all(
