@@ -170,6 +170,21 @@ impl TestWindow {
         self.0.lock().resize_callback = Some(callback);
     }
 
+    /// Changes the window's scale factor, as if it moved to a display with another density,
+    /// and runs the resize callback so the window re-reads it (as `Window::bounds_changed`
+    /// does on a real platform). The logical size is unchanged.
+    pub fn simulate_scale_factor_change(&mut self, scale_factor: f32) {
+        let mut lock = self.0.lock();
+        lock.scale_factor = scale_factor;
+        let size = lock.bounds.size;
+        let Some(mut callback) = lock.resize_callback.take() else {
+            return;
+        };
+        drop(lock);
+        callback(size, scale_factor);
+        self.0.lock().resize_callback = Some(callback);
+    }
+
     pub(crate) fn simulate_active_status_change(&self, active: bool) {
         let mut lock = self.0.lock();
         let Some(mut callback) = lock.active_status_change_callback.take() else {
