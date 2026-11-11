@@ -1157,6 +1157,10 @@ pub(crate) struct Frame {
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) inspector_hitboxes: FxHashMap<HitboxId, crate::InspectorElementId>,
     pub(crate) tab_stops: TabStopMap,
+    /// For each entity, the cached views that read it while drawing this
+    /// frame. A notify from the entity dirties them too: a reused view would
+    /// otherwise replay output built from the entity's old state.
+    pub(crate) view_dependents: FxHashMap<EntityId, SmallVec<[EntityId; 2]>>,
 }
 
 #[derive(Clone, Default)]
@@ -1220,6 +1224,20 @@ impl Frame {
             #[cfg(any(feature = "inspector", debug_assertions))]
             inspector_hitboxes: FxHashMap::default(),
             tab_stops: TabStopMap::default(),
+            view_dependents: FxHashMap::default(),
+        }
+    }
+
+    /// Records that cached view `view` read each of `entities` this frame.
+    pub(crate) fn record_view_dependencies<'a>(
+        &mut self,
+        view: EntityId,
+        entities: impl IntoIterator<Item = &'a EntityId>,
+    ) {
+        for entity in entities {
+            if *entity != view {
+                self.view_dependents.entry(*entity).or_default().push(view);
+            }
         }
     }
 
@@ -1237,6 +1255,7 @@ impl Frame {
         self.window_control_hitboxes.clear();
         self.deferred_draws.clear();
         self.tab_stops.clear();
+        self.view_dependents.clear();
         self.focus = None;
 
         #[cfg(any(test, feature = "test-support"))]
@@ -3410,6 +3429,11 @@ impl Window {
         let mut views = self.invalidator.take_views();
         for entity in views.drain() {
             self.mark_view_dirty(entity);
+            if let Some(dependents) = self.rendered_frame.view_dependents.get(&entity) {
+                for view in dependents.clone() {
+                    self.mark_view_dirty(view);
+                }
+            }
         }
         self.invalidator.replace_views(views);
     }
@@ -8125,6 +8149,9 @@ pub fn outline(
 
 #[cfg(test)]
 mod pointer_tests;
+
+#[cfg(test)]
+mod view_dependents_tests;
 
 #[cfg(test)]
 mod tests {
