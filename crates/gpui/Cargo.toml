@@ -196,7 +196,7 @@ ignored = [
   "objc2-metal",
   "tracing",
 ]
-ignored-paths = ["src/_ownership_and_data_flow.rs", "benches/randomized_element_tree.rs"]
+ignored-paths = ["src/_ownership_and_data_flow.rs", "benches/focus_cleanup.rs", "benches/randomized_element_tree.rs"]
 
 # ============================================================================
 # Learn Examples - Educational examples for learning GPUI
@@ -269,6 +269,12 @@ path = "examples/learn/corner_smoothing.rs"
 [[example]]
 name = "keyring"
 path = "examples/learn/keyring.rs"
+
+[[bench]]
+name = "focus_cleanup"
+path = "benches/focus_cleanup.rs"
+harness = false
+required-features = ["bench-support"]
 
 [[bench]]
 name = "randomized_element_tree"
