@@ -28,7 +28,10 @@ impl MetalAtlas {
     /// The Metal texture behind `id`, or `None` once the atlas released it. A batch can name a
     /// texture the atlas dropped between painting and encoding, so the renderer skips it.
     pub(crate) fn metal_texture(&self, id: AtlasTextureId) -> Option<metal::Texture> {
-        self.0.lock().texture(id).map(|texture| texture.metal_texture.clone())
+        self.0
+            .lock()
+            .texture(id)
+            .map(|texture| texture.metal_texture.clone())
     }
 }
 
