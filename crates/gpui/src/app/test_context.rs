@@ -575,6 +575,17 @@ impl TestAppContext {
         self.test_window(window_handle).simulate_resize(size);
     }
 
+    /// Changes `window_handle`'s scale factor to `scale_factor`, as if it moved to a display
+    /// with another density. See [`VisualTestContext::simulate_scale_factor_change`].
+    pub fn simulate_window_scale_factor_change(
+        &self,
+        window_handle: AnyWindowHandle,
+        scale_factor: f32,
+    ) {
+        self.test_window(window_handle)
+            .simulate_scale_factor_change(scale_factor);
+    }
+
     /// Returns a receiver that gets the path and arguments of the next restart request.
     ///
     /// The app doesn't restart in a test. Calling this again replaces the previous
@@ -1125,6 +1136,14 @@ impl VisualTestContext {
         self.simulate_window_resize(self.window, size)
     }
 
+    /// Changes the window's scale factor, as if it moved to a display with another density.
+    /// `Window::scale_factor` and the device-pixel size follow; the logical size is unchanged.
+    ///
+    /// This doesn't paint the window. Call [`VisualTestContext::draw`] to paint at the new scale.
+    pub fn simulate_scale_factor_change(&self, scale_factor: f32) {
+        self.simulate_window_scale_factor_change(self.window, scale_factor)
+    }
+
     /// Returns the bounds of the element with `debug_selector(selector)` in the last painted frame, or `None`.
     ///
     /// Draw the view first, so that the frame contains the element. Use this to click
@@ -1567,6 +1586,24 @@ mod tests {
 
         drop(visual_cx);
         cx.quit();
+    }
+
+    #[gpui::test]
+    fn test_simulate_scale_factor_change_updates_the_window(cx: &mut TestAppContext) {
+        let window = cx.open_window(size(px(200.), px(100.)), |_, _| Label);
+        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        assert_eq!(cx.update(|window, _| window.scale_factor()), 2.0);
+
+        cx.simulate_scale_factor_change(1.0);
+        cx.run_until_parked();
+        cx.update(|window, _| {
+            assert_eq!(window.scale_factor(), 1.0);
+            assert_eq!(window.viewport_size(), size(px(200.), px(100.)));
+        });
+
+        cx.simulate_scale_factor_change(3.0);
+        cx.update(|window, _| assert_eq!(window.scale_factor(), 3.0));
     }
 
     #[test]

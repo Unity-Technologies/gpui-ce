@@ -14,8 +14,8 @@ use gpui::{
     Bounds, DevicePixels, Font, FontId, FontMetrics, GlyphId, GlyphRenderMode, InlineLayout,
     InlineLayoutRequest, LineLayout, Pixels, PlatformTextSystem, PreparedRasterStyle,
     RasterColorEffect, RasterStyleRequest, RasterizedGlyph, RenderGlyphParams, Rgba8,
-    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, Size, TextLayoutRequest, TextRenderingMode, point,
-    size,
+    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, Size, TextLayoutRequest, TextRenderingMode,
+    WordBreak, point, size,
 };
 use gpui_parley::{
     BitmapFallbackGlyphRasterizer, ColorGlyphKind, FontDataBlob, GlyphRasterizer, ParleyTextSystem,
@@ -124,6 +124,10 @@ impl PlatformTextSystem for DirectWriteTextSystem {
 
     fn font_generation(&self) -> u64 {
         self.parley.font_generation()
+    }
+
+    fn set_word_break(&self, word_break: WordBreak) {
+        self.parley.set_word_break(word_break);
     }
 
     fn font_id(&self, descriptor: &Font) -> Result<FontId> {
