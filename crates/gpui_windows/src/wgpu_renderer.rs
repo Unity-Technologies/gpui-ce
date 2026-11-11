@@ -111,6 +111,16 @@ impl WindowsWgpuRenderer {
 
     /// Called on DPI/display changes; the surface is reconfigured on the next
     /// draw from the window's client rect.
+    /// Whether a failed resize means the GPU device is gone. The DirectX
+    /// renderer checks the device; wgpu recovers by itself, so it always asks
+    /// for a device refresh as before.
+    pub(crate) fn is_device_removed(&self) -> bool {
+        match self {
+            Self::DirectX(r) => r.is_device_removed(),
+            Self::Wgpu(_) => true,
+        }
+    }
+
     pub fn resize(&mut self, size: Size<gpui::DevicePixels>) -> anyhow::Result<()> {
         if size != self.size {
             self.size = size;
