@@ -1858,7 +1858,10 @@ impl MetalRenderer {
             return false;
         }
 
-        let texture = self.sprite_atlas.metal_texture(texture_id);
+        let Some(texture) = self.sprite_atlas.metal_texture(texture_id) else {
+            log::warn!("skipping sprite batch: atlas texture {texture_id:?} was released");
+            return true;
+        };
         command_encoder.set_render_pipeline_state(&self.monochrome_sprites_pipeline_state);
         bind_scene_uniforms(command_encoder, scene_uniforms);
 
@@ -1914,7 +1917,10 @@ impl MetalRenderer {
             return false;
         }
 
-        let texture = self.sprite_atlas.metal_texture(texture_id);
+        let Some(texture) = self.sprite_atlas.metal_texture(texture_id) else {
+            log::warn!("skipping sprite batch: atlas texture {texture_id:?} was released");
+            return true;
+        };
         let pipeline = if smoothed {
             &self.smoothed_polychrome_sprites_pipeline_state
         } else {
