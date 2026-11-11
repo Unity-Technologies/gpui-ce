@@ -1145,7 +1145,7 @@ pub(crate) struct Frame {
     pub(crate) focus: Option<FocusId>,
     pub(crate) window_active: bool,
     pub(crate) element_states: FxHashMap<(GlobalElementId, TypeId), ElementStateBox>,
-    accessed_element_states: Vec<(GlobalElementId, TypeId)>,
+    pub(crate) accessed_element_states: Vec<(GlobalElementId, TypeId)>,
     pub(crate) mouse_listeners: Vec<Option<AnyMouseListener>>,
     pointer_observers: Rc<Vec<PointerObserver>>,
     pub(crate) dispatch_tree: DispatchTree,
@@ -1158,11 +1158,19 @@ pub(crate) struct Frame {
     cursor_styles: Vec<CursorStyleRequest>,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) debug_bounds: FxHashMap<String, Bounds<Pixels>>,
+    /// Every `debug_bounds` insert this frame, in paint order, so a cached
+    /// view that reuses its paint can replay its own selectors.
+    #[cfg(any(test, feature = "test-support"))]
+    debug_bounds_log: Vec<(String, Bounds<Pixels>)>,
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) next_inspector_instance_ids: FxHashMap<Rc<crate::InspectorElementPath>, usize>,
     #[cfg(any(feature = "inspector", debug_assertions))]
     pub(crate) inspector_hitboxes: FxHashMap<HitboxId, crate::InspectorElementId>,
     pub(crate) tab_stops: TabStopMap,
+    /// For each entity, the cached views that read it while drawing this
+    /// frame. A notify from the entity dirties them too: a reused view would
+    /// otherwise replay output built from the entity's old state.
+    pub(crate) view_dependents: FxHashMap<EntityId, SmallVec<[EntityId; 2]>>,
 }
 
 #[derive(Clone, Default)]
@@ -1185,9 +1193,19 @@ pub(crate) struct PaintIndex {
     accessed_element_states_index: usize,
     tab_handle_index: usize,
     line_layout_index: LineLayoutIndex,
+    #[cfg(any(test, feature = "test-support"))]
+    debug_bounds_index: usize,
 }
 
 impl Frame {
+    /// Records `selector`'s painted bounds for test lookups, replayed with the
+    /// rest of a cached view's paint when the view is reused.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn record_debug_bounds(&mut self, selector: String, bounds: Bounds<Pixels>) {
+        self.debug_bounds.insert(selector.clone(), bounds);
+        self.debug_bounds_log.push((selector, bounds));
+    }
+
     pub(crate) fn new(dispatch_tree: DispatchTree) -> Self {
         Frame {
             focus: None,
@@ -1207,6 +1225,8 @@ impl Frame {
 
             #[cfg(any(test, feature = "test-support"))]
             debug_bounds: FxHashMap::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            debug_bounds_log: Vec::new(),
 
             #[cfg(any(feature = "inspector", debug_assertions))]
             next_inspector_instance_ids: FxHashMap::default(),
@@ -1214,6 +1234,20 @@ impl Frame {
             #[cfg(any(feature = "inspector", debug_assertions))]
             inspector_hitboxes: FxHashMap::default(),
             tab_stops: TabStopMap::default(),
+            view_dependents: FxHashMap::default(),
+        }
+    }
+
+    /// Records that cached view `view` read each of `entities` this frame.
+    pub(crate) fn record_view_dependencies<'a>(
+        &mut self,
+        view: EntityId,
+        entities: impl IntoIterator<Item = &'a EntityId>,
+    ) {
+        for entity in entities {
+            if *entity != view {
+                self.view_dependents.entry(*entity).or_default().push(view);
+            }
         }
     }
 
@@ -1231,11 +1265,13 @@ impl Frame {
         self.window_control_hitboxes.clear();
         self.deferred_draws.clear();
         self.tab_stops.clear();
+        self.view_dependents.clear();
         self.focus = None;
 
         #[cfg(any(test, feature = "test-support"))]
         {
             self.debug_bounds.clear();
+            self.debug_bounds_log.clear();
         }
 
         #[cfg(any(feature = "inspector", debug_assertions))]
@@ -3412,6 +3448,11 @@ impl Window {
         let mut views = self.invalidator.take_views();
         for entity in views.drain() {
             self.mark_view_dirty(entity);
+            if let Some(dependents) = self.rendered_frame.view_dependents.get(&entity) {
+                for view in dependents.clone() {
+                    self.mark_view_dirty(view);
+                }
+            }
         }
         self.invalidator.replace_views(views);
     }
@@ -3872,6 +3913,8 @@ impl Window {
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             tab_handle_index: self.next_frame.tab_stops.paint_index(),
             line_layout_index: self.text_system.layout_index(),
+            #[cfg(any(test, feature = "test-support"))]
+            debug_bounds_index: self.next_frame.debug_bounds_log.len(),
         }
     }
 
@@ -3910,6 +3953,13 @@ impl Window {
             &self.rendered_frame.tab_stops.insertion_history
                 [range.start.tab_handle_index..range.end.tab_handle_index],
         );
+        #[cfg(any(test, feature = "test-support"))]
+        for (selector, bounds) in &self.rendered_frame.debug_bounds_log
+            [range.start.debug_bounds_index..range.end.debug_bounds_index]
+        {
+            self.next_frame
+                .record_debug_bounds(selector.clone(), *bounds);
+        }
 
         self.text_system
             .reuse_layouts(range.start.line_layout_index..range.end.line_layout_index);
@@ -8238,6 +8288,9 @@ pub fn outline(
 
 #[cfg(test)]
 mod pointer_tests;
+
+#[cfg(test)]
+mod view_dependents_tests;
 
 #[cfg(test)]
 mod tests {
