@@ -108,36 +108,59 @@ fn get_adapter(
     ID3D11DeviceContext,
     D3D_FEATURE_LEVEL,
 )> {
+    // Every adapter that was tried and why it was refused, so the final error names them.
+    let mut refusals: Vec<String> = Vec::new();
     for adapter_index in 0.. {
         let adapter: IDXGIAdapter1 = match unsafe { dxgi_factory.EnumAdapters(adapter_index) } {
             Ok(adapter) => adapter.cast()?,
             Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
             Err(error) => return Err(error.into()),
         };
-        if let Ok(desc) = unsafe { adapter.GetDesc1() } {
-            let gpu_name = String::from_utf16_lossy(&desc.Description)
-                .trim_matches(char::from(0))
-                .to_string();
-            log::info!("Using GPU: {}", gpu_name);
-        }
+        let gpu_name = adapter_description(&adapter);
         // Check to see whether the adapter supports Direct3D 11 and create
         // the device if it does.
         let mut context: Option<ID3D11DeviceContext> = None;
         let mut feature_level = D3D_FEATURE_LEVEL::default();
-        if let Some(device) = get_device(
+        match get_device(
             &adapter,
             Some(&mut context),
             Some(&mut feature_level),
             debug_layer_available,
-        )
-        .log_err()
-        {
-            let context = context.context("D3D11CreateDevice returned no device context")?;
-            return Ok((adapter, device, context, feature_level));
+        ) {
+            Ok(device) => {
+                log::info!("Using GPU: {gpu_name}");
+                let context = context.context("D3D11CreateDevice returned no device context")?;
+                return Ok((adapter, device, context, feature_level));
+            }
+            Err(error) => {
+                log::warn!("Direct3D 11 adapter {gpu_name:?} refused: {error:#}");
+                refusals.push(format!("{gpu_name}: {error:#}"));
+            }
         }
     }
 
-    anyhow::bail!("No compatible Direct3D 11 adapter found")
+    if refusals.is_empty() {
+        anyhow::bail!("No compatible Direct3D 11 adapter found: DXGI listed no adapters")
+    }
+    anyhow::bail!(
+        "No compatible Direct3D 11 adapter found. Tried: {}",
+        refusals.join("; ")
+    )
+}
+
+fn adapter_description(adapter: &IDXGIAdapter1) -> String {
+    match unsafe { adapter.GetDesc1() } {
+        Ok(desc) => {
+            let name = String::from_utf16_lossy(&desc.Description)
+                .trim_matches(char::from(0))
+                .to_string();
+            format!(
+                "{name} (vendor {:#06x}, device {:#06x})",
+                desc.VendorId, desc.DeviceId
+            )
+        }
+        Err(_) => "<unnamed adapter>".to_string(),
+    }
 }
 
 #[inline]
