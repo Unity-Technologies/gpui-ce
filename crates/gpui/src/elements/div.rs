@@ -3121,15 +3121,54 @@ impl Interactivity {
                                 None
                             };
 
-                            let scroll_offset =
+                            let (scroll_offset, scroll_max) =
                                 self.clamp_scroll_position(bounds, &style, window, cx);
+                            let a11y_scroll = self
+                                .push_a11y_scroll_container(global_id, bounds, scroll_max, window);
                             let result = f(&style, scroll_offset, hitbox, window, cx);
+                            if a11y_scroll {
+                                window.a11y.scroll.pop();
+                            }
                             (result, element_state)
                         },
                     )
                 })
             },
         )
+    }
+
+    /// Record this element as a scroll container for the accessibility
+    /// actions while its children prepaint, and describe its scroll on its own
+    /// node when it has one. Returns whether a container was pushed.
+    fn push_a11y_scroll_container(
+        &self,
+        global_id: Option<&GlobalElementId>,
+        bounds: Bounds<Pixels>,
+        max: Point<Pixels>,
+        window: &mut Window,
+    ) -> bool {
+        let Some(offset) = self.scroll_offset.clone() else {
+            return false;
+        };
+        if !window.a11y.is_active() {
+            return false;
+        }
+        let current = *offset.borrow();
+        let index = window.a11y.scroll.push(
+            bounds,
+            crate::window::a11y::scroll::ScrollTarget::Offset { offset, max },
+            max.x > px(0.) || max.y > px(0.),
+        );
+        let own_node = global_id.map(|id| id.accesskit_node_id());
+        if own_node.is_some() && own_node == window.a11y.nodes.current_id() {
+            let node_id = own_node.unwrap_or(accesskit::NodeId(0));
+            window.a11y.scroll.by_node.insert(node_id, index);
+            let scale = window.scale_factor();
+            if let Some(node) = window.a11y.nodes.current_node_mut() {
+                write_a11y_scroll(node, current, max, scale);
+            }
+        }
+        true
     }
 
     fn should_insert_hitbox(&self, style: &Style, window: &Window, cx: &App) -> bool {
@@ -3165,7 +3204,7 @@ impl Interactivity {
         style: &Style,
         window: &mut Window,
         _cx: &mut App,
-    ) -> Point<Pixels> {
+    ) -> (Point<Pixels>, Point<Pixels>) {
         fn round_to_two_decimals(pixels: Pixels) -> Pixels {
             const ROUNDING_FACTOR: f32 = 100.0;
             (pixels * ROUNDING_FACTOR).round() / ROUNDING_FACTOR
@@ -3218,9 +3257,9 @@ impl Interactivity {
                 scroll_handle_state.bounds = bounds;
             }
 
-            *scroll_offset
+            (*scroll_offset, scroll_max)
         } else {
-            Point::default()
+            (Point::default(), Point::default())
         }
     }
 
@@ -4469,9 +4508,74 @@ impl Interactivity {
             node.add_action(accesskit::Action::Click);
         }
 
+        // A focusable text input takes inserted text from assistive
+        // technology (dictation, a braille keyboard) through the window's
+        // input handler, the same path typed text takes.
+        if (self.tracked_focus_handle.is_some() || self.focusable)
+            && is_text_input_role(node.role())
+        {
+            node.add_action(accesskit::Action::ReplaceSelectedText);
+        }
+
         for (action, _) in &self.a11y_action_listeners {
             node.add_action(*action);
         }
+    }
+}
+
+/// Roles whose node edits text, for [`accesskit::Action::ReplaceSelectedText`].
+fn is_text_input_role(role: accesskit::Role) -> bool {
+    use accesskit::Role;
+    matches!(
+        role,
+        Role::TextInput
+            | Role::MultilineTextInput
+            | Role::SearchInput
+            | Role::EmailInput
+            | Role::NumberInput
+            | Role::PasswordInput
+            | Role::PhoneNumberInput
+            | Role::UrlInput
+    )
+}
+
+/// Describe a scroll container's position on its accessibility node, in the
+/// node's own (physical pixel) space, and offer the scroll actions that can
+/// move it.
+pub(crate) fn write_a11y_scroll(
+    node: &mut accesskit::Node,
+    offset: Point<Pixels>,
+    max: Point<Pixels>,
+    scale: f32,
+) {
+    let physical = |pixels: Pixels| (pixels.0 * scale) as f64;
+    // Compare the scrolled distance, never the offset against zero: `Pixels`
+    // orders by `total_cmp`, so a list at its top (offset `-0.0`) is `< 0`.
+    let scrolled = point(-offset.x, -offset.y);
+    if max.y > px(0.) {
+        node.set_scroll_y(physical(-offset.y));
+        node.set_scroll_y_min(0.);
+        node.set_scroll_y_max(physical(max.y));
+        if scrolled.y > px(0.) {
+            node.add_action(accesskit::Action::ScrollUp);
+        }
+        if scrolled.y < max.y {
+            node.add_action(accesskit::Action::ScrollDown);
+        }
+    }
+    if max.x > px(0.) {
+        node.set_scroll_x(physical(-offset.x));
+        node.set_scroll_x_min(0.);
+        node.set_scroll_x_max(physical(max.x));
+        if scrolled.x > px(0.) {
+            node.add_action(accesskit::Action::ScrollLeft);
+        }
+        if scrolled.x < max.x {
+            node.add_action(accesskit::Action::ScrollRight);
+        }
+    }
+    if max.x > px(0.) || max.y > px(0.) {
+        node.add_action(accesskit::Action::SetScrollOffset);
     }
 }
 
@@ -6845,5 +6949,130 @@ mod tests {
         assert_eq!(bounds("cell-0").origin.x, px(0.));
         assert_eq!(bounds("cell-1").origin.x, px(100.));
         assert_eq!(bounds("cell-2").origin.x, px(300.));
+    }
+
+    /// A 100px viewport over ten 50px items, every item a node.
+    struct A11yScroller {
+        handle: ScrollHandle,
+    }
+
+    impl Render for A11yScroller {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(
+                div()
+                    .id("scroller")
+                    .role(accesskit::Role::ScrollView)
+                    .aria_label("Scroller")
+                    .flex()
+                    .flex_col()
+                    .w(px(100.))
+                    .h(px(100.))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.handle)
+                    .children((0..10).map(|index| {
+                        div()
+                            .id(("item", index as usize))
+                            .role(accesskit::Role::ListItem)
+                            .aria_label(format!("item-{index}"))
+                            .flex_none()
+                            .h(px(50.))
+                    })),
+            )
+        }
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    #[gpui::test]
+    fn a11y_scroll_actions_move_a_scrolling_div(cx: &mut TestAppContext) {
+        let handle = ScrollHandle::new();
+        let (_view, cx) = cx.add_window_view({
+            let handle = handle.clone();
+            move |_window, _cx| A11yScroller { handle }
+        });
+        let node = |cx: &mut crate::VisualTestContext, label: &str| {
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                window
+                    .a11y_tree()
+                    .unwrap()
+                    .nodes
+                    .iter()
+                    .find(|(_, node)| node.label() == Some(label))
+                    .map(|(id, node)| (*id, node.clone()))
+                    .unwrap()
+            })
+        };
+        cx.update(|window, cx| {
+            window.set_a11y_forced(true);
+            window.draw(cx).clear(cx);
+        });
+
+        let (scroller, info) = node(cx, "Scroller");
+        let scale = cx.update(|window, _| window.scale_factor() as f64);
+        assert_eq!(info.scroll_y_max(), Some(400. * scale));
+        assert_eq!(info.scroll_y(), Some(0.));
+        assert!(info.supports_action(accesskit::Action::ScrollDown));
+        assert!(!info.supports_action(accesskit::Action::ScrollUp));
+        assert!(info.supports_action(accesskit::Action::SetScrollOffset));
+
+        let (last, item) = node(cx, "item-9");
+        assert!(item.supports_action(accesskit::Action::ScrollIntoView));
+        cx.update(|window, cx| {
+            window.perform_a11y_action(last, accesskit::Action::ScrollIntoView, None, cx)
+        });
+        assert_eq!(
+            handle.offset().y,
+            px(-400.),
+            "the last item is revealed at the bottom"
+        );
+
+        cx.update(|window, cx| {
+            window.perform_a11y_action(
+                scroller,
+                accesskit::Action::SetScrollOffset,
+                Some(accesskit::ActionData::SetScrollOffset(
+                    accesskit::Point::new(0., 50. * scale),
+                )),
+                cx,
+            )
+        });
+        assert_eq!(handle.offset().y, px(-50.));
+
+        let (scroller, info) = node(cx, "Scroller");
+        assert!(info.supports_action(accesskit::Action::ScrollUp));
+        cx.update(|window, cx| {
+            window.perform_a11y_action(
+                scroller,
+                accesskit::Action::ScrollDown,
+                Some(accesskit::ActionData::ScrollUnit(
+                    accesskit::ScrollUnit::Item,
+                )),
+                cx,
+            )
+        });
+        let line =
+            cx.update(|window, _| window.text_style().line_height_in_pixels(window.rem_size()));
+        assert_eq!(
+            handle.offset().y,
+            px(-50.) - line,
+            "an Item scroll moves one line"
+        );
+    }
+
+    /// A list at its top reports an offset of `-0.0`, which `Pixels` orders
+    /// below zero; it must still offer no `ScrollUp`.
+    #[test]
+    fn a11y_scroll_at_the_top_offers_no_scroll_up() {
+        let mut node = accesskit::Node::new(accesskit::Role::ScrollView);
+        write_a11y_scroll(
+            &mut node,
+            point(px(-0.), px(-0.)),
+            point(px(0.), px(100.)),
+            2.,
+        );
+        assert!(!node.supports_action(accesskit::Action::ScrollUp));
+        assert!(node.supports_action(accesskit::Action::ScrollDown));
+        assert_eq!(node.scroll_y(), Some(0.));
+        assert_eq!(node.scroll_y_max(), Some(200.));
     }
 }

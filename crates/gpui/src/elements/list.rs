@@ -30,6 +30,7 @@ pub fn list(
         render_item: Box::new(render_item),
         style: StyleRefinement::default(),
         sizing_behavior: ListSizingBehavior::default(),
+        scroll_on_enclosing_node: false,
     }
 }
 
@@ -39,9 +40,19 @@ pub struct List {
     render_item: Box<RenderItemFn>,
     style: StyleRefinement,
     sizing_behavior: ListSizingBehavior,
+    scroll_on_enclosing_node: bool,
 }
 
 impl List {
+    /// Describe this list's scroll position, and take the scroll actions, on
+    /// the innermost accessibility node around it. A list has no node of its
+    /// own, so this lets a `tbody` or a `list` element carry the scroll of the
+    /// rows it holds without a scroll node between it and them.
+    pub fn a11y_scroll_on_enclosing_node(mut self) -> Self {
+        self.scroll_on_enclosing_node = true;
+        self
+    }
+
     /// Set the sizing behavior for the list.
     pub fn with_sizing_behavior(mut self, behavior: ListSizingBehavior) -> Self {
         self.sizing_behavior = behavior;
@@ -779,20 +790,7 @@ impl ListState {
     /// The returned offset has a negative `y` component representing
     /// how far the content has scrolled.
     pub fn scroll_px_offset_for_scrollbar(&self) -> Point<Pixels> {
-        let state = &self.0.borrow();
-
-        if state.logical_scroll_top.is_none() && state.alignment == ListAlignment::Bottom {
-            return Point::new(px(0.), -state.max_scroll_offset());
-        }
-
-        let logical_scroll_top = state.logical_scroll_top();
-
-        let mut cursor = state.items.cursor::<ListItemSummary>(());
-        let summary: ListItemSummary =
-            cursor.summary(&Count(logical_scroll_top.item_ix), Bias::Right);
-        let offset = summary.height + logical_scroll_top.offset_in_item;
-
-        Point::new(px(0.), -offset)
+        self.0.borrow().scroll_px_offset()
     }
 
     /// Return the bounds of the viewport in pixels.
@@ -842,6 +840,23 @@ impl ListState {
 }
 
 impl StateInner {
+    /// The content displacement (`<= 0`) of the current scroll position.
+    fn scroll_px_offset(&self) -> Point<Pixels> {
+        let state = self;
+        if state.logical_scroll_top.is_none() && state.alignment == ListAlignment::Bottom {
+            return Point::new(px(0.), -state.max_scroll_offset());
+        }
+
+        let logical_scroll_top = state.logical_scroll_top();
+
+        let mut cursor = state.items.cursor::<ListItemSummary>(());
+        let summary: ListItemSummary =
+            cursor.summary(&Count(logical_scroll_top.item_ix), Bias::Right);
+        let offset = summary.height + logical_scroll_top.offset_in_item;
+
+        Point::new(px(0.), -offset)
+    }
+
     /// Re-anchor a pending scroll adjustment from a remeasure onto a newly set
     /// scroll position, so it clamps to the remeasured item's new height on
     /// the next layout instead of reverting the scroll.
@@ -1570,6 +1585,17 @@ impl Element for List {
         let padding = style
             .padding
             .to_pixels(bounds.size.into(), window.rem_size());
+        // Rows prepaint inside this list's scroll, for the accessibility
+        // scroll actions. The state is borrowed here, so whether it can scroll
+        // is not read from it; a list is taken to scroll.
+        let a11y_scroll = window.a11y.is_active();
+        let a11y_container = a11y_scroll.then(|| {
+            window.a11y.scroll.push(
+                bounds,
+                crate::window::a11y::scroll::ScrollTarget::List(self.state.clone()),
+                true,
+            )
+        });
         let layout = match state.prepaint_items(
             bounds,
             padding,
@@ -1596,6 +1622,21 @@ impl Element for List {
             }
         };
 
+        if let Some(index) = a11y_container {
+            // Once the rows have prepainted, the innermost node is the one
+            // around the list again.
+            let enclosing = window.a11y.nodes.current_id();
+            if let Some(node_id) = enclosing.filter(|_| self.scroll_on_enclosing_node) {
+                window.a11y.scroll.by_node.insert(node_id, index);
+                let offset = state.scroll_px_offset();
+                let max = point(Pixels::ZERO, state.max_scroll_offset());
+                let scale = window.scale_factor();
+                if let Some(node) = window.a11y.nodes.current_node_mut() {
+                    crate::elements::div::write_a11y_scroll(node, offset, max, scale);
+                }
+            }
+            window.a11y.scroll.pop();
+        }
         state.last_layout_bounds = Some(bounds);
         state.last_padding = Some(padding);
         ListPrepaintState { hitbox, layout }
