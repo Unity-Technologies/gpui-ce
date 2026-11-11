@@ -11,6 +11,7 @@ homepage = "https://gpui-ce.github.io/"
 readme = "README.md"
 keywords = ["desktop", "gui", "immediate"]
 categories = ["gui"]
+autobenches = false
 rust-version = "1.95"                                                  # required for Vec::push_mut
 
 [lints]
@@ -195,7 +196,7 @@ ignored = [
   "objc2-metal",
   "tracing",
 ]
-ignored-paths = ["src/_ownership_and_data_flow.rs"]
+ignored-paths = ["src/_ownership_and_data_flow.rs", "benches/randomized_element_tree.rs"]
 
 # ============================================================================
 # Learn Examples - Educational examples for learning GPUI
@@ -268,6 +269,12 @@ path = "examples/learn/corner_smoothing.rs"
 [[example]]
 name = "keyring"
 path = "examples/learn/keyring.rs"
+
+[[bench]]
+name = "randomized_element_tree"
+path = "benches/randomized_element_tree.rs"
+harness = false
+required-features = ["bench-support"]
 
 # ============================================================================
 # Bench Examples - Performance benchmarks
