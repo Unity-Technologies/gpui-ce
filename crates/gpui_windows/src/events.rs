@@ -159,7 +159,7 @@ impl WindowsWindowInner {
             WM_SETTINGCHANGE => self.handle_system_settings_changed(handle, wparam, lparam),
             WM_INPUTLANGCHANGE => self.handle_input_language_changed(),
             WM_SHOWWINDOW => self.handle_window_visibility_changed(handle, wparam),
-            WM_GPUI_CURSOR_STYLE_CHANGED => self.handle_cursor_changed(lparam),
+            WM_GPUI_CURSOR_STYLE_CHANGED => self.handle_cursor_changed(wparam, lparam),
             WM_GPUI_FORCE_UPDATE_WINDOW => self.draw_window(handle, true),
             WM_GPUI_GPU_DEVICE_LOST => self.handle_device_lost(lparam),
             DM_POINTERHITTEST => self.handle_dm_pointer_hit_test(wparam),
@@ -1163,7 +1163,13 @@ impl WindowsWindowInner {
         None
     }
 
-    fn handle_cursor_changed(&self, lparam: LPARAM) -> Option<isize> {
+    fn handle_cursor_changed(&self, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
+        // lparam is read as an HCURSOR handle, so only trust a message that
+        // carries this app's token, as the platform-window messages do.
+        if wparam.0 != self.validation_number {
+            log::error!("Wrong validation number while processing cursor style message");
+            return None;
+        }
         let had_cursor = self.state.current_cursor.get().is_some();
 
         self.state.current_cursor.set(if lparam.0 == 0 {
