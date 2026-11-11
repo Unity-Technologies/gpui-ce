@@ -404,6 +404,9 @@ mod tests {
     #[test]
     fn embedded_nul_becomes_a_space_and_one_terminator_remains() {
         let wide = to_wide_nul_terminated("a\0b");
-        assert_eq!(wide, vec![u16::from(b'a'), u16::from(b' '), u16::from(b'b'), 0]);
+        assert_eq!(
+            wide,
+            vec![u16::from(b'a'), u16::from(b' '), u16::from(b'b'), 0]
+        );
     }
 }
