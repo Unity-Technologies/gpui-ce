@@ -1,7 +1,7 @@
 use crate::{
     Bounds, Font, FontId, FontMetrics, ForegroundDependency, GlyphId, GlyphRenderMode, Pixels,
     PlatformTextSystem, PreparedRasterStyle, RasterStyleRequest, RenderGlyphParams, Result, Size,
-    TextRenderingMode, ValidatedRasterizedGlyph, px,
+    TextRenderingMode, ValidatedRasterizedGlyph, WordBreak, px,
 };
 use anyhow::{Context as _, anyhow};
 use collections::FxHashMap;
@@ -42,6 +42,15 @@ impl TextSystem {
         let result = self.platform_text_system.add_fonts(fonts);
         font_ids.clear();
         result
+    }
+
+    /// Sets where soft wrapping may break inside words, for every window.
+    ///
+    /// Layouts cached under the previous value are rebuilt on their next use,
+    /// so callers only need to redraw. CSS spells it `word-break`; an app sets
+    /// [`WordBreak::KeepAll`] while its UI language is Korean.
+    pub fn set_word_break(&self, word_break: WordBreak) {
+        self.platform_text_system.set_word_break(word_break);
     }
 
     /// Get the FontId for the configure font family and style.
