@@ -594,7 +594,10 @@ mod tests {
         let second = insert(&key(2));
 
         assert_eq!(first.texture_id, second.texture_id);
-        assert_ne!(atlas.get_texture_info(second.texture_id).unwrap().identity, identity);
+        assert_ne!(
+            atlas.get_texture_info(second.texture_id).unwrap().identity,
+            identity
+        );
         Ok(())
     }
 
