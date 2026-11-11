@@ -1,6 +1,6 @@
 use crate::{
-    AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, DevicePixels,
-    DummyKeyboardMapper, ForegroundExecutor, Keymap, Platform, PlatformDisplay,
+    AnyWindowHandle, BackgroundExecutor, ClipboardItem, ContrastPreference, CursorStyle,
+    DevicePixels, DummyKeyboardMapper, ForegroundExecutor, Keymap, Platform, PlatformDisplay,
     PlatformHeadlessRenderer, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
     PromptButton, ScreenCaptureFrame, ScreenCaptureSource, ScreenCaptureStream, SharedString,
     SourceMetadata, SystemNotification, SystemNotificationResponse, Task, TestDisplay, TestWindow,
@@ -14,7 +14,7 @@ use collections::VecDeque;
 use futures::channel::oneshot;
 use parking_lot::Mutex;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     path::{Path, PathBuf},
     rc::{Rc, Weak},
     sync::Arc,
@@ -43,6 +43,8 @@ pub(crate) struct TestPlatform {
         RefCell<Option<oneshot::Sender<(Option<PathBuf>, Vec<std::ffi::OsString>)>>>,
     headless_renderer_factory: Option<Box<dyn Fn() -> Option<Box<dyn PlatformHeadlessRenderer>>>>,
     scale_factor: f32,
+    contrast_preference: Cell<ContrastPreference>,
+    contrast_preference_change: RefCell<Option<Box<dyn FnMut()>>>,
     weak: Weak<Self>,
 }
 
@@ -185,6 +187,8 @@ impl TestPlatform {
             text_system,
             headless_renderer_factory,
             scale_factor,
+            contrast_preference: Cell::new(ContrastPreference::NoPreference),
+            contrast_preference_change: RefCell::new(None),
         })
     }
 
@@ -352,6 +356,19 @@ impl TestPlatform {
         self.system_notifications.borrow().dismissed.clone()
     }
 
+    /// Sets the contrast setting this platform reports, then fires the change
+    /// callback the way an OS settings notification would.
+    pub(crate) fn simulate_contrast_preference(&self, contrast: ContrastPreference) {
+        self.contrast_preference.set(contrast);
+        let callback = self.contrast_preference_change.borrow_mut().take();
+        if let Some(mut callback) = callback {
+            callback();
+            self.contrast_preference_change
+                .borrow_mut()
+                .get_or_insert(callback);
+        }
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn simulate_system_notification_response(
         &self,
@@ -399,6 +416,14 @@ impl Platform for TestPlatform {
 
     fn thermal_state(&self) -> ThermalState {
         ThermalState::Nominal
+    }
+
+    fn contrast_preference(&self) -> ContrastPreference {
+        self.contrast_preference.get()
+    }
+
+    fn on_contrast_preference_change(&self, callback: Box<dyn FnMut()>) {
+        *self.contrast_preference_change.borrow_mut() = Some(callback);
     }
 
     fn run(&self, on_finish_launching: Box<dyn FnOnce()>) {

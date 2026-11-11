@@ -89,6 +89,7 @@ struct PlatformCallbacks {
     will_open_app_menu: Cell<Option<Box<dyn FnMut()>>>,
     validate_app_menu_command: Cell<Option<Box<dyn FnMut(&dyn Action) -> bool>>>,
     keyboard_layout_change: Cell<Option<Box<dyn FnMut()>>>,
+    contrast_preference_change: Cell<Option<Box<dyn FnMut()>>>,
     system_wake: Cell<Option<Box<dyn FnMut()>>>,
 }
 
@@ -439,6 +440,18 @@ impl Platform for WindowsPlatform {
     }
 
     fn on_thermal_state_change(&self, _callback: Box<dyn FnMut()>) {}
+
+    fn contrast_preference(&self) -> ContrastPreference {
+        system_contrast_preference().log_err().unwrap_or_default()
+    }
+
+    fn on_contrast_preference_change(&self, callback: Box<dyn FnMut()>) {
+        self.inner
+            .state
+            .callbacks
+            .contrast_preference_change
+            .set(Some(callback));
+    }
 
     fn thermal_state(&self) -> ThermalState {
         ThermalState::Nominal
@@ -1014,6 +1027,7 @@ impl WindowsPlatformInner {
             | WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD
             | WM_GPUI_DOCK_MENU_ACTION
             | WM_GPUI_KEYBOARD_LAYOUT_CHANGED
+            | WM_GPUI_CONTRAST_CHANGED
             | WM_GPUI_GPU_DEVICE_LOST
             | WM_GPUI_END_SESSION => self.handle_gpui_events(msg, wparam, lparam),
             WM_POWERBROADCAST => self.handle_power_broadcast(wparam),
@@ -1039,6 +1053,7 @@ impl WindowsPlatformInner {
             WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD => self.run_foreground_task(),
             WM_GPUI_DOCK_MENU_ACTION => self.handle_dock_action_event(lparam.0 as _),
             WM_GPUI_KEYBOARD_LAYOUT_CHANGED => self.handle_keyboard_layout_change(),
+            WM_GPUI_CONTRAST_CHANGED => self.handle_contrast_preference_change(),
             WM_GPUI_GPU_DEVICE_LOST => self.handle_device_lost(lparam),
             WM_GPUI_END_SESSION => self.handle_end_session(),
             _ => unreachable!(),
@@ -1167,6 +1182,14 @@ impl WindowsPlatformInner {
     fn handle_keyboard_layout_change(&self) -> Option<isize> {
         self.with_callback(
             |callbacks| &callbacks.keyboard_layout_change,
+            |callback| callback(),
+        );
+        Some(0)
+    }
+
+    fn handle_contrast_preference_change(&self) -> Option<isize> {
+        self.with_callback(
+            |callbacks| &callbacks.contrast_preference_change,
             |callback| callback(),
         );
         Some(0)
