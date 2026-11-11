@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use gpui::{
     Bounds, Font, FontId, FontMetrics, GlyphId, InlineLayout, InlineLayoutRequest, LineLayout,
     Pixels, PlatformTextSystem, PreparedRasterStyle, RasterStyleRequest, RasterizedGlyph,
-    RenderGlyphParams, Result, Size, TextLayoutRequest, TextRenderingMode,
+    RenderGlyphParams, Result, Size, TextLayoutRequest, TextRenderingMode, WordBreak,
 };
 use gpui_parley::{BitmapFallbackGlyphRasterizer, ParleyTextSystem, SystemFonts};
 
@@ -46,6 +46,10 @@ impl PlatformTextSystem for MacTextSystem {
 
     fn font_generation(&self) -> u64 {
         self.parley.font_generation()
+    }
+
+    fn set_word_break(&self, word_break: WordBreak) {
+        self.parley.set_word_break(word_break);
     }
 
     fn font_id(&self, descriptor: &Font) -> Result<FontId> {

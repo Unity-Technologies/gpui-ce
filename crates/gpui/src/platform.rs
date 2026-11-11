@@ -49,7 +49,7 @@ use crate::{
     Point, PreparedRasterStyle, Priority, RasterStyleRequest, RasterizedGlyph,
     RasterizedGlyphFormat, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams,
     Scene, SharedString, Size, SvgRenderer, SystemWindowTab, Task, TextLayoutRequest,
-    ValidatedRasterizedGlyph, Window, WindowControlArea, hash, point, px,
+    ValidatedRasterizedGlyph, Window, WindowControlArea, WordBreak, hash, point, px,
 };
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 use anyhow::bail;
@@ -1278,10 +1278,16 @@ pub trait PlatformTextSystem: Send + Sync {
     fn add_fonts(&self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()>;
     /// Get all available font names.
     fn all_font_names(&self) -> Vec<String>;
-    /// Generation of the font collection used by layout cache invalidation.
+    /// Generation of the font collection and paragraph settings, used by layout
+    /// cache invalidation.
     fn font_generation(&self) -> u64 {
         0
     }
+    /// Sets where soft wrapping may break inside words for every later layout.
+    ///
+    /// A backend that applies it must advance [`Self::font_generation`] when the
+    /// value changes, so cached layouts are rebuilt. The default ignores it.
+    fn set_word_break(&self, _word_break: WordBreak) {}
     /// Get the font ID for a font descriptor.
     fn font_id(&self, descriptor: &Font) -> Result<FontId>;
     /// Prewarm any system font caches needed to shape text.

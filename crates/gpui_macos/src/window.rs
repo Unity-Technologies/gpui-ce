@@ -837,6 +837,10 @@ struct MacWindowState {
     synthetic_drag_counter: usize,
     traffic_light_position: Option<Point<Pixels>>,
     traffic_light_frames: Option<TrafficLightFrames>,
+    // True from windowWillExitFullScreen until windowDidExitFullScreen. AppKit
+    // owns the standard buttons during that animation; moving them mid-flight
+    // captures transitional frames and makes the buttons jump.
+    exiting_fullscreen: bool,
     transparent_titlebar: bool,
     previous_modifiers_changed_event: Option<PlatformInput>,
     keystroke_for_do_command: Option<Keystroke>,
@@ -873,6 +877,10 @@ impl MacWindowState {
 
     fn move_traffic_light(&mut self) {
         if let Some(traffic_light_position) = self.traffic_light_position {
+            if self.exiting_fullscreen {
+                return;
+            }
+
             if self.is_fullscreen() {
                 self.restore_traffic_light();
                 return;
@@ -1279,6 +1287,7 @@ impl MacWindow {
                     .as_ref()
                     .and_then(|titlebar| titlebar.traffic_light_position),
                 traffic_light_frames: None,
+                exiting_fullscreen: false,
                 transparent_titlebar: titlebar
                     .as_ref()
                     .is_none_or(|titlebar| titlebar.appears_transparent),
@@ -1535,6 +1544,9 @@ impl Drop for MacWindow {
             this.native_window.setDelegate_(NIL);
         }
         this.input_handler.take();
+        // The adapter holds the content view, whose ivar holds this state:
+        // dropping it here breaks that cycle so the view tree can be freed.
+        drop(this.accesskit_adapter.take());
         this.foreground_executor
             .spawn(async move {
                 unsafe {
@@ -3109,6 +3121,7 @@ unsafe extern "C" fn window_will_enter_fullscreen(this: &Objc2Object, _: Sel, _:
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.as_ref().lock();
     lock.fullscreen_restore_bounds = lock.bounds();
+    lock.exiting_fullscreen = false;
     lock.restore_traffic_light();
 
     let min_version = NSOperatingSystemVersion {
@@ -3127,7 +3140,8 @@ unsafe extern "C" fn window_will_enter_fullscreen(this: &Objc2Object, _: Sel, _:
 
 unsafe extern "C" fn window_will_exit_fullscreen(this: &Objc2Object, _: Sel, _: ObjcId) {
     let window_state = unsafe { get_window_state(this) };
-    let lock = window_state.as_ref().lock();
+    let mut lock = window_state.as_ref().lock();
+    lock.exiting_fullscreen = true;
 
     let min_version = NSOperatingSystemVersion {
         majorVersion: 15,
@@ -3147,7 +3161,9 @@ unsafe extern "C" fn window_did_exit_fullscreen(this: &Objc2Object, _: Sel, _: O
     // SAFETY: This method is registered only on GPUI window classes, which initialize
     // WINDOW_STATE_IVAR with an Arc<Mutex<MacWindowState>> during window creation.
     let window_state = unsafe { get_window_state(this) };
-    window_state.as_ref().lock().move_traffic_light();
+    let mut lock = window_state.as_ref().lock();
+    lock.exiting_fullscreen = false;
+    lock.move_traffic_light();
 }
 
 pub(crate) fn is_macos_version_at_least(version: NSOperatingSystemVersion) -> bool {
@@ -3580,19 +3596,28 @@ unsafe extern "C" fn do_command_by_selector(this: &Objc2Object, _: Sel, _: Sel) 
 unsafe extern "C" fn view_did_change_effective_appearance(this: &Objc2Object, _: Sel) {
     unsafe {
         let state = get_window_state(this);
-        let appearance_changed_callback = {
-            let mut lock = state.as_ref().lock();
-            lock.appearance_changed_callback.take()
-        };
-
-        if let Some(mut callback) = appearance_changed_callback {
-            callback();
-            state.lock().appearance_changed_callback = Some(callback);
-        }
 
         // AppKit can relayout the standard traffic light buttons as part of
         // applying a new appearance, so reapply GPUI's custom position.
         state.lock().move_traffic_light();
+
+        // This can fire while the App is already borrowed (for example inside
+        // a window update), so run the callback from the foreground executor.
+        let (executor, closed) = {
+            let lock = state.as_ref().lock();
+            (lock.foreground_executor.clone(), lock.closed.clone())
+        };
+        executor
+            .spawn(async move {
+                if_window_not_closed(closed, move || {
+                    let callback = state.as_ref().lock().appearance_changed_callback.take();
+                    if let Some(mut callback) = callback {
+                        callback();
+                        state.lock().appearance_changed_callback = Some(callback);
+                    }
+                });
+            })
+            .detach();
     }
 }
 

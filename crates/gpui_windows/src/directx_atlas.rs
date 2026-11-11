@@ -52,10 +52,9 @@ impl DirectXAtlas {
     pub(crate) fn get_texture_view(
         &self,
         id: AtlasTextureId,
-    ) -> [Option<ID3D11ShaderResourceView>; 1] {
+    ) -> Option<[Option<ID3D11ShaderResourceView>; 1]> {
         let lock = self.0.lock();
-        let tex = lock.texture(id);
-        tex.view.clone()
+        Some(lock.texture(id)?.view.clone())
     }
 
     pub(crate) fn handle_device_lost(
@@ -165,6 +164,7 @@ impl DirectXAtlasState {
             .allocate(size, key.texture_kind())
             .ok_or_else(|| anyhow::anyhow!("failed to allocate"))?;
         self.texture(tile.texture_id)
+            .ok_or_else(|| anyhow::anyhow!("atlas texture missing right after allocation"))?
             .upload(&self.device_context, tile.bounds, bytes);
         self.tiles_by_key.insert(key, tile);
 
@@ -276,18 +276,13 @@ impl DirectXAtlasState {
         }
     }
 
-    fn texture(&self, id: AtlasTextureId) -> &DirectXAtlasTexture {
-        match id.kind {
-            AtlasTextureKind::Monochrome => &self.monochrome_textures[id.index as usize]
-                .as_ref()
-                .unwrap(),
-            AtlasTextureKind::Polychrome => &self.polychrome_textures[id.index as usize]
-                .as_ref()
-                .unwrap(),
-            AtlasTextureKind::Subpixel => {
-                &self.subpixel_textures[id.index as usize].as_ref().unwrap()
-            }
-        }
+    fn texture(&self, id: AtlasTextureId) -> Option<&DirectXAtlasTexture> {
+        let list = match id.kind {
+            AtlasTextureKind::Monochrome => &self.monochrome_textures,
+            AtlasTextureKind::Polychrome => &self.polychrome_textures,
+            AtlasTextureKind::Subpixel => &self.subpixel_textures,
+        };
+        list.textures.get(id.index as usize)?.as_ref()
     }
 }
 
