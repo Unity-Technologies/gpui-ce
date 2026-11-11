@@ -85,6 +85,20 @@ pub fn current_platform(headless: bool) -> Rc<dyn Platform> {
     }
 }
 
+/// Returns the current platform's text system for benchmark contexts, built once per
+/// thread and shared by every context on it.
+///
+/// `#[gpui::bench]` creates a context per Criterion routine call; building a whole
+/// platform each time only to take its text system leaks the platform's threads on Linux.
+#[cfg(feature = "bench-support")]
+pub fn bench_text_system() -> std::sync::Arc<dyn gpui::PlatformTextSystem> {
+    thread_local! {
+        static TEXT_SYSTEM: std::sync::Arc<dyn gpui::PlatformTextSystem> =
+            current_platform(true).text_system();
+    }
+    TEXT_SYSTEM.with(|text_system| text_system.clone())
+}
+
 /// Returns a new [`HeadlessRenderer`] for the current platform, if available.
 ///
 /// macOS renders with Metal, and panics when the device cannot build the renderer.
