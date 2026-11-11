@@ -422,7 +422,7 @@ mod tests {
 
     #[test]
     fn test_tab_stop_count_tracks_inserts_replacements_and_clear() {
-        let focus_map = Arc::new(FocusMap::default());
+        let focus_map = Arc::new(RwLock::new(FocusMap::default()));
         let mut map = TabStopMap::default();
         let stop = FocusHandle::new(&focus_map).tab_stop(true).tab_index(0);
         let other_stop = FocusHandle::new(&focus_map).tab_stop(true).tab_index(1);
