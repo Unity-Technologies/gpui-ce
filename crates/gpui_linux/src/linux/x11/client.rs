@@ -738,7 +738,7 @@ impl X11Client {
         // CreateIc is only valid once the handshake's OpenReply has assigned
         // the input method id. The handshake creates the first input context
         // itself; creating one earlier names input method 0, which fcitx5
-        // answers with an unparseable XIM_ERROR that drops XIM for the session.
+        // answers with an XIM_ERROR the client cannot parse, which drops XIM.
         if !xim_handshake_complete(state.xim_handler.as_ref()) {
             return;
         }
