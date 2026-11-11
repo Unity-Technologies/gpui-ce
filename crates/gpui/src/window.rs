@@ -1802,18 +1802,21 @@ impl Window {
                     .update(&mut cx, |_, _, cx| cx.thermal_state())
                     .log_err();
 
-                // Throttle frame rate based on conditions:
-                // - Thermal pressure (Serious/Critical): cap to ~60fps
-                // - Inactive window (not focused): cap to ~30fps to save energy
-                let min_frame_interval = if request_frame_options.require_presentation
+                // Throttle frame rate; see `frame_throttle_interval`.
+                let wants_frame = !(request_frame_options.require_presentation
                     || (!request_frame_options.force_render
-                        && next_frame_callbacks.borrow().is_empty())
-                {
-                    None
-                } else if !active.get() && !input_rate_tracker.borrow_mut().is_high_rate() {
-                    inactive_frame_interval
-                } else if let Some(ThermalState::Critical | ThermalState::Serious) = thermal_state {
-                    Some(Duration::from_micros(16667))
+                        && next_frame_callbacks.borrow().is_empty()));
+                let low_power_mode = handle
+                    .update(&mut cx, |_, _, cx| cx.low_power_mode())
+                    .unwrap_or(false);
+                let min_frame_interval = if wants_frame {
+                    frame_throttle_interval(
+                        active.get(),
+                        input_rate_tracker.borrow_mut().is_high_rate(),
+                        inactive_frame_interval,
+                        thermal_state,
+                        low_power_mode,
+                    )
                 } else {
                     None
                 };
@@ -1821,7 +1824,7 @@ impl Window {
                 let now = Instant::now();
                 if let Some(min_interval) = min_frame_interval {
                     if let Some(last_frame) = last_frame_time.get()
-                        && now.duration_since(last_frame) < min_interval
+                        && frame_arrived_too_soon(now.duration_since(last_frame), min_interval)
                     {
                         // Don't lose a pending forced render to throttling.
                         deferred_force_render |= force_render;
@@ -8099,6 +8102,89 @@ pub fn outline(
 
 #[cfg(test)]
 mod pointer_tests;
+
+/// Slack on the frame limiter. A vsync tick lands a hair before the nominal
+/// interval has elapsed; without slack that tick is dropped and the window
+/// presents at half the intended rate.
+const FRAME_INTERVAL_TOLERANCE: Duration = Duration::from_millis(1);
+
+/// Frame interval while the system is thermally constrained or in Low Power Mode.
+const CONSTRAINED_FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
+const LOW_POWER_FRAME_INTERVAL: Duration = Duration::from_micros(33_333);
+
+fn frame_arrived_too_soon(elapsed: Duration, min_interval: Duration) -> bool {
+    elapsed + FRAME_INTERVAL_TOLERANCE < min_interval
+}
+
+/// The minimum interval between presented frames, or `None` for no cap.
+/// - Inactive window without high-rate input: `inactive_interval` (~30fps).
+/// - Low Power Mode: ~30fps.
+/// - Thermal pressure (Serious/Critical): ~60fps.
+fn frame_throttle_interval(
+    active: bool,
+    high_rate_input: bool,
+    inactive_interval: Option<Duration>,
+    thermal_state: Option<ThermalState>,
+    low_power_mode: bool,
+) -> Option<Duration> {
+    if !active && !high_rate_input {
+        inactive_interval
+    } else if low_power_mode {
+        Some(LOW_POWER_FRAME_INTERVAL)
+    } else if let Some(ThermalState::Critical | ThermalState::Serious) = thermal_state {
+        Some(CONSTRAINED_FRAME_INTERVAL)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod frame_limiter_tests {
+    use super::*;
+
+    #[test]
+    fn frame_limiter_tolerates_one_millisecond_of_early_arrival() {
+        let min = Duration::from_micros(33_333);
+        assert!(!frame_arrived_too_soon(Duration::from_micros(32_400), min));
+        assert!(!frame_arrived_too_soon(min, min));
+        assert!(frame_arrived_too_soon(Duration::from_micros(32_000), min));
+    }
+
+    #[test]
+    fn low_power_mode_caps_an_active_window_to_30fps() {
+        let inactive = Some(Duration::from_micros(33_333));
+        assert_eq!(
+            frame_throttle_interval(true, false, inactive, None, true),
+            Some(Duration::from_micros(33_333))
+        );
+        assert_eq!(
+            frame_throttle_interval(true, false, inactive, None, false),
+            None
+        );
+    }
+
+    #[test]
+    fn low_power_mode_wins_over_thermal_cap_and_inactive_rules_hold() {
+        let inactive = Some(Duration::from_micros(40_000));
+        let serious = Some(ThermalState::Serious);
+        assert_eq!(
+            frame_throttle_interval(true, false, inactive, serious, true),
+            Some(Duration::from_micros(33_333))
+        );
+        assert_eq!(
+            frame_throttle_interval(true, false, inactive, serious, false),
+            Some(Duration::from_micros(16_667))
+        );
+        assert_eq!(
+            frame_throttle_interval(false, false, inactive, None, true),
+            inactive
+        );
+        assert_eq!(
+            frame_throttle_interval(false, true, inactive, None, true),
+            Some(Duration::from_micros(33_333))
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {
