@@ -7,7 +7,8 @@ use gpui::{
     VisualTestContext, Window, div, px, rgb, size, white,
 };
 use gpui_fonts::IBM_PLEX;
-use gpui_parley::{ParleyTextSystem, SystemFonts};
+use gpui_parley::ParleyTextSystem;
+use gpui_render::SwashGlyphRasterizer;
 use std::{borrow::Cow, sync::Arc};
 
 const BACKGROUND: [u8; 3] = [0x10, 0x14, 0x18];
@@ -37,10 +38,10 @@ fn test_app_context_renders_real_text_at_the_configured_scale() {
         let mut cx = TestAppContext::with_platform(
             TestDispatcher::new(0),
             None,
-            Arc::new(ParleyTextSystem::new_with_system_font(
-                SystemFonts::Skip,
-                "IBM Plex Sans",
-            )),
+            Arc::new(
+                ParleyTextSystem::new(SwashGlyphRasterizer::default())
+                    .with_system_fallback_family("IBM Plex Sans"),
+            ),
             Arc::new(()),
             gpui_ce_platform::current_headless_renderer,
             scale_factor,
