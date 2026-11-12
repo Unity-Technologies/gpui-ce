@@ -1,0 +1,90 @@
+// Renovate configuration for Unity's gpui-ce fork.
+// Reference: https://docs.renovatebot.com/configuration-options/
+//
+// Rule order: in packageRules the LAST matching rule wins, so catch-all groups
+// come first and the specific rules after them.
+{
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+  extends: ['config:recommended', 'schedule:daily'],
+
+  // Renovate targets the default branch, unity/hub-consolidated. main mirrors
+  // upstream gpui-ce and only moves by syncing, so it gets no update PRs.
+
+  // The Cargo workspace and the workflows' actions. Nothing else here is a
+  // dependency Renovate should move.
+  enabledManagers: ['cargo', 'github-actions'],
+
+  labels: ['dependencies'],
+  semanticCommits: 'enabled',
+  // Commits through the GitHub API, so they are signed and show as verified.
+  platformCommit: 'enabled',
+  prConcurrentLimit: 10,
+  prHourlyLimit: 0,
+
+  // A release waits 3 days before Renovate proposes it. "strict" holds the
+  // branch until then instead of opening a PR early.
+  minimumReleaseAge: '3 days',
+  internalChecksFilter: 'strict',
+
+  // Security updates skip the wait and the schedule, and are never grouped.
+  vulnerabilityAlerts: {
+    enabled: true,
+    minimumReleaseAge: null,
+    schedule: [],
+    groupName: null,
+  },
+
+  // CI's `lockfile` job warns when `cargo update` would change Cargo.lock.
+  // A weekly refresh keeps it quiet.
+  lockFileMaintenance: {
+    enabled: true,
+    schedule: ['before 6am on monday'],
+  },
+
+  packageRules: [
+    // chore(deps): ... for every PR.
+    {
+      matchPackageNames: ['*'],
+      semanticCommitType: 'chore',
+      semanticCommitScope: 'deps',
+    },
+
+    // One PR for all action bumps keeps the noise down. The workflows come
+    // from upstream and use tags, so no digest pinning: it would rewrite every
+    // `uses:` line and conflict with each upstream sync.
+    {
+      groupName: 'github-actions',
+      matchManagers: ['github-actions'],
+    },
+
+    // Patch-only catch-all. Not minor: most crates here are 0.x, where a
+    // "minor" is a breaking change and deserves its own PR.
+    {
+      groupName: 'cargo-patch',
+      matchManagers: ['cargo'],
+      matchUpdateTypes: ['patch'],
+    },
+
+    // gpui_render's build.rs validates every shader against this older naga
+    // on purpose (the "floor" Naga), so it must not follow the current one.
+    {
+      matchManagers: ['cargo'],
+      matchDepNames: ['naga-old'],
+      enabled: false,
+    },
+    // x11rb stays on 0.13 while x11-clipboard and zed-xim, which gpui_linux
+    // hands the same connection to, still require ^0.13.
+    {
+      matchManagers: ['cargo'],
+      matchPackageNames: ['x11rb'],
+      allowedVersions: '<0.14',
+    },
+    // skrifa stays on 0.44 while swash, which shares its font types, caps it
+    // there.
+    {
+      matchManagers: ['cargo'],
+      matchPackageNames: ['skrifa'],
+      allowedVersions: '<0.45',
+    },
+  ],
+}
