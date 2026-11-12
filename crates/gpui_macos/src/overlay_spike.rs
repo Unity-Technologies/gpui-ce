@@ -219,7 +219,9 @@ pub(crate) fn draw(
         }
     }
     static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 120 == 0 {
+    if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .is_multiple_of(120)
+    {
         unsafe {
             let f: NSRect = msg_send![&*o.view, frame];
             let sv: *mut AnyObject = msg_send![&*o.view, superview];
