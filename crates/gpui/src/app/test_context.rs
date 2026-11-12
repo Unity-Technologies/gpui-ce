@@ -195,7 +195,7 @@ impl TestAppContext {
     /// let mut cx = TestAppContext::with_platform(
     ///     TestDispatcher::new(0),
     ///     None,
-    ///     Arc::new(gpui_parley::ParleyTextSystem::new(gpui_parley::SystemFonts::Skip)),
+    ///     Arc::new(gpui_parley::ParleyTextSystem::new(gpui_render::SwashGlyphRasterizer::default())),
     ///     Arc::new(Assets),
     ///     gpui_platform::current_headless_renderer,
     ///     1.0,

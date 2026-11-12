@@ -1,6 +1,6 @@
 [package]
 name = "gpui-ce"
-version = "0.2.2-unity.20261107"
+version = "0.4.0-unity.20261112"
 edition.workspace = true
 authors = ["Nathan Sobo <nathan@zed.dev>"]
 description = "A community fork of Zed's GPU-accelerated UI framework"
@@ -103,6 +103,7 @@ resvg = { version = "0.50.0", default-features = false, features = [
 rust-embed = { version = "8.12", optional = true }
 usvg = { version = "0.50.0", default-features = false }
 skrifa.workspace = true
+linebender_resource_handle.workspace = true
 schemars.workspace = true
 seahash = "4.1"
 serde.workspace = true
