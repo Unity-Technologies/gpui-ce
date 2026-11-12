@@ -94,14 +94,14 @@ raw-window-handle.workspace = true
 regex.workspace = true
 refineable.workspace = true
 scheduler.workspace = true
-resvg = { version = "0.49.0", default-features = false, features = [
+resvg = { version = "0.50.0", default-features = false, features = [
   "text",
   "system-fonts",
   "memmap-fonts",
   "raster-images",
 ] }
 rust-embed = { version = "8.12", optional = true }
-usvg = { version = "0.49.0", default-features = false }
+usvg = { version = "0.50.0", default-features = false }
 skrifa.workspace = true
 linebender_resource_handle.workspace = true
 schemars.workspace = true
