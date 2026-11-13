@@ -26,7 +26,8 @@ env:
   CARGO_INCREMENTAL: 0
   # setup-rust-toolchain v2 defaults this to `deny`, which also fails the build
   # on cargo 1.100's manifest lints (unused dependencies, missing `[lints]`) in
-  # upstream crates. Clippy's `-D warnings` stays the warnings gate.
+  # upstream crates. Jobs that compile pass `rustflags: -D warnings` instead,
+  # as v1 did, so rustc warnings still fail on every platform.
   CARGO_BUILD_WARNINGS: warn
   # Only branch pushes save Rust caches. Each PR saving its own ~1 GB entry
   # filled the 10 GB repo budget, and no other PR could read them anyway.
@@ -93,6 +94,7 @@ jobs:
         with:
           components: clippy
           cache-save-if: ${{ env.SAVE_RUST_CACHE }}
+          rustflags: -D warnings
       - name: Install system deps
         run: |
           sudo apt-get update
@@ -164,6 +166,7 @@ jobs:
         with:
           toolchain: 1.95.0
           cache-save-if: ${{ env.SAVE_RUST_CACHE }}
+          rustflags: -D warnings
       - name: Install system deps
         run: |
           sudo apt-get update
@@ -205,6 +208,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache-save-if: ${{ env.SAVE_RUST_CACHE }}
+          rustflags: -D warnings
       - name: Install system deps
         run: |
           sudo apt-get update
@@ -237,6 +241,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache-save-if: ${{ env.SAVE_RUST_CACHE }}
+          rustflags: -D warnings
       - uses: hustcer/setup-nu@v3
       - uses: taiki-e/install-action@v2
         with:
@@ -260,6 +265,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache-save-if: ${{ env.SAVE_RUST_CACHE }}
+          rustflags: -D warnings
       - uses: hustcer/setup-nu@v3
       - uses: taiki-e/install-action@v2
         with:
@@ -284,6 +290,7 @@ jobs:
         with:
           target: wasm32-unknown-unknown
           cache-save-if: ${{ env.SAVE_RUST_CACHE }}
+          rustflags: -D warnings
       - name: Install system deps
         run: |
           sudo apt-get update
