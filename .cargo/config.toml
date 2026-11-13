@@ -53,6 +53,14 @@ rustflags = [
 [target.aarch64-unknown-linux-gnu]
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 
+# Cargo (1.100+) skips crates.io releases younger than this when it resolves
+# or updates Cargo.lock. Same 3 days as `minimumReleaseAge` in
+# .github/renovate.json5, so a manual `cargo update` follows the rule Renovate
+# does. Versions already in Cargo.lock are kept. Older cargo ignores the key.
+# Override one run: CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow
+[registry]
+global-min-publish-age = "3 days"
+
 [env]
 MACOSX_DEPLOYMENT_TARGET = "10.15.7"
 
