@@ -18,56 +18,56 @@ test-support = ["path/test-support"]
 debug-embed = ["rust-embed/debug-embed"]
 
 [dependencies]
-anyhow = "1.0.86"
-async_zip = { version = "0.0.18", features = ["deflate", "deflate64"] }
+anyhow.workspace = true
+async_zip = { workspace = true, features = ["deflate", "deflate64"] }
 collections = { package = "gpui_ce_collections", version = "=0.4.0-unity.20261112", registry = "unity", path = "../gpui_collections" }
-dunce = "1.0"
-futures-lite = "2.6.1"
-futures = "0.3.32"
-globset = "0.4"
-itertools = "0.14.0"
-log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
-regex = "1.5"
-rust-embed = { version = "8.11", features = ["include-exclude"] }
-schemars = { version = "1.0", features = ["indexmap2"] }
-serde = { version = "1.0.221", features = ["derive", "rc"] }
-serde_json = { version = "1.0.144", features = ["preserve_order", "raw_value"] }
-serde_json_lenient = { version = "0.2", features = [
+dunce.workspace = true
+futures-lite.workspace = true
+futures.workspace = true
+globset.workspace = true
+itertools.workspace = true
+log = { workspace = true, features = ["kv_unstable_serde", "serde"] }
+regex.workspace = true
+rust-embed = { workspace = true, features = ["include-exclude"] }
+schemars = { workspace = true, features = ["indexmap2"] }
+serde = { workspace = true, features = ["derive", "rc"] }
+serde_json = { workspace = true, features = ["preserve_order", "raw_value"] }
+serde_json_lenient = { workspace = true, features = [
   "preserve_order",
   "raw_value",
 ] }
-shlex = "1.3.0"
-take-until = "0.2.0"
-tempfile = "3.20.0"
-unicase = "2.6"
-url = "2.2"
-percent-encoding = "2.3.2"
+shlex.workspace = true
+take-until.workspace = true
+tempfile.workspace = true
+unicase.workspace = true
+url.workspace = true
+percent-encoding.workspace = true
 gpui_util = { package = "gpui_ce_util", version = "=0.4.0-unity.20261112", registry = "unity", path = "../gpui_ce_util" }
 path = { package = "gpui_ce_path", version = "=0.4.0-unity.20261112", registry = "unity", path = "../gpui_path", features = [
   "serde",
 ] }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
-smol = "2.0"
-which = "8.0.6"
-async-fs = "2.1"
-walkdir = "2.5"
-dirs = "6.0"
+smol.workspace = true
+which.workspace = true
+async-fs.workspace = true
+walkdir.workspace = true
+dirs.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-command-fds = "0.3.1"
-libc = "0.2"
-nix = { version = "0.29", features = ["user"] }
+command-fds.workspace = true
+libc.workspace = true
+nix = { workspace = true, features = ["user"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-mach2 = "0.5"
+mach2.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-tendril = "0.5"
+tendril.workspace = true
 windows.workspace = true
 
 [dev-dependencies]
-pretty_assertions = { version = "1.3.0", features = ["unstable"] }
+pretty_assertions = { workspace = true, features = ["unstable"] }
 rand.workspace = true
 path = { package = "gpui_ce_path", version = "=0.4.0-unity.20261112", registry = "unity", path = "../gpui_path", features = [
   "test-support",
