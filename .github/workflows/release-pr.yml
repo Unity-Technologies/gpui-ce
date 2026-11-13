@@ -21,10 +21,10 @@ jobs:
       # checks run on the release PR (see MAINTENANCE.md).
       GH_TOKEN: ${{ secrets.RELEASE_PR_TOKEN || secrets.GITHUB_TOKEN }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           token: ${{ secrets.RELEASE_PR_TOKEN || secrets.GITHUB_TOKEN }}
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
       - uses: hustcer/setup-nu@v3
-      - uses: extractions/setup-just@v2
+      - uses: extractions/setup-just@v4
       - run: just release-pr-open "$VERSION"

@@ -39,7 +39,7 @@ jobs:
       value:   ${{ steps.check.outputs.value }}
       version: ${{ steps.check.outputs.version }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.RELEASE_TAG }}
       - id: check
@@ -57,10 +57,10 @@ jobs:
     needs: [prerelease]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.RELEASE_TAG }}
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
@@ -77,7 +77,7 @@ jobs:
             libjavascriptcoregtk-4.1-dev libwebkit2gtk-4.1-dev \
             libsoup-3.0-dev
       - uses: hustcer/setup-nu@v3
-      - uses: extractions/setup-just@v2
+      - uses: extractions/setup-just@v4
       - run: just fmt-check
       - run: just clippy
       - run: just build
@@ -89,13 +89,13 @@ jobs:
     needs: [prerelease, verify]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.RELEASE_TAG }}
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
       - uses: Swatinem/rust-cache@v2
       - uses: hustcer/setup-nu@v3
-      - uses: extractions/setup-just@v2
+      - uses: extractions/setup-just@v4
       - name: Dry-run publish check
         run: just publish true
 
@@ -105,13 +105,13 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name != 'workflow_dispatch' || github.event.inputs.dry_run != 'true'
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.RELEASE_TAG }}
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
       - uses: Swatinem/rust-cache@v2
       - uses: hustcer/setup-nu@v3
-      - uses: extractions/setup-just@v2
+      - uses: extractions/setup-just@v4
       - run: just publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -123,10 +123,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.RELEASE_TAG }}
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           draft: true
