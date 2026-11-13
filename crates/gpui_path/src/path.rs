@@ -32,6 +32,12 @@ pub enum PathStyle {
     Windows,
 }
 
+/// std's handling of `\\?\` paths with a `/` in the body differs between Rust releases, so those
+/// always take the explicit parser below, which keeps `/` literal.
+fn is_windows_verbatim(path: &Path) -> bool {
+    cfg!(windows) && path.to_str().is_some_and(|p| p.starts_with(r"\\?\"))
+}
+
 impl PathStyle {
     #[cfg(target_os = "windows")]
     pub const fn local() -> Self {
@@ -258,7 +264,7 @@ impl PathStyle {
     }
 
     pub fn file_name(self, path: &Path) -> Option<&str> {
-        if self == PathStyle::local() {
+        if self == PathStyle::local() && !is_windows_verbatim(path) {
             return path.file_name().and_then(|n| n.to_str());
         }
         let path_string = path.to_str()?;
@@ -284,7 +290,7 @@ impl PathStyle {
     }
 
     pub fn parent(self, path: &Path) -> Option<&Path> {
-        if self == PathStyle::local() {
+        if self == PathStyle::local() && !is_windows_verbatim(path) {
             return path.parent();
         }
         let path = path.to_str()?;
