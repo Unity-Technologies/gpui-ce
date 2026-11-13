@@ -91,6 +91,7 @@ struct PlatformCallbacks {
     keyboard_layout_change: Cell<Option<Box<dyn FnMut()>>>,
     contrast_preference_change: Cell<Option<Box<dyn FnMut()>>>,
     system_wake: Cell<Option<Box<dyn FnMut()>>>,
+    gpu_device_lost: Cell<Option<Box<dyn FnMut(GpuDeviceLostError)>>>,
 }
 
 impl WindowsPlatformState {
@@ -340,7 +341,19 @@ impl WindowsPlatform {
                             &all_windows,
                             &text_system,
                         ) {
-                            panic!("Device lost: {err}");
+                            // Report once to the main thread, then stop
+                            // watching the dead device: retrying would only
+                            // fail and report again.
+                            post_gpu_device_unrecoverable(
+                                platform_window.as_raw(),
+                                validation_number,
+                                GpuDeviceLostError {
+                                    adapter_name: adapter_name(&directx_device.adapter),
+                                    stage: "recreating the DirectX devices".to_string(),
+                                    message: format!("{err:#}"),
+                                },
+                            );
+                            directx_devices = None;
                         }
                     }
                     let Some(all_windows) = all_windows.upgrade() else {
@@ -429,6 +442,14 @@ impl Platform for WindowsPlatform {
 
     fn keyboard_mapper(&self) -> Rc<dyn PlatformKeyboardMapper> {
         Rc::new(WindowsKeyboardMapper::new())
+    }
+
+    fn on_gpu_device_lost(&self, callback: Box<dyn FnMut(GpuDeviceLostError)>) {
+        self.inner
+            .state
+            .callbacks
+            .gpu_device_lost
+            .set(Some(callback));
     }
 
     fn on_keyboard_layout_change(&self, callback: Box<dyn FnMut()>) {
@@ -1027,6 +1048,7 @@ impl WindowsPlatformInner {
             | WM_GPUI_KEYBOARD_LAYOUT_CHANGED
             | WM_GPUI_CONTRAST_CHANGED
             | WM_GPUI_GPU_DEVICE_LOST
+            | WM_GPUI_GPU_DEVICE_UNRECOVERABLE
             | WM_GPUI_END_SESSION => self.handle_gpui_events(msg, wparam, lparam),
             WM_POWERBROADCAST => self.handle_power_broadcast(wparam),
             _ => None,
@@ -1041,6 +1063,11 @@ impl WindowsPlatformInner {
     fn handle_gpui_events(&self, message: u32, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
         if wparam.0 != self.validation_number {
             log::error!("Wrong validation number while processing message: {message}");
+            if message == WM_GPUI_GPU_DEVICE_UNRECOVERABLE {
+                // Only our own post carries this message, so the box is
+                // ours to free even when the number does not match.
+                drop(unsafe { Box::from_raw(lparam.0 as *mut GpuDeviceLostError) });
+            }
             return None;
         }
         match message {
@@ -1053,6 +1080,7 @@ impl WindowsPlatformInner {
             WM_GPUI_KEYBOARD_LAYOUT_CHANGED => self.handle_keyboard_layout_change(),
             WM_GPUI_CONTRAST_CHANGED => self.handle_contrast_preference_change(),
             WM_GPUI_GPU_DEVICE_LOST => self.handle_device_lost(lparam),
+            WM_GPUI_GPU_DEVICE_UNRECOVERABLE => self.handle_device_unrecoverable(lparam),
             WM_GPUI_END_SESSION => self.handle_end_session(),
             _ => unreachable!(),
         }
@@ -1198,6 +1226,22 @@ impl WindowsPlatformInner {
             self.with_callback(|callbacks| &callbacks.system_wake, |callback| callback());
         }
         Some(1)
+    }
+
+    /// A lost GPU device that could not be rebuilt
+    /// ([`post_gpu_device_unrecoverable`]): hand it to the app's handler, or
+    /// panic as this backend always did when nothing is registered.
+    fn handle_device_unrecoverable(&self, lparam: LPARAM) -> Option<isize> {
+        // SAFETY: `post_gpu_device_unrecoverable` is the only sender, and it
+        // gives up ownership of this box to the message.
+        let error = *unsafe { Box::from_raw(lparam.0 as *mut GpuDeviceLostError) };
+        log::error!("{error}");
+        let Some(mut callback) = self.state.callbacks.gpu_device_lost.take() else {
+            panic!("Device lost: {error}");
+        };
+        callback(error);
+        self.state.callbacks.gpu_device_lost.set(Some(callback));
+        Some(0)
     }
 
     fn handle_device_lost(&self, lparam: LPARAM) -> Option<isize> {
