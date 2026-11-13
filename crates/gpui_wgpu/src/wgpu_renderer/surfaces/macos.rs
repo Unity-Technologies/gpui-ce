@@ -146,12 +146,13 @@ fn create_core_video_surface(
     image_buffer: &core_video::pixel_buffer::CVPixelBuffer,
 ) -> Result<CachedSurface, frame::DrawError> {
     use core_foundation::base::TCFType as _;
+    use core_video::image_buffer::TCVImageBuffer as _;
     use core_video::metal_texture::CVMetalTextureGetTexture;
 
     let resources = renderer.resources();
     let luma = texture_cache
         .create_texture_from_image(
-            image_buffer.as_concrete_TypeRef(),
+            &image_buffer.as_image_buffer(),
             None,
             metal::MTLPixelFormat::R8Unorm,
             image_buffer.get_width_of_plane(0),
@@ -164,7 +165,7 @@ fn create_core_video_surface(
         })?;
     let chroma = texture_cache
         .create_texture_from_image(
-            image_buffer.as_concrete_TypeRef(),
+            &image_buffer.as_image_buffer(),
             None,
             metal::MTLPixelFormat::RG8Unorm,
             image_buffer.get_width_of_plane(1),
