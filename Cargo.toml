@@ -116,7 +116,7 @@ slotmap = "1.0.6"
 smallvec = { version = "1.6", features = ["union", "const_new"] }
 async-channel = "2.5.0"
 stacksafe = "1.0"
-strum = { version = "0.27.2", features = ["derive"] }
+strum = { version = "0.28.0", features = ["derive"] }
 sum_tree = { path = "crates/gpui_sum_tree", version = "=0.4.0-unity.20261112", registry = "unity", package = "gpui_ce_sum_tree" }
 thiserror = "2.0.12"
 tracing = { version = "0.1.44", features = ["attributes"] }
