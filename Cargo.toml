@@ -320,7 +320,7 @@ smol_str = "0.3.6"
 spin = "0.12.0"
 subsecond = "=0.7.10"
 taffy = "=0.13.0"
-take-until = "0.2.0"
+take-until = "0.3.0"
 tendril = "0.5"
 unicase = "2.6"
 usvg = { version = "0.50.0", default-features = false }
