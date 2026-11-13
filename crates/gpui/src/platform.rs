@@ -152,6 +152,27 @@ pub enum MacActivationPolicy {
     Prohibited,
 }
 
+/// A GPU device was lost (a driver reset, an adapter removed) and the
+/// platform could not create a working replacement, so no window can draw.
+/// Delivered to the [`App::on_gpu_device_lost`] handler on the main thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuDeviceLostError {
+    /// The GPU adapter's name, when it could be read.
+    pub adapter_name: Option<String>,
+    /// The step that failed, such as "recreating the DirectX devices".
+    pub stage: String,
+    /// The underlying error text.
+    pub message: String,
+}
+
+impl std::fmt::Display for GpuDeviceLostError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GPU device lost while {}: {}", self.stage, self.message)
+    }
+}
+
+impl std::error::Error for GpuDeviceLostError {}
+
 #[expect(missing_docs)]
 pub trait Platform: 'static {
     fn background_executor(&self) -> BackgroundExecutor;
@@ -391,6 +412,11 @@ pub trait Platform: 'static {
     fn keyboard_layout(&self) -> Box<dyn PlatformKeyboardLayout>;
     fn keyboard_mapper(&self) -> Rc<dyn PlatformKeyboardMapper>;
     fn on_keyboard_layout_change(&self, callback: Box<dyn FnMut()>);
+
+    /// Registers the handler for a GPU device that was lost and could not be
+    /// rebuilt. Only the Windows (Direct3D 11) backend reports one. With no
+    /// handler registered, the backend panics, as it always did.
+    fn on_gpu_device_lost(&self, _callback: Box<dyn FnMut(GpuDeviceLostError)>) {}
 
     /// Register additional GPU device requirements (features, limits) before
     /// the first window is opened.  The concrete type inside the `Box` must be

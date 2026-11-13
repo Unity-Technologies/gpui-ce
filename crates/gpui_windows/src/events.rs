@@ -30,6 +30,10 @@ pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
 pub(crate) const WM_GPUI_KEYDOWN: u32 = WM_USER + 8;
 pub(crate) const WM_GPUI_END_SESSION: u32 = WM_USER + 9;
 pub(crate) const WM_GPUI_CONTRAST_CHANGED: u32 = WM_USER + 10;
+/// Posted to the platform window when a lost GPU device could not be
+/// rebuilt. Its `LPARAM` owns a `Box<GpuDeviceLostError>`
+/// ([`post_gpu_device_unrecoverable`]).
+pub(crate) const WM_GPUI_GPU_DEVICE_UNRECOVERABLE: u32 = WM_USER + 11;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
 
@@ -1327,7 +1331,22 @@ impl WindowsWindowInner {
             .borrow_mut()
             .handle_device_lost(&devices)
         {
-            panic!("Device lost: {err}");
+            // This window cannot draw on the new device. Hand the failure to
+            // the app on the platform window, after this message returns, so
+            // the handler never runs inside the renderer borrow. A failed
+            // recovery leaves the renderer without devices, so the draws
+            // that come before the handler fail (and log) instead of
+            // touching the dead device.
+            post_gpu_device_unrecoverable(
+                self.platform_window_handle,
+                self.validation_number,
+                GpuDeviceLostError {
+                    adapter_name: adapter_name(&devices.adapter),
+                    stage: "recreating the window renderer".to_string(),
+                    message: format!("{err:#}"),
+                },
+            );
+            return Some(0);
         }
         // Make sure the first `draw_window` after recovery (whether it comes
         // from the forced WM_GPUI_FORCE_UPDATE_WINDOW or a stray WM_PAINT in
@@ -1832,5 +1851,32 @@ fn notify_frame_changed(handle: HWND) {
 fn park_frame_callback<T>(request_frame: &Cell<Option<T>>, parked: &Cell<Option<T>>) {
     if let Some(callback) = request_frame.take() {
         parked.set(Some(callback));
+    }
+}
+
+/// Post a [`GpuDeviceLostError`] to the platform window, which hands it to
+/// the app's `on_gpu_device_lost` handler (or panics without one). Safe from
+/// any thread: the platform window frees the box on the main thread. When the
+/// post fails, nothing would ever report the failure, so this panics as the
+/// code it replaced did.
+pub(crate) fn post_gpu_device_unrecoverable(
+    platform_window: HWND,
+    validation_number: usize,
+    error: GpuDeviceLostError,
+) {
+    let error = Box::into_raw(Box::new(error));
+    let posted = unsafe {
+        PostMessageW(
+            Some(platform_window),
+            WM_GPUI_GPU_DEVICE_UNRECOVERABLE,
+            WPARAM(validation_number),
+            LPARAM(error as isize),
+        )
+    };
+    if let Err(post_error) = posted {
+        // SAFETY: the post failed, so the message (and the box's ownership)
+        // never reached the platform window; this is the only owner left.
+        let error = unsafe { Box::from_raw(error) };
+        panic!("Device lost: {error} (could not report it: {post_error})");
     }
 }

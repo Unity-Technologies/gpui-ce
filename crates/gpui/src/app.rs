@@ -1743,6 +1743,18 @@ impl App {
         self.refresh_windows();
     }
 
+    /// Registers the handler for a GPU device that was lost and could not be
+    /// rebuilt ([`GpuDeviceLostError`]), replacing the backend's panic. Only
+    /// Windows reports one. The handler runs on the main thread from the
+    /// platform's message loop and gets no `App`, so it can never re-enter an
+    /// `App` borrow; nothing can draw afterwards, so it should end the process.
+    pub fn on_gpu_device_lost<F>(&self, callback: F)
+    where
+        F: 'static + FnMut(crate::GpuDeviceLostError),
+    {
+        self.platform.on_gpu_device_lost(Box::new(callback));
+    }
+
     fn register_system_wake_handler(&self) {
         if self.system_wake_registered.replace(true) {
             return;

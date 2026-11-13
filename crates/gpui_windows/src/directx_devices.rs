@@ -171,6 +171,16 @@ fn is_software_adapter(adapter: &IDXGIAdapter1) -> bool {
         .unwrap_or(false)
 }
 
+/// The adapter's own name, such as "NVIDIA GeForce GTX 1060", when it can be
+/// read.
+pub(crate) fn adapter_name(adapter: &IDXGIAdapter1) -> Option<String> {
+    let desc = unsafe { adapter.GetDesc1() }.ok()?;
+    let name = String::from_utf16_lossy(&desc.Description)
+        .trim_matches(char::from(0))
+        .to_string();
+    (!name.is_empty()).then_some(name)
+}
+
 fn adapter_description(adapter: &IDXGIAdapter1) -> String {
     match unsafe { adapter.GetDesc1() } {
         Ok(desc) => {
