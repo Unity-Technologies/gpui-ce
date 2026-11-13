@@ -2048,7 +2048,7 @@ impl MetalRenderer {
             let y_texture = self
                 .core_video_texture_cache
                 .create_texture_from_image(
-                    image_buffer.as_concrete_TypeRef(),
+                    image_buffer,
                     None,
                     MTLPixelFormat::R8Unorm,
                     image_buffer.get_width_of_plane(0),
@@ -2059,7 +2059,7 @@ impl MetalRenderer {
             let cb_cr_texture = self
                 .core_video_texture_cache
                 .create_texture_from_image(
-                    image_buffer.as_concrete_TypeRef(),
+                    image_buffer,
                     None,
                     MTLPixelFormat::RG8Unorm,
                     image_buffer.get_width_of_plane(1),
