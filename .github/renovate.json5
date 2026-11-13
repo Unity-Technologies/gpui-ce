@@ -71,6 +71,14 @@
       matchDepNames: ['extractions/setup-just'],
       allowedVersions: '<4',
     },
+    // setup-rust-toolchain v2 sets CARGO_BUILD_WARNINGS=deny, so cargo's
+    // unused-dependency manifest warnings fail every build. Stay on v1 until
+    // those dependencies are cleaned up.
+    {
+      matchManagers: ['github-actions'],
+      matchDepNames: ['actions-rust-lang/setup-rust-toolchain'],
+      allowedVersions: '<2',
+    },
 
     // Patch-only catch-all. Not minor: most crates here are 0.x, where a
     // "minor" is a breaking change and deserves its own PR.
