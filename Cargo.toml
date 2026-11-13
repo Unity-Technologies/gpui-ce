@@ -204,7 +204,7 @@ wgpu = "30.0.1"
 # a dev-dependency instead, and its build.rs already validates every pipeline's
 # WGSL with this workspace's naga on every build.
 wgsl-rs = { version = "=0.1.0-beta.6", default-features = false }
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = [
   "objc2-core-foundation",
   "objc2-core-graphics",
