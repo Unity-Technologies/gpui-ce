@@ -45,7 +45,7 @@ core-foundation.workspace = true
 core-video.workspace = true
 metal.workspace = true
 objc2.workspace = true
-objc2-metal = "0.3"
+objc2-metal.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true, features = [
@@ -62,26 +62,26 @@ windows = { workspace = true, features = [
 wgpu = { workspace = true, features = ["webgl"] }
 wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true
-web-sys = { version = "0.3", features = ["HtmlCanvasElement"] }
+web-sys = { workspace = true, features = ["HtmlCanvasElement"] }
 js-sys.workspace = true
 
 [dev-dependencies]
-bytemuck = { version = "1", features = ["derive"] }
+bytemuck = { workspace = true, features = ["derive"] }
 criterion.workspace = true
 env_logger.workspace = true
 # Path-only, so `cargo publish` strips it: gpui_ce_platform depends on this
 # crate, and a versioned edge back would make a cycle no publish order satisfies.
 gpui_platform = { path = "../gpui_platform", package = "gpui_ce_platform", features = ["wayland", "x11", "test-support"] }
-naga = { version = "30.0.1", features = ["wgsl-in"] }
+naga = { workspace = true, features = ["wgsl-in"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-wayland-backend = { version = "0.3.15", features = [
+wayland-backend = { workspace = true, features = [
   "client_system",
   "dlopen",
   "rwh_06",
 ] }
-wayland-client = "0.31.11"
-wayland-protocols = { version = "0.32.9", features = ["client"] }
+wayland-client.workspace = true
+wayland-protocols = { workspace = true, features = ["client"] }
 
 [[example]]
 name = "custom_gpu"

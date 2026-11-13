@@ -44,9 +44,9 @@ core-graphics.workspace = true
 core-text.workspace = true
 core-video = { workspace = true, optional = true }
 ctor.workspace = true
-dispatch2 = "0.3.1"
+dispatch2.workspace = true
 etagere.workspace = true
-font-kit = { version = "0.14.1-zed", package = "zed-font-kit" }
+font-kit.workspace = true
 foreign-types.workspace = true
 futures.workspace = true
 gpui_apple.workspace = true

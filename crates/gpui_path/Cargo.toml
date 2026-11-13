@@ -15,12 +15,12 @@ path = "src/path.rs"
 test-support = []
 
 [dependencies]
-anyhow = "1.0.86"
-dunce = "1.0"
-serde = { version = "1.0.221", features = ["derive", "rc"], optional = true }
+anyhow.workspace = true
+dunce.workspace = true
+serde = { workspace = true, optional = true, features = ["derive", "rc"] }
 
 [target.'cfg(windows)'.dependencies]
-tendril = "0.5"
+tendril.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

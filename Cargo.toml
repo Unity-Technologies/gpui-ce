@@ -97,7 +97,7 @@ image = { version = "0.25.1", default-features = false, features = [
 ] }
 inventory = "0.3.19"
 itertools = "0.14.0"
-log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
+log = { version = "0.4.29", features = ["kv_unstable_serde", "serde"] }
 palette = { version = "0.7.6", features = ["serializing"] }
 parking_lot = "0.12.1"
 phf = { version = "0.13.1", features = ["macros"] }
@@ -180,9 +180,9 @@ js-sys = "0.3"
 console_error_panic_hook = "0.1.7"
 notify-rust = "4"
 heck = "0.5"
-proc-macro2 = "1.0.93"
-syn = { version = "2.0.101", features = ["full", "extra-traits", "visit-mut"] }
-quote = "1.0.9"
+proc-macro2 = "1.0.101"
+syn = { version = "2.0.117", features = ["full", "extra-traits", "visit-mut"] }
+quote = "1.0.41"
 ashpd = { version = "0.14", default-features = false, features = [
   "async-io",
   "notification",
@@ -276,6 +276,71 @@ gpui_wgpu = { path = "./crates/gpui_wgpu/", version = "=0.4.0-unity.20261102", r
 gpui_macros = { path = "./crates/gpui_macros/", version = "=0.4.0-unity.20261102", registry = "unity", package = "gpui_ce_macros" }
 gpui_shared_string = { path = "./crates/gpui_shared_string/", version = "=0.4.0-unity.20261102", registry = "unity", package = "gpui_ce_shared_string" }
 gpui_tokio = { path = "./crates/gpui_tokio/", version = "=0.4.0-unity.20261102", registry = "unity", package = "gpui_ce_tokio" }
+
+# Third-party crates that were pinned per member. Versions live here; a member
+# takes one with `name.workspace = true` and adds only its own features.
+as-raw-xcb-connection = "1"
+async-fs = "2.1"
+async_zip = "0.0.18"
+bindgen = "0.72"
+bytemuck = "1"
+calloop = "0.14.3"
+calloop-wayland-source = "0.4.1"
+command-fds = "0.3.1"
+dioxus-devtools = "=0.7.10"
+dirs = "6.0"
+dispatch2 = "0.3.1"
+embed-resource = "3.0"
+filedescriptor = "0.8.2"
+font-kit = { package = "zed-font-kit", version = "0.14.1-zed" }
+futures-lite = "2.6.1"
+getrandom = "0.4.3"
+globset = "0.4"
+indexmap = "2"
+lyon = "1.0"
+memfd = "0.6.5"
+naga = "30.0.1"
+nix = "0.29"
+num_cpus = "1.13"
+objc2-metal = "0.3"
+oo7 = { version = "0.7", default-features = false }
+open = "5.2.0"
+parking = "2.0.0"
+percent-encoding = "2.3.2"
+pin-project = "1.1.10"
+pretty_assertions = "1.3.0"
+rayon = "1.11.0"
+resvg = { version = "0.50.0", default-features = false }
+rust-embed = "8.12"
+rustc-hash = "2"
+seahash = "4.1"
+serde_json_lenient = "0.2"
+shlex = "1.3.0"
+smol_str = "0.3.6"
+spin = "0.10.0"
+subsecond = "=0.7.10"
+taffy = "=0.13.0"
+take-until = "0.2.0"
+tendril = "0.5"
+unicase = "2.6"
+usvg = { version = "0.50.0", default-features = false }
+waker-fn = "1.2.0"
+walkdir = "2.5"
+wasm_thread = "0.3.3"
+wayland-backend = "0.3.15"
+wayland-client = "0.31.11"
+wayland-cursor = "0.31.11"
+wayland-protocols = "0.32.9"
+wayland-protocols-plasma = "0.3.9"
+wayland-protocols-wlr = "0.3.9"
+web-sys = "0.3"
+which = "8.0.6"
+windows-numerics = "0.3"
+windows-registry = "0.6.1"
+x11-clipboard = "0.9.3"
+x11rb = "0.13.1"
+xim = { package = "zed-xim", version = "0.4.0-zed" }
+xkbcommon = { version = "0.8.0", default-features = false }
 
 [workspace.dependencies.windows]
 version = "0.62.2"

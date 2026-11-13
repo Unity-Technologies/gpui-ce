@@ -37,8 +37,8 @@ js-sys.workspace = true
 raw-window-handle.workspace = true
 # The crates.io release contains the current wasm-bindgen-compatible worker
 # bootstrap, so consumers do not need a Git dependency.
-wasm_thread = { version = "0.3.3", features = ["es_modules"], optional = true }
-web-sys = { version = "0.3", features = [
+wasm_thread = { workspace = true, optional = true, features = ["es_modules"] }
+web-sys = { workspace = true, features = [
   "console",
   "Blob",
   "Clipboard",

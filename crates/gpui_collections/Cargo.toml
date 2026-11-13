@@ -16,6 +16,6 @@ doctest = false
 test-support = []
 
 [dependencies]
-indexmap = { version = "2", features = ["serde"] }
-rustc-hash = "2"
+indexmap = { workspace = true, features = ["serde"] }
+rustc-hash.workspace = true
 gpui_util = { package = "gpui_ce_util", version = "=0.4.0-unity.20261102", registry = "unity", path = "../gpui_ce_util" }
