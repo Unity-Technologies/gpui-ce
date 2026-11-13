@@ -300,7 +300,7 @@ indexmap = "2"
 lyon = "1.0"
 memfd = "0.6.5"
 naga = "30.0.1"
-nix = "0.29"
+nix = "0.31"
 num_cpus = "1.13"
 objc2-metal = "0.3"
 oo7 = { version = "0.7", default-features = false }
