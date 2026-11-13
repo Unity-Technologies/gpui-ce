@@ -87,6 +87,9 @@ pub async fn extract_seekable_zip<R: AsyncRead + AsyncSeek + Unpin>(
     destination: &Path,
     reader: R,
 ) -> Result<()> {
+    // async_zip 0.0.19 deprecates `seek` in favour of `read1` without changing it.
+    // Moving extraction of untrusted archives to the new reader is its own change.
+    #[allow(deprecated)]
     let mut reader = read::seek::ZipFileReader::new(BufReader::new(reader))
         .await
         .context("reading the zip archive")?;

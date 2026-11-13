@@ -50,7 +50,7 @@ backtrace = "0.3"
 bitflags = "2.6.0"
 collections = { path = "crates/gpui_collections", version = "=0.4.0-unity.20261112", registry = "unity", package = "gpui_ce_collections" }
 dunce = "1.0"
-etagere = "0.2"
+etagere = "0.3"
 fontique = { version = "0.12.0", default-features = false }
 parley = { version = "0.12", default-features = false, features = ["std"] }
 linebender_resource_handle = "0.1.1"
@@ -96,11 +96,11 @@ image = { version = "0.25.1", default-features = false, features = [
   "webp",
 ] }
 inventory = "0.3.19"
-itertools = "0.14.0"
+itertools = "0.15.0"
 log = { version = "0.4.29", features = ["kv_unstable_serde", "serde"] }
 palette = { version = "0.7.6", features = ["serializing"] }
-parking_lot = "0.12.1"
-phf = { version = "0.13.1", features = ["macros"] }
+parking_lot = "0.13.0"
+phf = { version = "0.14.0", features = ["macros"] }
 postage = { version = "0.5", features = ["futures-traits"] }
 proptest = { version = "1.10", features = ["attr-macro"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -116,24 +116,24 @@ slotmap = "1.0.6"
 smallvec = { version = "1.6", features = ["union", "const_new"] }
 async-channel = "2.5.0"
 stacksafe = "1.0"
-strum = { version = "0.27.2", features = ["derive"] }
+strum = { version = "0.28.0", features = ["derive"] }
 sum_tree = { path = "crates/gpui_sum_tree", version = "=0.4.0-unity.20261112", registry = "unity", package = "gpui_ce_sum_tree" }
 thiserror = "2.0.12"
 tracing = { version = "0.1.44", features = ["attributes"] }
 hdrhistogram = "7"
-pollster = "0.4.0"
+pollster = "1.0.0"
 url = "2.2"
 uuid = { version = "1.1.2", features = ["v4", "v5", "v7", "serde"] }
 web-time = "1.1.0"
 skrifa = "0.44.0"
 block = "0.1"
 block2 = "0.6"
-cbindgen = { version = "0.28.0", default-features = false }
+cbindgen = { version = "0.29.0", default-features = false }
 core-foundation = "0.10"
 core-foundation-sys = "0.8.6"
 core-graphics = "0.24"
 core-text = "21"
-core-video = { version = "0.5.2", features = ["metal"] }
+core-video = { version = "0.6.0", features = ["metal"] }
 foreign-types = "0.5"
 media = { path = "crates/gpui_media", version = "=0.4.0-unity.20261112", registry = "unity", package = "gpui_ce_media" }
 objc = "0.2"
@@ -168,7 +168,7 @@ objc2-foundation = { version = "=0.3.2", default-features = false, features = [
   "std",
 ] }
 objc2-user-notifications = "0.3"
-mach2 = "0.5"
+mach2 = "0.7"
 metal = "0.33"
 windows-capture = "2.0.1"
 env_logger = "0.11"
@@ -181,7 +181,7 @@ console_error_panic_hook = "0.1.7"
 notify-rust = "4"
 heck = "0.5"
 proc-macro2 = "1.0.101"
-syn = { version = "2.0.117", features = ["full", "extra-traits", "visit-mut"] }
+syn = { version = "3.0.0", features = ["full", "extra-traits", "visit-mut"] }
 quote = "1.0.41"
 ashpd = { version = "0.14", default-features = false, features = [
   "async-io",
@@ -204,7 +204,7 @@ wgpu = "30.0.1"
 # a dev-dependency instead, and its build.rs already validates every pipeline's
 # WGSL with this workspace's naga on every build.
 wgsl-rs = { version = "=0.1.0-beta.6", default-features = false }
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = [
   "objc2-core-foundation",
   "objc2-core-graphics",
@@ -281,14 +281,14 @@ gpui_tokio = { path = "./crates/gpui_tokio/", version = "=0.4.0-unity.20261112",
 # takes one with `name.workspace = true` and adds only its own features.
 as-raw-xcb-connection = "1"
 async-fs = "2.1"
-async_zip = "0.0.18"
+async_zip = "0.0.19"
 bindgen = "0.72"
 bytemuck = "1"
 calloop = "0.14.3"
 calloop-wayland-source = "0.4.1"
 command-fds = "0.3.1"
 dioxus-devtools = "=0.7.10"
-dirs = "6.0"
+dirs = "7.0"
 dispatch2 = "0.3.1"
 embed-resource = "3.0"
 filedescriptor = "0.8.2"
@@ -300,7 +300,7 @@ indexmap = "2"
 lyon = "1.0"
 memfd = "0.6.5"
 naga = "30.0.1"
-nix = "0.29"
+nix = "0.31"
 num_cpus = "1.13"
 objc2-metal = "0.3"
 oo7 = { version = "0.7", default-features = false }
@@ -315,12 +315,12 @@ rust-embed = "8.12"
 rustc-hash = "2"
 seahash = "4.1"
 serde_json_lenient = "0.2"
-shlex = "1.3.0"
+shlex = "2.0.0"
 smol_str = "0.3.6"
-spin = "0.10.0"
+spin = "0.12.0"
 subsecond = "=0.7.10"
 taffy = "=0.13.0"
-take-until = "0.2.0"
+take-until = "0.3.0"
 tendril = "0.5"
 unicase = "2.6"
 usvg = { version = "0.50.0", default-features = false }
@@ -336,11 +336,11 @@ wayland-protocols-wlr = "0.3.9"
 web-sys = "0.3"
 which = "8.0.6"
 windows-numerics = "0.3"
-windows-registry = "0.6.1"
+windows-registry = "0.100.0"
 x11-clipboard = "0.9.3"
 x11rb = "0.13.1"
 xim = { package = "zed-xim", version = "0.4.0-zed" }
-xkbcommon = { version = "0.8.0", default-features = false }
+xkbcommon = { version = "0.9.0", default-features = false }
 
 [workspace.dependencies.windows]
 version = "0.62.2"
