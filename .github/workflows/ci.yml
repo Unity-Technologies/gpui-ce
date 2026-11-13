@@ -1,96 +1,117 @@
-# Main CI workflow
+# Main CI workflow for Unity's fork. Branch protection requires one check,
+# `CI Required`, which fails if any job below failed or was skipped when it
+# should have run.
 name: CI
+
+on:
+  # Pushes to the protected Unity branches seed the Rust caches that pull
+  # requests restore. `main` only mirrors upstream, so it runs nothing.
+  push:
+    branches: [unity/hub-consolidated, unity/hub-4.0]
+  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-on:
-  push:
-    branches: [main, "v[0-9]+.[0-9]+.x"]
-  pull_request:
-    branches: ["**"]
-
+# A new push to a pull request cancels its older run. Branch pushes each keep
+# their own run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.ref_name == 'main' && github.sha || 'anysha' }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
+  # setup-rust-toolchain v2 defaults this to `deny`, which also fails the build
+  # on cargo 1.100's manifest lints (unused dependencies, missing `[lints]`) in
+  # upstream crates. Jobs that compile pass `rustflags: -D warnings` instead,
+  # as v1 did, so rustc warnings still fail on every platform.
+  CARGO_BUILD_WARNINGS: warn
+  # Only branch pushes save Rust caches. Each PR saving its own ~1 GB entry
+  # filled the 10 GB repo budget, and no other PR could read them anyway.
+  SAVE_RUST_CACHE: ${{ github.event_name == 'push' }}
 
 jobs:
-  # Change detection
+  # Decides whether the Rust jobs run. A pull request skips them only when
+  # every file it changes is documentation or repo metadata. A change to CI
+  # itself (this file, the justfile, toolchain config) runs everything.
   orchestrate:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
-      run_tests: ${{ steps.filter.outputs.run_tests }}
-      run_style: ${{ steps.filter.outputs.run_style }}
+      rust: ${{ steps.filter.outputs.rust }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
-          fetch-depth: ${{ github.ref == 'refs/heads/main' && 2 || 350 }}
+          # The PR merge commit's first parent is the base branch tip.
+          fetch-depth: 2
       - id: filter
+        env:
+          EVENT: ${{ github.event_name }}
         run: |
-          if [ -z "$GITHUB_BASE_REF" ]; then
-            COMPARE_REV="$(git rev-parse HEAD~1)"
-          else
-            git fetch --update-head-ok origin "$GITHUB_BASE_REF" --depth=350 || true
-            COMPARE_REV="$(git merge-base "origin/${GITHUB_BASE_REF}" HEAD)"
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-          CHANGED_FILES="$(git diff --name-only "$COMPARE_REV" "$GITHUB_SHA")"
-
-          check_pattern() {
-            local name="$1" pattern="$2" invert="${3:-false}"
-            if [ "$invert" = "true" ]; then
-              echo "$CHANGED_FILES" | grep -qvE "$pattern" && echo "${name}=true" >> "$GITHUB_OUTPUT" || echo "${name}=false" >> "$GITHUB_OUTPUT"
-            else
-              echo "$CHANGED_FILES" | grep -qE  "$pattern" && echo "${name}=true" >> "$GITHUB_OUTPUT" || echo "${name}=false" >> "$GITHUB_OUTPUT"
-            fi
-          }
-
-          check_pattern "run_tests" '^(docs/|\.github/(ISSUE_TEMPLATE|workflows/)|README\.md|CHANGELOG\.md)' true
-          check_pattern "run_style" '\.(rs|toml)$|rust-toolchain\.toml|\.cargo/|clippy\.toml|typos\.toml'
+          CHANGED="$(git diff --name-only HEAD^1 HEAD)"
+          echo "$CHANGED"
+          DOCS_ONLY='^(docs/|[^/]+\.md$|\.github/(CODEOWNERS|PULL_REQUEST_TEMPLATE\.md|DISCUSSION_TEMPLATE/|renovate\.json5$|VOUCHED\.td$|issue-unvouched-message$|llmgenerated-response-message$|workflows/audit\.yml$)|renovate\.json$)'
+          if echo "$CHANGED" | grep -qvE "$DOCS_ONLY"; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "rust=false" >> "$GITHUB_OUTPUT"
+          fi
 
   # Formatting
   fmt:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: [orchestrate]
-    if: needs.orchestrate.outputs.run_style == 'true'
+    if: needs.orchestrate.outputs.rust == 'true'
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           components: rustfmt
+          cache: false
       - uses: hustcer/setup-nu@v3
-      - uses: extractions/setup-just@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
       - run: just fmt-check
 
-  # Clippy
+  # Clippy. `just clippy` passes `-D warnings` itself.
   clippy:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [orchestrate]
-    if: needs.orchestrate.outputs.run_style == 'true'
+    if: needs.orchestrate.outputs.rust == 'true'
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+          cache-save-if: ${{ env.SAVE_RUST_CACHE }}
+          rustflags: -D warnings
       - name: Install system deps
         run: |
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb-shape0-dev libxcb-xfixes0-dev libfontconfig-dev
       - uses: hustcer/setup-nu@v3
-      - uses: extractions/setup-just@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
       - run: just clippy
 
   # Spell check
   typos:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v5
-      - uses: crate-ci/typos@v1.47.2
+      - uses: actions/checkout@v7
+      - uses: crate-ci/typos@v1.52.1
         with:
           config: typos.toml
 
@@ -98,9 +119,12 @@ jobs:
   # from upstream releases and should be reviewed, not block unrelated work.
   lockfile:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache: false
       - name: Check root lockfile freshness (warning only)
         shell: bash
         run: |
@@ -115,61 +139,76 @@ jobs:
             warn "Cargo.lock changed after cargo update; refresh it in a dedicated dependency update."
           fi
 
-  # Unused dependencies
+  # Unused dependencies. cargo-machete reads sources and builds nothing.
   machete:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs: [orchestrate]
-    if: needs.orchestrate.outputs.run_style == 'true'
+    if: needs.orchestrate.outputs.rust == 'true'
     steps:
-      - uses: actions/checkout@v5
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@cargo-machete
+      - uses: actions/checkout@v7
       - uses: hustcer/setup-nu@v3
-      - uses: extractions/setup-just@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,cargo-machete
       - run: just machete
 
-  # MSRV
+  # MSRV. Keep `toolchain:` equal to `rust-version` in crates/gpui/Cargo.toml
+  # and `msrv` in the justfile.
   msrv:
-    if: github.event_name == 'pull_request' && needs.orchestrate.outputs.run_style == 'true'
-    needs: [orchestrate]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [orchestrate]
+    if: needs.orchestrate.outputs.rust == 'true'
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           toolchain: 1.95.0
-      - uses: Swatinem/rust-cache@v2
+          cache-save-if: ${{ env.SAVE_RUST_CACHE }}
+          rustflags: -D warnings
       - name: Install system deps
         run: |
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb-shape0-dev libxcb-xfixes0-dev libfontconfig-dev
       - uses: hustcer/setup-nu@v3
-      - uses: extractions/setup-just@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
       - run: just msrv-check
 
   # WASM target (nightly + atomics)
   check-wasm:
-    if: github.event_name == 'pull_request' && needs.orchestrate.outputs.run_style == 'true'
-    needs: [orchestrate]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [orchestrate]
+    if: needs.orchestrate.outputs.rust == 'true'
     steps:
-      - uses: actions/checkout@v5
-      - name: Install nightly toolchain with rust-src and WASM target
-        run: rustup toolchain install nightly --component rust-src --target wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: nightly
+          components: rust-src
+          target: wasm32-unknown-unknown
+          cache-save-if: ${{ env.SAVE_RUST_CACHE }}
       - uses: hustcer/setup-nu@v3
-      - uses: extractions/setup-just@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
       - run: just check-wasm-atomics
 
   # Linux build + test
   test-linux:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     needs: [orchestrate]
-    if: needs.orchestrate.outputs.run_tests == 'true'
+    if: needs.orchestrate.outputs.rust == 'true'
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache-save-if: ${{ env.SAVE_RUST_CACHE }}
+          rustflags: -D warnings
       - name: Install system deps
         run: |
           sudo apt-get update
@@ -180,7 +219,9 @@ jobs:
             libxkbcommon-x11-dev libegl1-mesa-dev \
             libgles2-mesa-dev libglib2.0-dev libfontconfig-dev
       - uses: hustcer/setup-nu@v3
-      - uses: extractions/setup-just@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
       - run: just build
       - run: just test
       - run: just test-doc
@@ -190,14 +231,19 @@ jobs:
   # macOS build + test
   test-mac:
     runs-on: macos-latest
+    timeout-minutes: 45
     needs: [orchestrate]
-    if: needs.orchestrate.outputs.run_tests == 'true'
+    if: needs.orchestrate.outputs.rust == 'true'
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache-save-if: ${{ env.SAVE_RUST_CACHE }}
+          rustflags: -D warnings
       - uses: hustcer/setup-nu@v3
-      - uses: extractions/setup-just@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
       - run: just build
       - run: just test --features gpui_ce_wgpu/test-support
       - run: just test-doc
@@ -209,14 +255,19 @@ jobs:
   # Windows build + test
   test-windows:
     runs-on: windows-latest
+    timeout-minutes: 60
     needs: [orchestrate]
-    if: needs.orchestrate.outputs.run_tests == 'true'
+    if: needs.orchestrate.outputs.rust == 'true'
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          cache-save-if: ${{ env.SAVE_RUST_CACHE }}
+          rustflags: -D warnings
       - uses: hustcer/setup-nu@v3
-      - uses: extractions/setup-just@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
       - run: just build
       - run: just test
       - run: just test-doc
@@ -228,18 +279,58 @@ jobs:
   # Examples
   check-examples:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [orchestrate]
-    if: github.event_name == 'pull_request' && needs.orchestrate.outputs.run_tests == 'true'
+    if: needs.orchestrate.outputs.rust == 'true'
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          target: wasm32-unknown-unknown
+          cache-save-if: ${{ env.SAVE_RUST_CACHE }}
+          rustflags: -D warnings
       - name: Install system deps
         run: |
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb-shape0-dev libxcb-xfixes0-dev libfontconfig-dev
-      - name: Add WASM target
-        run: rustup target add wasm32-unknown-unknown
       - uses: hustcer/setup-nu@v3
-      - uses: extractions/setup-just@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
       - run: just check-examples
+
+  # The one check branch protection requires. Job names can change without
+  # touching the ruleset. A skipped job passes only when `orchestrate` chose to
+  # skip the Rust jobs; a Rust job that should have run and didn't fails it.
+  ci-required:
+    name: CI Required
+    if: always()
+    needs:
+      - orchestrate
+      - fmt
+      - clippy
+      - typos
+      - lockfile
+      - machete
+      - msrv
+      - check-wasm
+      - test-linux
+      - test-mac
+      - test-windows
+      - check-examples
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          NEEDS: ${{ toJSON(needs) }}
+          RUST: ${{ needs.orchestrate.outputs.rust }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          allowed='["success"]'
+          if [ "$RUST" = "false" ]; then allowed='["success","skipped"]'; fi
+          bad="$(echo "$NEEDS" | jq -r --argjson ok "$allowed" \
+            '[to_entries[] | select(.value.result as $r | $ok | index($r) | not) | .key] | join(", ")')"
+          if [ -n "$bad" ]; then
+            echo "::error title=CI Required::Not successful: $bad"
+            exit 1
+          fi
