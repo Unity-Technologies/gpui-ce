@@ -181,7 +181,7 @@ console_error_panic_hook = "0.1.7"
 notify-rust = "4"
 heck = "0.5"
 proc-macro2 = "1.0.101"
-syn = { version = "2.0.117", features = ["full", "extra-traits", "visit-mut"] }
+syn = { version = "3.0.0", features = ["full", "extra-traits", "visit-mut"] }
 quote = "1.0.41"
 ashpd = { version = "0.14", default-features = false, features = [
   "async-io",
