@@ -56,6 +56,29 @@
       groupName: 'github-actions',
       matchManagers: ['github-actions'],
     },
+    // The msrv job's `toolchain:` is the minimum Rust version gpui supports
+    // (`rust-version` in crates/gpui/Cargo.toml). Raising it would stop
+    // checking that minimum, so it moves only with rust-version, by hand.
+    {
+      matchManagers: ['github-actions'],
+      matchDepNames: ['rust'],
+      enabled: false,
+    },
+    // setup-just v4 runs extractions/setup-crate, which the org's Actions
+    // allowlist does not include, so every job using it fails at setup.
+    {
+      matchManagers: ['github-actions'],
+      matchDepNames: ['extractions/setup-just'],
+      allowedVersions: '<4',
+    },
+    // setup-rust-toolchain v2 sets CARGO_BUILD_WARNINGS=deny, so cargo's
+    // unused-dependency manifest warnings fail every build. Stay on v1 until
+    // those dependencies are cleaned up.
+    {
+      matchManagers: ['github-actions'],
+      matchDepNames: ['actions-rust-lang/setup-rust-toolchain'],
+      allowedVersions: '<2',
+    },
 
     // Patch-only catch-all. Not minor: most crates here are 0.x, where a
     // "minor" is a breaking change and deserves its own PR.
