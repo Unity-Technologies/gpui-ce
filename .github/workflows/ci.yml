@@ -29,6 +29,10 @@ env:
   # upstream crates. Jobs that compile pass `rustflags: -D warnings` instead,
   # as v1 did, so rustc warnings still fail on every platform.
   CARGO_BUILD_WARNINGS: warn
+  # This release line stays on the stable Rust it was last green on. Rust 1.100
+  # fails fmt, clippy and two Windows path tests here; unity/hub-consolidated
+  # fixed those in its crates (gpui-ce#97). Unpin after backporting that.
+  RUST_TOOLCHAIN: 1.99.1
   # Only branch pushes save Rust caches. Each PR saving its own ~1 GB entry
   # filled the 10 GB repo budget, and no other PR could read them anyway.
   SAVE_RUST_CACHE: ${{ github.event_name == 'push' }}
@@ -74,6 +78,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt
           cache: false
       - uses: hustcer/setup-nu@v3
@@ -92,6 +97,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
           cache-save-if: ${{ env.SAVE_RUST_CACHE }}
           rustflags: -D warnings
@@ -124,6 +130,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           cache: false
       - name: Check root lockfile freshness (warning only)
         shell: bash
@@ -207,6 +214,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           cache-save-if: ${{ env.SAVE_RUST_CACHE }}
           rustflags: -D warnings
       - name: Install system deps
@@ -238,6 +246,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           cache-save-if: ${{ env.SAVE_RUST_CACHE }}
           rustflags: -D warnings
       - uses: hustcer/setup-nu@v3
@@ -262,6 +271,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           cache-save-if: ${{ env.SAVE_RUST_CACHE }}
           rustflags: -D warnings
       - uses: hustcer/setup-nu@v3
@@ -286,6 +296,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           target: wasm32-unknown-unknown
           cache-save-if: ${{ env.SAVE_RUST_CACHE }}
           rustflags: -D warnings
