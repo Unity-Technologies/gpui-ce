@@ -63,7 +63,7 @@ jobs:
         with:
           components: rustfmt
       - uses: hustcer/setup-nu@v3
-      - uses: extractions/setup-just@v4
+      - uses: extractions/setup-just@v2
       - run: just fmt-check
 
   # Clippy
@@ -82,7 +82,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb-shape0-dev libxcb-xfixes0-dev libfontconfig-dev
       - uses: hustcer/setup-nu@v3
-      - uses: extractions/setup-just@v4
+      - uses: extractions/setup-just@v2
       - run: just clippy
 
   # Spell check
@@ -125,7 +125,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-machete
       - uses: hustcer/setup-nu@v3
-      - uses: extractions/setup-just@v4
+      - uses: extractions/setup-just@v2
       - run: just machete
 
   # MSRV
@@ -144,7 +144,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb-shape0-dev libxcb-xfixes0-dev libfontconfig-dev
       - uses: hustcer/setup-nu@v3
-      - uses: extractions/setup-just@v4
+      - uses: extractions/setup-just@v2
       - run: just msrv-check
 
   # WASM target (nightly + atomics)
@@ -158,7 +158,7 @@ jobs:
         run: rustup toolchain install nightly --component rust-src --target wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - uses: hustcer/setup-nu@v3
-      - uses: extractions/setup-just@v4
+      - uses: extractions/setup-just@v2
       - run: just check-wasm-atomics
 
   # Linux build + test
@@ -180,7 +180,7 @@ jobs:
             libxkbcommon-x11-dev libegl1-mesa-dev \
             libgles2-mesa-dev libglib2.0-dev libfontconfig-dev
       - uses: hustcer/setup-nu@v3
-      - uses: extractions/setup-just@v4
+      - uses: extractions/setup-just@v2
       - run: just build
       - run: just test
       - run: just test-doc
@@ -199,7 +199,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
       - uses: Swatinem/rust-cache@v2
       - uses: hustcer/setup-nu@v3
-      - uses: extractions/setup-just@v4
+      - uses: extractions/setup-just@v2
       - run: just build
       - run: just test --features gpui_ce_wgpu/test-support
       - run: just test-doc
@@ -218,7 +218,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
       - uses: Swatinem/rust-cache@v2
       - uses: hustcer/setup-nu@v3
-      - uses: extractions/setup-just@v4
+      - uses: extractions/setup-just@v2
       - run: just build
       - run: just test
       - run: just test-doc
@@ -243,5 +243,5 @@ jobs:
       - name: Add WASM target
         run: rustup target add wasm32-unknown-unknown
       - uses: hustcer/setup-nu@v3
-      - uses: extractions/setup-just@v4
+      - uses: extractions/setup-just@v2
       - run: just check-examples

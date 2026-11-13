@@ -64,6 +64,13 @@
       matchDepNames: ['rust'],
       enabled: false,
     },
+    // setup-just v4 runs extractions/setup-crate, which the org's Actions
+    // allowlist does not include, so every job using it fails at setup.
+    {
+      matchManagers: ['github-actions'],
+      matchDepNames: ['extractions/setup-just'],
+      allowedVersions: '<4',
+    },
 
     // Patch-only catch-all. Not minor: most crates here are 0.x, where a
     // "minor" is a breaking change and deserves its own PR.

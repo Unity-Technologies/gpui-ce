@@ -36,7 +36,7 @@ jobs:
           fetch-depth: 0
       - uses: actions-rust-lang/setup-rust-toolchain@v2
       - uses: hustcer/setup-nu@v3
-      - uses: extractions/setup-just@v4
+      - uses: extractions/setup-just@v2
       - id: version
         name: Allocate the next crates.io alpha version
         run: just alpha-version "$HEAD_SHA"
@@ -54,7 +54,7 @@ jobs:
           fetch-depth: 0
       - uses: actions-rust-lang/setup-rust-toolchain@v2
       - uses: hustcer/setup-nu@v3
-      - uses: extractions/setup-just@v4
+      - uses: extractions/setup-just@v2
       - name: Publish every crate in dependency order
         run: just alpha-publish "$VERSION" "$HEAD_SHA"
         env:
@@ -73,7 +73,7 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
       - uses: actions-rust-lang/setup-rust-toolchain@v2
       - uses: hustcer/setup-nu@v3
-      - uses: extractions/setup-just@v4
+      - uses: extractions/setup-just@v2
       - name: Install package build dependencies
         run: |
           sudo apt-get update
