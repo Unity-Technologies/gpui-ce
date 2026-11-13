@@ -340,7 +340,7 @@ windows-registry = "0.6.1"
 x11-clipboard = "0.9.3"
 x11rb = "0.13.1"
 xim = { package = "zed-xim", version = "0.4.0-zed" }
-xkbcommon = { version = "0.8.0", default-features = false }
+xkbcommon = { version = "0.9.0", default-features = false }
 
 [workspace.dependencies.windows]
 version = "0.62.2"
