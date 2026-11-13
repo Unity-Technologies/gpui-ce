@@ -56,6 +56,14 @@
       groupName: 'github-actions',
       matchManagers: ['github-actions'],
     },
+    // The msrv job's `toolchain:` is the minimum Rust version gpui supports
+    // (`rust-version` in crates/gpui/Cargo.toml). Raising it would stop
+    // checking that minimum, so it moves only with rust-version, by hand.
+    {
+      matchManagers: ['github-actions'],
+      matchDepNames: ['rust'],
+      enabled: false,
+    },
 
     // Patch-only catch-all. Not minor: most crates here are 0.x, where a
     // "minor" is a breaking change and deserves its own PR.
