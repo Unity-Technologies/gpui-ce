@@ -1,0 +1,6 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "This repo is a fork, and Renovate skips forks unless forkProcessing is set in this root renovate.json (the only file name it reads for that). The real config lives in .github/renovate.json5.",
+  "extends": ["local>Unity-Technologies/gpui-ce//.github/renovate.json5"],
+  "forkProcessing": "enabled"
+}
