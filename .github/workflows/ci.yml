@@ -24,6 +24,10 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
+  # setup-rust-toolchain v2 defaults this to `deny`, which also fails the build
+  # on cargo 1.100's manifest lints (unused dependencies, missing `[lints]`) in
+  # upstream crates. Clippy's `-D warnings` stays the warnings gate.
+  CARGO_BUILD_WARNINGS: warn
   # Only branch pushes save Rust caches. Each PR saving its own ~1 GB entry
   # filled the 10 GB repo budget, and no other PR could read them anyway.
   SAVE_RUST_CACHE: ${{ github.event_name == 'push' }}
@@ -183,9 +187,6 @@ jobs:
           toolchain: nightly
           components: rust-src
           target: wasm32-unknown-unknown
-          # Nightly warnings come and go with the toolchain; clippy is the
-          # warnings gate.
-          build-warnings: warn
           cache-save-if: ${{ env.SAVE_RUST_CACHE }}
       - uses: hustcer/setup-nu@v3
       - uses: taiki-e/install-action@v2
