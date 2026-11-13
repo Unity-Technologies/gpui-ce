@@ -12,7 +12,7 @@ path = "src/media.rs"
 doctest = false
 
 [dependencies]
-anyhow = "1.0.86"
+anyhow.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation.workspace = true
@@ -24,4 +24,4 @@ objc.workspace = true
 # build.rs only generates bindings on macOS, but it checks the target at run
 # time, so every host compiles it and needs bindgen.
 [build-dependencies]
-bindgen = "0.72"
+bindgen.workspace = true

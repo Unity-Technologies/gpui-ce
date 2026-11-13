@@ -54,7 +54,7 @@ x11 = [
 accesskit.workspace = true
 accesskit_unix.workspace = true
 anyhow.workspace = true
-bytemuck = "1"
+bytemuck.workspace = true
 collections.workspace = true
 image.workspace = true
 futures.workspace = true
@@ -74,48 +74,45 @@ url.workspace = true
 uuid.workspace = true
 
 # Always used
-oo7 = { version = "0.7", default-features = false, features = [
-  "async-std",
-  "native_crypto",
-] }
-calloop = "0.14.3"
+oo7 = { workspace = true, features = ["async-std", "native_crypto"] }
+calloop.workspace = true
 notify-rust.workspace = true
 raw-window-handle.workspace = true
 
 # Used in both windowing options
 ashpd = { workspace = true, optional = true }
 bitflags = { workspace = true, optional = true }
-filedescriptor = { version = "0.8.2", optional = true }
-open = { version = "5.2.0", optional = true }
-xkbcommon = { version = "0.8.0", default-features = false, optional = true }
+filedescriptor = { workspace = true, optional = true }
+open = { workspace = true, optional = true }
+xkbcommon = { workspace = true, optional = true }
 
 # Screen capture
 
 # Wayland
-calloop-wayland-source = { version = "0.4.1", optional = true }
-memfd = { version = "0.6.5", optional = true }
-wayland-backend = { version = "0.3.15", features = [
+calloop-wayland-source = { workspace = true, optional = true }
+memfd = { workspace = true, optional = true }
+wayland-backend = { workspace = true, optional = true, features = [
   "client_system",
   "dlopen",
   "log",
-], optional = true }
-wayland-client = { version = "0.31.11", optional = true }
-wayland-cursor = { version = "0.31.11", optional = true }
-wayland-protocols = { version = "0.32.9", features = [
+] }
+wayland-client = { workspace = true, optional = true }
+wayland-cursor = { workspace = true, optional = true }
+wayland-protocols = { workspace = true, optional = true, features = [
   "client",
   "staging",
   "unstable",
-], optional = true }
-wayland-protocols-plasma = { version = "0.3.9", features = [
+] }
+wayland-protocols-plasma = { workspace = true, optional = true, features = [
   "client",
-], optional = true }
-wayland-protocols-wlr = { version = "0.3.9", features = [
+] }
+wayland-protocols-wlr = { workspace = true, optional = true, features = [
   "client",
-], optional = true }
+] }
 
 # X11
-as-raw-xcb-connection = { version = "1", optional = true }
-x11rb = { version = "0.13.1", features = [
+as-raw-xcb-connection = { workspace = true, optional = true }
+x11rb = { workspace = true, optional = true, features = [
   "allow-unsafe-code",
   "xkb",
   "randr",
@@ -124,12 +121,12 @@ x11rb = { version = "0.13.1", features = [
   "resource_manager",
   "sync",
   "dri3",
-], optional = true }
-xim = { version = "0.4.0-zed", package = "zed-xim", features = [
+] }
+xim = { workspace = true, optional = true, features = [
   "x11rb-xcb",
   "x11rb-client",
-], optional = true }
-x11-clipboard = { version = "0.9.3", optional = true }
+] }
+x11-clipboard = { workspace = true, optional = true }
 
 [package.metadata.cargo-shear]
 ignored = ["bitflags", "scap", "x11-clipboard"]

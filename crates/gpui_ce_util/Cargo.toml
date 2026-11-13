@@ -12,8 +12,8 @@ name = "gpui_util"
 path = "src/lib.rs"
 
 [dependencies]
-log = { version = "0.4.16", features = ["kv_unstable_serde", "serde"] }
-anyhow = "1.0.86"
+log = { workspace = true, features = ["kv_unstable_serde", "serde"] }
+anyhow.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
-which = "8.0.6"
+which.workspace = true
