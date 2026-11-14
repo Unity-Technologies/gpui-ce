@@ -1933,6 +1933,81 @@ mod tests {
         Ok(())
     }
 
+    /// Another process or an injected DLL can send `WM_USER + 7` to a gpui window. The window
+    /// must not read that message's lparam as its `DirectXDevices` pointer unless it carries the
+    /// app's validation number: a null lparam faults at the `device` field, a random one corrupts
+    /// memory.
+    #[test]
+    fn a_foreign_device_lost_message_is_ignored() -> anyhow::Result<()> {
+        use super::WindowsPlatform;
+        use crate::{WM_GPUI_GPU_DEVICE_LOST, WindowsWindow};
+        use gpui::{
+            AnyWindowHandle, Bounds, PlatformWindow as _, WindowHandle, WindowId, WindowKind,
+            WindowParams, point, px, size,
+        };
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{DestroyWindow, SendMessageW};
+
+        struct Root;
+        impl gpui::Render for Root {
+            fn render(
+                &mut self,
+                _: &mut gpui::Window,
+                _: &mut gpui::Context<Self>,
+            ) -> impl gpui::IntoElement {
+                gpui::Empty
+            }
+        }
+
+        let platform = WindowsPlatform::new(false)?;
+        let validation_number = platform.inner.validation_number;
+        let handle: AnyWindowHandle = WindowHandle::<Root>::new(WindowId::from(1)).into();
+        let window = WindowsWindow::new(
+            handle,
+            WindowParams {
+                bounds: Bounds::new(point(px(100.), px(100.)), size(px(400.), px(300.))),
+                titlebar: None,
+                kind: WindowKind::Normal,
+                is_movable: true,
+                app_owns_titlebar_drag: false,
+                is_resizable: true,
+                is_minimizable: true,
+                focus: false,
+                show: false,
+                icon: None,
+                display_id: None,
+                app_id: None,
+                window_min_size: None,
+                windows_renderer: Default::default(),
+            },
+            platform.generate_creation_info(),
+        )?;
+        let hwnd = window.get_raw_handle();
+        let size_before = window.0.state.renderer.borrow().drawable_size();
+
+        // Neither message carries the token, so neither lparam may be dereferenced. Before the
+        // check, the null one crashed with an access violation at 0x10.
+        for (wparam, lparam) in [(0, 0), (validation_number.wrapping_add(1), 0x10)] {
+            unsafe {
+                SendMessageW(
+                    hwnd,
+                    WM_GPUI_GPU_DEVICE_LOST,
+                    Some(WPARAM(wparam)),
+                    Some(LPARAM(lparam)),
+                );
+            }
+        }
+
+        assert_eq!(
+            window.0.state.renderer.borrow().drawable_size(),
+            size_before,
+            "the renderer must be untouched by a message without the token"
+        );
+
+        unsafe { DestroyWindow(hwnd)? };
+        Ok(())
+    }
+
     #[test]
     fn test_clipboard() {
         let item = ClipboardItem::new_string("你好，我是张小白".to_string());

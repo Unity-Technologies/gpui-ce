@@ -127,7 +127,11 @@ impl InlineDocument {
         measurement
     }
 
+    /// Every range is clamped to `candidate.text`'s char boundaries: a source range that ends
+    /// inside a multi-byte character maps to the same split in the output, and the text system
+    /// slices the output text by these ranges.
     fn truncated(&self, candidate: &TruncationCandidate) -> Self {
+        let text = candidate.text.as_ref();
         let text_styles = self
             .text_styles
             .iter()
@@ -135,6 +139,7 @@ impl InlineDocument {
                 candidate
                     .display_ranges(&style.range)
                     .into_iter()
+                    .filter_map(|range| clamp_to_char_boundaries(text, range))
                     .map(|range| InlineTextStyle {
                         range,
                         ..style.clone()
@@ -148,6 +153,7 @@ impl InlineDocument {
                 candidate
                     .display_ranges(&span.text_range)
                     .into_iter()
+                    .filter_map(|range| clamp_to_char_boundaries(text, range))
                     .map(|text_range| InlineSpan {
                         layout_id: span.layout_id,
                         text_range,
@@ -159,13 +165,29 @@ impl InlineDocument {
             .collect();
 
         Self {
-            text: candidate.text.to_string(),
+            text: text.to_string(),
             runs: candidate.runs.clone(),
             text_styles,
             spans,
             ..Self::default()
         }
     }
+}
+
+/// Moves both ends of `range` down to a char boundary of `text`, never past its end. Returns
+/// `None` when nothing is left.
+fn clamp_to_char_boundaries(text: &str, range: Range<usize>) -> Option<Range<usize>> {
+    let floor = |index: usize| {
+        let mut index = index.min(text.len());
+        while !text.is_char_boundary(index) {
+            index -= 1;
+        }
+        index
+    };
+    let start = floor(range.start);
+    let end = floor(range.end);
+
+    (start < end).then_some(start..end)
 }
 
 struct InlineParagraphMeasurement {
@@ -619,4 +641,103 @@ fn merge_fragments(regions: &mut Vec<Bounds<Pixels>>) {
     }
 
     *regions = merged;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{TruncateFrom, px};
+
+    /// Truncates `text` to at most `max_chars` chars (marker included) and maps `style_ranges`
+    /// into the result the way a layout pass does.
+    fn truncate(
+        text: &str,
+        style_ranges: &[Range<usize>],
+        direction: TruncateFrom,
+        max_chars: usize,
+    ) -> InlineDocument {
+        let document = InlineDocument {
+            text: text.to_owned(),
+            runs: vec![TextRun {
+                len: text.len(),
+                ..Default::default()
+            }],
+            text_styles: style_ranges
+                .iter()
+                .map(|range| InlineTextStyle {
+                    range: range.clone(),
+                    font_size: px(14.),
+                    line_height: px(20.),
+                })
+                .collect(),
+            ..InlineDocument::default()
+        };
+        let boundaries = text
+            .grapheme_indices(true)
+            .map(|(index, _grapheme)| index)
+            .chain(std::iter::once(text.len()));
+        let (candidate, ()) = truncate_with_measured_candidates(
+            text,
+            boundaries,
+            None,
+            "…",
+            &document.runs,
+            direction,
+            |candidate| ((), candidate.text.chars().count() <= max_chars),
+        );
+
+        document.truncated(&candidate)
+    }
+
+    fn assert_ranges_slice(document: &InlineDocument) {
+        for style in &document.text_styles {
+            assert!(
+                document.text.get(style.range.clone()).is_some(),
+                "{:?} must slice {:?} on char boundaries",
+                style.range,
+                document.text
+            );
+        }
+    }
+
+    #[test]
+    fn clamps_a_range_past_the_end_of_a_short_string() {
+        assert_eq!(clamp_to_char_boundaries("abcd", 2..10), Some(2..4));
+        assert_eq!(clamp_to_char_boundaries("abcd", 5..9), None);
+        assert_eq!(
+            clamp_to_char_boundaries("abcd", 125_780_070_648_069..125_780_070_648_070),
+            None
+        );
+        assert_eq!(clamp_to_char_boundaries("", 0..1), None);
+    }
+
+    #[test]
+    fn clamps_a_range_inside_a_multi_byte_char() {
+        // "é" is bytes 0..2, "🦀" is bytes 2..6.
+        assert_eq!(clamp_to_char_boundaries("é🦀", 1..3), Some(0..2));
+        assert_eq!(clamp_to_char_boundaries("é🦀", 3..5), None);
+        assert_eq!(clamp_to_char_boundaries("é🦀", 0..6), Some(0..6));
+    }
+
+    #[test]
+    fn truncating_a_short_string_keeps_style_ranges_inside_the_output() {
+        for direction in [TruncateFrom::End, TruncateFrom::Start, TruncateFrom::Middle] {
+            let document = truncate("abcd", &[0..4, 2..10, 1_000_000..1_000_005], direction, 3);
+
+            assert_eq!(document.text.chars().count(), 3, "{direction:?}");
+            assert_ranges_slice(&document);
+        }
+    }
+
+    #[test]
+    fn truncating_a_multi_byte_string_keeps_style_ranges_on_char_boundaries() {
+        // 2..8 starts inside "é" and ends inside "🦀"; 7..12 starts inside "🦀".
+        let text = "héllo🦀wörld";
+        for direction in [TruncateFrom::End, TruncateFrom::Start, TruncateFrom::Middle] {
+            let document = truncate(text, &[0..2, 2..8, 7..12, 0..text.len()], direction, 8);
+
+            assert!(document.text.chars().count() <= 8, "{direction:?}");
+            assert_ranges_slice(&document);
+        }
+    }
 }
