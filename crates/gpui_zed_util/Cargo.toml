@@ -1,6 +1,6 @@
 [package]
 name = "gpui_ce_zed_util"
-version = "0.4.0-unity.20261102"
+version = "0.4.0-unity.20261112"
 edition = "2024"
 license = "Apache-2.0"
 publish.workspace = true
@@ -20,7 +20,7 @@ debug-embed = ["rust-embed/debug-embed"]
 [dependencies]
 anyhow.workspace = true
 async_zip = { workspace = true, features = ["deflate", "deflate64"] }
-collections = { package = "gpui_ce_collections", version = "=0.4.0-unity.20261102", registry = "unity", path = "../gpui_collections" }
+collections = { package = "gpui_ce_collections", version = "=0.4.0-unity.20261112", registry = "unity", path = "../gpui_collections" }
 dunce.workspace = true
 futures-lite.workspace = true
 futures.workspace = true
@@ -43,8 +43,8 @@ tempfile.workspace = true
 unicase.workspace = true
 url.workspace = true
 percent-encoding.workspace = true
-gpui_util = { package = "gpui_ce_util", version = "=0.4.0-unity.20261102", registry = "unity", path = "../gpui_ce_util" }
-path = { package = "gpui_ce_path", version = "=0.4.0-unity.20261102", registry = "unity", path = "../gpui_path", features = [
+gpui_util = { package = "gpui_ce_util", version = "=0.4.0-unity.20261112", registry = "unity", path = "../gpui_ce_util" }
+path = { package = "gpui_ce_path", version = "=0.4.0-unity.20261112", registry = "unity", path = "../gpui_path", features = [
   "serde",
 ] }
 
@@ -69,6 +69,6 @@ windows.workspace = true
 [dev-dependencies]
 pretty_assertions = { workspace = true, features = ["unstable"] }
 rand.workspace = true
-path = { package = "gpui_ce_path", version = "=0.4.0-unity.20261102", registry = "unity", path = "../gpui_path", features = [
+path = { package = "gpui_ce_path", version = "=0.4.0-unity.20261112", registry = "unity", path = "../gpui_path", features = [
   "test-support",
 ] }
