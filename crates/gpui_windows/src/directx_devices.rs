@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use gpui_util::ResultExt;
 use itertools::Itertools;
 use windows::Win32::{
     Foundation::HMODULE,
@@ -72,6 +71,7 @@ impl DirectXDevices {
 fn check_debug_layer_available() -> bool {
     #[cfg(debug_assertions)]
     {
+        use gpui_util::ResultExt;
         use windows::Win32::Graphics::Dxgi::{DXGIGetDebugInterface1, IDXGIInfoQueue};
 
         unsafe { DXGIGetDebugInterface1::<IDXGIInfoQueue>(0) }
