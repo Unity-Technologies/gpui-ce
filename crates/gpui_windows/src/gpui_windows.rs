@@ -48,6 +48,10 @@ pub(crate) use wgpu_renderer::Context as RendererContext;
 #[cfg(feature = "wgpu")]
 pub(crate) use wgpu_renderer::WindowRenderer;
 
+pub use directx_devices::{
+    FORCE_WARP, SIMULATE_HARDWARE_RENDERER_FAILURE, fell_back_to_software_renderer,
+    request_software_renderer,
+};
 pub use platform::WindowsPlatform;
 
 pub(crate) use windows::Win32::Foundation::HWND;

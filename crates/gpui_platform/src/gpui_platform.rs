@@ -29,6 +29,26 @@ pub fn headless() -> gpui::Application {
     gpui::Application::with_platform(current_platform(true))
 }
 
+/// Asks the platform to draw with a software renderer. Call it before [`application`].
+/// Windows draws with WARP; the other platforms ignore it for now.
+pub fn request_software_renderer() {
+    #[cfg(target_os = "windows")]
+    gpui_windows::request_software_renderer();
+}
+
+/// Whether a window's renderer failed on the GPU and the app moved to a software renderer.
+/// Only Windows falls back today.
+pub fn fell_back_to_software_renderer() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        gpui_windows::fell_back_to_software_renderer()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
 #[cfg(target_family = "wasm")]
 pub use gpui_web::WebBackendPreference;
 
