@@ -244,17 +244,28 @@ impl InstanceBufferPool {
         self.buffers.clear();
     }
 
+    /// Returns `None` when Metal cannot give a buffer of the needed size: it
+    /// is over the device's limit, or the allocation failed. A nil buffer has
+    /// a null `contents()`, and writing instances through it crashes.
     pub(crate) fn acquire(
         &mut self,
         device: &metal::Device,
         unified_memory: bool,
         minimum_size: usize,
-    ) -> InstanceBuffer {
+    ) -> Option<InstanceBuffer> {
+        let max_buffer_length = usize::try_from(device.max_buffer_length()).unwrap_or(usize::MAX);
+        if minimum_size > max_buffer_length {
+            log::error!(
+                "skipped a frame: it needs a {minimum_size} byte instance buffer, over the device limit of {max_buffer_length}"
+            );
+            return None;
+        }
         if minimum_size > self.buffer_size {
             self.reset(
                 minimum_size
                     .checked_next_power_of_two()
-                    .unwrap_or(minimum_size),
+                    .unwrap_or(minimum_size)
+                    .min(max_buffer_length),
             );
         }
         let buffer = self.buffers.pop().unwrap_or_else(|| {
@@ -269,10 +280,17 @@ impl InstanceBufferPool {
 
             device.new_buffer(self.buffer_size as u64, options)
         });
-        InstanceBuffer {
+        if buffer.contents().is_null() {
+            log::error!(
+                "skipped a frame: Metal returned no {} byte instance buffer",
+                self.buffer_size
+            );
+            return None;
+        }
+        Some(InstanceBuffer {
             metal_buffer: buffer,
             size: self.buffer_size,
-        }
+        })
     }
 
     pub(crate) fn release(&mut self, buffer: InstanceBuffer) {
@@ -856,7 +874,9 @@ impl MetalRenderer {
         );
         let drawable = &*drawable;
 
-        let mut instance_buffer = self.acquire_instance_buffer(scene);
+        let Some(mut instance_buffer) = self.acquire_instance_buffer(scene) else {
+            return;
+        };
         let command_buffer =
             match self.draw_primitives(scene, &mut instance_buffer, drawable, viewport_size) {
                 Ok(command_buffer) => command_buffer,
@@ -933,7 +953,9 @@ impl MetalRenderer {
         texture_descriptor.set_storage_mode(metal::MTLStorageMode::Managed);
         let target_texture = self.device.new_texture(&texture_descriptor);
 
-        let mut instance_buffer = self.acquire_instance_buffer(scene);
+        let mut instance_buffer = self
+            .acquire_instance_buffer(scene)
+            .ok_or_else(|| anyhow::anyhow!("Metal could not allocate the instance buffer"))?;
         let command_buffer =
             self.draw_primitives_to_texture(scene, &mut instance_buffer, &target_texture, size)?;
 
@@ -1004,7 +1026,9 @@ impl MetalRenderer {
             .clone()
             .expect("just ensured the render target exists");
 
-        let mut instance_buffer = self.acquire_instance_buffer(scene);
+        let mut instance_buffer = self
+            .acquire_instance_buffer(scene)
+            .ok_or_else(|| anyhow::anyhow!("Metal could not allocate the instance buffer"))?;
         let command_buffer =
             self.draw_primitives_to_texture(scene, &mut instance_buffer, &target_texture, size)?;
         self.release_instance_buffer_when_complete(&command_buffer, instance_buffer);
@@ -1012,7 +1036,7 @@ impl MetalRenderer {
         Ok(())
     }
 
-    fn acquire_instance_buffer(&self, scene: &Scene) -> InstanceBuffer {
+    fn acquire_instance_buffer(&self, scene: &Scene) -> Option<InstanceBuffer> {
         self.instance_buffer_pool.lock().acquire(
             &self.device,
             self.is_unified_memory,
@@ -2420,6 +2444,23 @@ mod tests {
         ));
         // Detached again, the renderer asks the layer for its own drawable.
         renderer.draw(&scene);
+    }
+
+    #[test]
+    fn an_instance_buffer_over_the_device_limit_skips_the_frame() {
+        let device = MetalRenderer::create_device().unwrap();
+        let mut pool = InstanceBufferPool::default();
+        let max_buffer_length = usize::try_from(device.max_buffer_length()).unwrap();
+
+        assert!(pool.acquire(&device, true, max_buffer_length + 1).is_none());
+
+        // The refusal leaves the pool usable, and every buffer it hands out
+        // has memory to write instances into.
+        let buffer = pool
+            .acquire(&device, true, 1024)
+            .expect("a small instance buffer");
+        assert!(!buffer.metal_buffer.contents().is_null());
+        assert!(buffer.size >= 1024);
     }
 
     #[test]
