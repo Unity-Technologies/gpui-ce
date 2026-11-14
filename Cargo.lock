@@ -1255,6 +1255,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "core-graphics"
+version = "0.25.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "064badf302c3194842cf2c5d61f56cc88e54a759313879cdf03abdd27d0c3b97"
+dependencies = [
+ "bitflags",
+ "core-foundation",
+ "core-graphics-types",
+ "foreign-types",
+ "libc",
+]
+
+[[package]]
 name = "core-graphics-types"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1285,7 +1298,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a593227b66cbd4007b2a050dfdd9e1d1318311409c8d600dc82ba1b15ca9c130"
 dependencies = [
  "core-foundation",
- "core-graphics",
+ "core-graphics 0.24.0",
  "foreign-types",
  "libc",
 ]
@@ -2548,7 +2561,7 @@ dependencies = [
  "anyhow",
  "block",
  "core-foundation",
- "core-graphics",
+ "core-graphics 0.25.0",
  "core-video",
  "derive_more",
  "etagere",
@@ -2660,7 +2673,7 @@ dependencies = [
  "block2 0.6.2",
  "core-foundation",
  "core-foundation-sys",
- "core-graphics",
+ "core-graphics 0.25.0",
  "core-text",
  "core-video",
  "ctor",
@@ -7998,7 +8011,7 @@ dependencies = [
  "bitflags",
  "byteorder",
  "core-foundation",
- "core-graphics",
+ "core-graphics 0.24.0",
  "core-text",
  "dirs 5.0.1",
  "dwrote",
