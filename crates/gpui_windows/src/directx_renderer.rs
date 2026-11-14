@@ -2993,6 +2993,43 @@ mod tests {
         });
     }
 
+    /// The window-open path with the hardware attempt forced to fail as UNITY-HUB-39QW did:
+    /// the retry builds the renderer on WARP, DirectComposition included, and it draws.
+    #[test]
+    fn a_renderer_that_fails_on_hardware_opens_on_warp() -> Result<()> {
+        use crate::directx_devices::retry_on_software;
+        use windows::Win32::Graphics::Dxgi::DXGI_ERROR_DEVICE_REMOVED;
+
+        let window = HiddenWindow::new()?;
+        let devices = DirectXDevices::new()?;
+        let mut first = true;
+        let (mut renderer, fell_back) = retry_on_software(
+            &devices,
+            false,
+            |devices| {
+                if std::mem::take(&mut first) {
+                    return Err(anyhow::Error::from(windows::core::Error::from(
+                        DXGI_ERROR_DEVICE_REMOVED,
+                    ))
+                    .context("Creating DirectX resources"));
+                }
+                DirectXRenderer::new(window.0, devices, false)
+            },
+            DirectXDevices::new_software,
+        )?;
+        assert!(fell_back);
+        assert!(renderer.gpu_specs()?.is_software_emulated);
+        renderer.resize(Size {
+            width: DevicePixels(40),
+            height: DevicePixels(20),
+        })?;
+        renderer.render_to_image(
+            &dashed_border_scene(2.0, 1.0),
+            WindowBackgroundAppearance::Opaque,
+        )?;
+        Ok(())
+    }
+
     #[test]
     fn configurable_dashes_reach_both_directx_quad_pipelines() -> Result<()> {
         let window = HiddenWindow::new()?;
