@@ -20,18 +20,21 @@ use raw_window_handle as rwh;
 use wayland_backend::client::ObjectId;
 use wayland_client::WEnum;
 use wayland_client::{
-    Proxy,
+    Dispatch, Proxy, QueueHandle,
     protocol::{wl_callback, wl_output, wl_seat, wl_shm, wl_surface},
 };
 use wayland_protocols::wp::viewporter::client::wp_viewport;
-use wayland_protocols::xdg::decoration::zv1::client::zxdg_toplevel_decoration_v1;
+use wayland_protocols::xdg::decoration::zv1::client::{
+    zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1,
+};
 use wayland_protocols::xdg::shell::client::xdg_popup;
 use wayland_protocols::xdg::shell::client::xdg_positioner;
 use wayland_protocols::xdg::shell::client::xdg_surface;
 use wayland_protocols::xdg::shell::client::xdg_toplevel::{self};
+use wayland_protocols::xdg::shell::client::xdg_wm_base;
 use wayland_protocols::{
     wp::fractional_scale::v1::client::wp_fractional_scale_v1,
-    xdg::dialog::v1::client::xdg_dialog_v1::XdgDialogV1,
+    xdg::dialog::v1::client::{xdg_dialog_v1::XdgDialogV1, xdg_wm_dialog_v1},
 };
 use wayland_protocols_plasma::blur::client::org_kde_kwin_blur;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1;
@@ -103,6 +106,8 @@ struct InProgressConfigure {
 pub struct WaylandWindowState {
     surface_state: WaylandSurfaceState,
     parent: Option<WaylandWindowStatePtr>,
+    /// A `WindowKind::Dialog`, whose toplevel carries a modal xdg_dialog.
+    modal: bool,
     /// Child surfaces mapped to whether they block this window's input (dialogs
     /// block, popups don't). Children are closed before this window closes.
     children: FxHashMap<ObjectId, bool>,
@@ -145,7 +150,8 @@ pub struct WaylandWindowState {
 }
 
 pub enum WaylandSurfaceState {
-    Xdg(WaylandXdgSurfaceState),
+    /// `None` while the window is hidden: [`WaylandSurfaceState::unmap`] withdraws the roles.
+    Xdg(Option<WaylandXdgSurfaceState>),
     LayerShell(WaylandLayerSurfaceState),
     Popup(WaylandPopupSurfaceState),
 }
@@ -255,64 +261,107 @@ impl WaylandSurfaceState {
         }
 
         // All other WindowKinds result in a regular xdg surface
-        let xdg_surface = globals
-            .wm_base
-            .get_xdg_surface(&surface, &globals.qh, surface.id());
+        let xdg_parent = parent.as_ref().and_then(|w| w.toplevel());
+        let child = params.kind == WindowKind::Floating || params.kind == WindowKind::Dialog;
+        let modal = params.kind == WindowKind::Dialog;
+        let roles = XdgRoleFactory::from_globals(globals).create(
+            surface,
+            params
+                .titlebar
+                .as_ref()
+                .and_then(|t| t.title.as_ref())
+                .map(|title| title.as_ref()),
+            params.app_id.as_deref(),
+            xdg_parent.as_ref().filter(|_| child),
+            modal,
+        );
 
-        let toplevel = xdg_surface.get_toplevel(&globals.qh, surface.id());
+        if modal && let Some(parent) = parent.as_ref() {
+            parent.add_child(surface.id(), true);
+        }
+
+        if let Some(size) = params.window_min_size {
+            roles
+                .toplevel
+                .set_min_size(f32::from(size.width) as i32, f32::from(size.height) as i32);
+        }
+
+        Ok(WaylandSurfaceState::Xdg(Some(roles)))
+    }
+}
+
+/// What [`XdgRoleFactory::create`] needs to give a surface its xdg roles: the
+/// globals that make them and the queue their events go to.
+struct XdgRoleFactory<'a, D> {
+    wm_base: &'a xdg_wm_base::XdgWmBase,
+    decoration_manager: Option<&'a zxdg_decoration_manager_v1::ZxdgDecorationManagerV1>,
+    dialog_manager: Option<&'a xdg_wm_dialog_v1::XdgWmDialogV1>,
+    qh: &'a QueueHandle<D>,
+}
+
+impl<'a> XdgRoleFactory<'a, WaylandClientStatePtr> {
+    fn from_globals(globals: &'a Globals) -> Self {
+        Self {
+            wm_base: &globals.wm_base,
+            decoration_manager: globals.decoration_manager.as_ref(),
+            dialog_manager: globals.dialog.as_ref(),
+            qh: &globals.qh,
+        }
+    }
+}
+
+impl<D> XdgRoleFactory<'_, D>
+where
+    D: Dispatch<xdg_surface::XdgSurface, ObjectId>
+        + Dispatch<xdg_toplevel::XdgToplevel, ObjectId>
+        + Dispatch<zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1, ObjectId>
+        + Dispatch<XdgDialogV1, ()>
+        + 'static,
+{
+    /// Gives `surface` the xdg_surface and xdg_toplevel roles, at creation and
+    /// again each time a hidden toplevel is shown.
+    fn create(
+        &self,
+        surface: &wl_surface::WlSurface,
+        title: Option<&str>,
+        app_id: Option<&str>,
+        parent: Option<&xdg_toplevel::XdgToplevel>,
+        modal: bool,
+    ) -> WaylandXdgSurfaceState {
+        let xdg_surface = self.wm_base.get_xdg_surface(surface, self.qh, surface.id());
+        let toplevel = xdg_surface.get_toplevel(self.qh, surface.id());
 
         // Identify the toplevel in the same flush that creates it. Mutter creates its
         // window object (and GNOME Shell matches it to a `.desktop` entry) as soon as it
         // handles `get_toplevel`, and the renderer setup that follows flushes the
         // connection and takes long enough that a toplevel with no app_id shows up as a
         // separate, generic app in the dock until the app_id arrives.
-        if let Some(title) = params.titlebar.as_ref().and_then(|t| t.title.as_ref()) {
-            toplevel.set_title(title.to_string());
+        if let Some(title) = title {
+            toplevel.set_title(title.to_owned());
         }
-        if let Some(app_id) = params.app_id.as_ref() {
-            toplevel.set_app_id(app_id.clone());
+        if let Some(app_id) = app_id {
+            toplevel.set_app_id(app_id.to_owned());
         }
-
-        let xdg_parent = parent.as_ref().and_then(|w| w.toplevel());
-
-        if params.kind == WindowKind::Floating || params.kind == WindowKind::Dialog {
-            toplevel.set_parent(xdg_parent.as_ref());
+        if let Some(parent) = parent {
+            toplevel.set_parent(Some(parent));
         }
 
-        let dialog = if params.kind == WindowKind::Dialog {
-            let dialog = globals.dialog.as_ref().map(|dialog| {
-                let xdg_dialog = dialog.get_xdg_dialog(&toplevel, &globals.qh, ());
-                xdg_dialog.set_modal();
-                xdg_dialog
-            });
+        let dialog = self.dialog_manager.filter(|_| modal).map(|dialog| {
+            let xdg_dialog = dialog.get_xdg_dialog(&toplevel, self.qh, ());
+            xdg_dialog.set_modal();
+            xdg_dialog
+        });
 
-            if let Some(parent) = parent.as_ref() {
-                parent.add_child(surface.id(), true);
-            }
+        let decoration = self.decoration_manager.map(|decoration_manager| {
+            decoration_manager.get_toplevel_decoration(&toplevel, self.qh, surface.id())
+        });
 
-            dialog
-        } else {
-            None
-        };
-
-        if let Some(size) = params.window_min_size {
-            toplevel.set_min_size(f32::from(size.width) as i32, f32::from(size.height) as i32);
-        }
-
-        // Attempt to set up window decorations based on the requested configuration
-        let decoration = globals
-            .decoration_manager
-            .as_ref()
-            .map(|decoration_manager| {
-                decoration_manager.get_toplevel_decoration(&toplevel, &globals.qh, surface.id())
-            });
-
-        Ok(WaylandSurfaceState::Xdg(WaylandXdgSurfaceState {
+        WaylandXdgSurfaceState {
             xdg_surface,
             toplevel,
             decoration,
             dialog,
-        }))
+        }
     }
 }
 
@@ -321,6 +370,26 @@ pub struct WaylandXdgSurfaceState {
     toplevel: xdg_toplevel::XdgToplevel,
     decoration: Option<zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1>,
     dialog: Option<XdgDialogV1>,
+}
+
+impl WaylandXdgSurfaceState {
+    fn destroy(self) {
+        // Decorations must be destroyed before the toplevel.
+        // See https://wayland.app/protocols/xdg-decoration-unstable-v1#zxdg_toplevel_decoration_v1
+        if let Some(decoration) = self.decoration {
+            decoration.destroy();
+        }
+
+        // drop the dialog before toplevel so compositor can explicitly unapply it's effects
+        if let Some(dialog) = self.dialog {
+            dialog.destroy();
+        }
+
+        // The role object (toplevel) must always be destroyed before the xdg_surface.
+        // See https://wayland.app/protocols/xdg-shell#xdg_surface:request:destroy
+        self.toplevel.destroy();
+        self.xdg_surface.destroy();
+    }
 }
 
 pub struct WaylandLayerSurfaceState {
@@ -390,7 +459,7 @@ fn build_popup_positioner(
 impl WaylandSurfaceState {
     fn ack_configure(&self, serial: u32) {
         match self {
-            WaylandSurfaceState::Xdg(WaylandXdgSurfaceState { xdg_surface, .. }) => {
+            WaylandSurfaceState::Xdg(Some(WaylandXdgSurfaceState { xdg_surface, .. })) => {
                 xdg_surface.ack_configure(serial);
             }
             WaylandSurfaceState::LayerShell(WaylandLayerSurfaceState { layer_surface, .. }) => {
@@ -399,11 +468,12 @@ impl WaylandSurfaceState {
             WaylandSurfaceState::Popup(WaylandPopupSurfaceState { xdg_surface, .. }) => {
                 xdg_surface.ack_configure(serial);
             }
+            WaylandSurfaceState::Xdg(None) => {}
         }
     }
 
     fn decoration(&self) -> Option<&zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1> {
-        if let WaylandSurfaceState::Xdg(WaylandXdgSurfaceState { decoration, .. }) = self {
+        if let WaylandSurfaceState::Xdg(Some(WaylandXdgSurfaceState { decoration, .. })) = self {
             decoration.as_ref()
         } else {
             None
@@ -411,7 +481,7 @@ impl WaylandSurfaceState {
     }
 
     fn toplevel(&self) -> Option<&xdg_toplevel::XdgToplevel> {
-        if let WaylandSurfaceState::Xdg(WaylandXdgSurfaceState { toplevel, .. }) = self {
+        if let WaylandSurfaceState::Xdg(Some(WaylandXdgSurfaceState { toplevel, .. })) = self {
             Some(toplevel)
         } else {
             None
@@ -420,13 +490,13 @@ impl WaylandSurfaceState {
 
     fn xdg_surface(&self) -> Option<&xdg_surface::XdgSurface> {
         match self {
-            WaylandSurfaceState::Xdg(WaylandXdgSurfaceState { xdg_surface, .. }) => {
+            WaylandSurfaceState::Xdg(Some(WaylandXdgSurfaceState { xdg_surface, .. })) => {
                 Some(xdg_surface)
             }
             WaylandSurfaceState::Popup(WaylandPopupSurfaceState { xdg_surface, .. }) => {
                 Some(xdg_surface)
             }
-            WaylandSurfaceState::LayerShell(_) => None,
+            WaylandSurfaceState::Xdg(None) | WaylandSurfaceState::LayerShell(_) => None,
         }
     }
 
@@ -442,7 +512,7 @@ impl WaylandSurfaceState {
 
     fn set_geometry(&self, x: i32, y: i32, width: i32, height: i32) {
         match self {
-            WaylandSurfaceState::Xdg(WaylandXdgSurfaceState { xdg_surface, .. }) => {
+            WaylandSurfaceState::Xdg(Some(WaylandXdgSurfaceState { xdg_surface, .. })) => {
                 xdg_surface.set_window_geometry(x, y, width, height);
             }
             WaylandSurfaceState::LayerShell(WaylandLayerSurfaceState { layer_surface, .. }) => {
@@ -452,6 +522,7 @@ impl WaylandSurfaceState {
             WaylandSurfaceState::Popup(WaylandPopupSurfaceState { xdg_surface, .. }) => {
                 xdg_surface.set_window_geometry(x, y, width, height);
             }
+            WaylandSurfaceState::Xdg(None) => {}
         }
     }
 
@@ -523,23 +594,52 @@ impl WaylandSurfaceState {
         }
     }
 
+    /// Unmaps the surface for [`PlatformWindow::set_visible`]. A toplevel also gives up its
+    /// roles: a null buffer alone keeps the xdg_toplevel, and Mutter answers that unmap by
+    /// swapping in a new window with no title or app_id, which GNOME Shell lists as a running
+    /// app named "Unknown" for as long as the window stays hidden. Destroying the roles removes
+    /// the window, as Chromium does on hide; [`Self::remap`] creates them again.
+    fn unmap(&mut self, surface: &wl_surface::WlSurface) {
+        if let WaylandSurfaceState::Xdg(roles) = self
+            && let Some(roles) = roles.take()
+        {
+            roles.destroy();
+        }
+        // Also what lets `remap` create an xdg_surface: the protocol refuses one on a
+        // surface that still has a buffer.
+        surface.attach(None, 0, 0);
+        surface.commit();
+    }
+
+    /// Gives a toplevel hidden by [`Self::unmap`] new roles. Returns whether it did, so the
+    /// caller restores what lived on the old ones.
+    fn remap<D>(
+        &mut self,
+        factory: &XdgRoleFactory<'_, D>,
+        surface: &wl_surface::WlSurface,
+        modal: bool,
+    ) -> bool
+    where
+        D: Dispatch<xdg_surface::XdgSurface, ObjectId>
+            + Dispatch<xdg_toplevel::XdgToplevel, ObjectId>
+            + Dispatch<zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1, ObjectId>
+            + Dispatch<XdgDialogV1, ()>
+            + 'static,
+    {
+        let WaylandSurfaceState::Xdg(roles @ None) = self else {
+            return false;
+        };
+        // Title, app_id and parent follow in `prepare_to_map`, before the commit that maps.
+        *roles = Some(factory.create(surface, None, None, None, modal));
+        true
+    }
+
     fn destroy(&mut self) {
         match self {
-            WaylandSurfaceState::Xdg(WaylandXdgSurfaceState {
-                xdg_surface,
-                toplevel,
-                decoration: _decoration,
-                dialog,
-            }) => {
-                // drop the dialog before toplevel so compositor can explicitly unapply it's effects
-                if let Some(dialog) = dialog {
-                    dialog.destroy();
+            WaylandSurfaceState::Xdg(roles) => {
+                if let Some(roles) = roles.take() {
+                    roles.destroy();
                 }
-
-                // The role object (toplevel) must always be destroyed before the xdg_surface.
-                // See https://wayland.app/protocols/xdg-shell#xdg_surface:request:destroy
-                toplevel.destroy();
-                xdg_surface.destroy();
             }
             WaylandSurfaceState::LayerShell(WaylandLayerSurfaceState { layer_surface, .. }) => {
                 layer_surface.destroy();
@@ -616,7 +716,7 @@ impl WaylandWindowState {
 
         // The title and app_id were already sent alongside `get_toplevel`, in
         // `WaylandSurfaceState::new`.
-        if let WaylandSurfaceState::Xdg(ref xdg_state) = surface_state {
+        if let WaylandSurfaceState::Xdg(Some(ref xdg_state)) = surface_state {
             // Set max window size based on the GPU's maximum texture dimension.
             // This prevents the window from being resized larger than what the GPU can render.
             let max_texture_size = renderer.max_texture_size() as i32;
@@ -628,6 +728,7 @@ impl WaylandWindowState {
         Ok(Self {
             surface_state,
             parent,
+            modal: options.kind == WindowKind::Dialog,
             children: FxHashMap::default(),
             surface,
             app_id: options.app_id,
@@ -686,7 +787,7 @@ impl WaylandWindowState {
     }
 
     fn prepare_to_map(&self) {
-        let WaylandSurfaceState::Xdg(xdg_state) = &self.surface_state else {
+        let WaylandSurfaceState::Xdg(Some(xdg_state)) = &self.surface_state else {
             return;
         };
 
@@ -851,14 +952,7 @@ impl Drop for WaylandWindow {
             blur.release();
         }
 
-        // Decorations must be destroyed before the xdg state.
-        // See https://wayland.app/protocols/xdg-decoration-unstable-v1#zxdg_toplevel_decoration_v1
-        if let Some(decoration) = &state.surface_state.decoration() {
-            decoration.destroy();
-        }
-
-        // Surface state might contain xdg_toplevel/xdg_surface which can be destroyed now that
-        // decorations are gone. layer_surface has no dependencies.
+        // Destroys any decoration before its toplevel. layer_surface has no dependencies.
         state.surface_state.destroy();
 
         // Viewport must be destroyed before the wl_surface.
@@ -1677,6 +1771,10 @@ impl WaylandWindowStatePtr {
         let Some(icon_manager) = &state.globals.icon_manager else {
             return;
         };
+        // A hidden toplevel has none; showing it sets the icon again.
+        let Some(toplevel) = state.surface_state.toplevel() else {
+            return;
+        };
 
         let squared = {
             let (width, height) = icon.dimensions();
@@ -1747,7 +1845,7 @@ impl WaylandWindowStatePtr {
             icon.add_buffer(buffer, 1);
             state.generated_icons.push(fd)
         }
-        icon_manager.set_icon(state.surface_state.toplevel().unwrap(), Some(&icon));
+        icon_manager.set_icon(toplevel, Some(&icon));
     }
 }
 
@@ -2014,17 +2112,35 @@ impl PlatformWindow for WaylandWindow {
 
         state.visible = visible;
         if visible {
+            let remapped = {
+                let state = &mut *state;
+                state.surface_state.remap(
+                    &XdgRoleFactory::from_globals(&state.globals),
+                    &state.surface,
+                    state.modal,
+                )
+            };
+            if remapped {
+                if let Some(decoration) = state.surface_state.decoration() {
+                    decoration.set_mode(state.decorations.to_xdg());
+                }
+                let client = state.client.get_client();
+                drop(state);
+                if let Ok(client) = client.try_borrow() {
+                    self.0.regenerate_icons(&client.icon_sizes);
+                }
+                state = self.borrow_mut();
+            }
             // Remapping an xdg surface starts with an empty commit and a fresh configure cycle.
             state.prepare_to_map();
             state.surface.commit();
         } else {
-            // Attaching a null buffer unmaps an xdg surface without destroying its role objects.
             // The next map must wait for a new configure before presenting another buffer.
             state.pending_frame_callback.take();
             // The driver must drop its surface before the null attach (HUB-8810).
             state.renderer.release_surface();
-            state.surface.attach(None, 0, 0);
-            state.surface.commit();
+            let state = &mut *state;
+            state.surface_state.unmap(&state.surface);
             state.presentation = PresentationState::Unpresented;
             state.redraw_requested = true;
             self.0.frame_loop.set(FrameLoop::Unconfigured);
@@ -2537,4 +2653,232 @@ fn inset_by_tiling(mut bounds: Bounds<Pixels>, inset: Pixels, tiling: Tiling) ->
     }
 
     bounds
+}
+
+#[cfg(test)]
+mod visibility_tests {
+    use std::io::{ErrorKind, Read};
+    use std::os::unix::net::UnixStream;
+
+    use wayland_client::{
+        Connection, Dispatch, Proxy, QueueHandle,
+        protocol::{wl_compositor, wl_registry, wl_surface},
+    };
+    use wayland_protocols::xdg::decoration::zv1::client::{
+        zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1,
+    };
+    use wayland_protocols::xdg::dialog::v1::client::xdg_dialog_v1::XdgDialogV1;
+    use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+
+    use super::{ObjectId, WaylandSurfaceState, XdgRoleFactory};
+
+    /// Owns the test queue. No event is ever dispatched: the tests only read
+    /// the requests the client writes to the socket.
+    struct Requests;
+
+    macro_rules! ignore_events {
+        ($($interface:ty => $user_data:ty),* $(,)?) => {$(
+            impl Dispatch<$interface, $user_data> for Requests {
+                fn event(
+                    _: &mut Self,
+                    _: &$interface,
+                    _: <$interface as Proxy>::Event,
+                    _: &$user_data,
+                    _: &Connection,
+                    _: &QueueHandle<Self>,
+                ) {
+                }
+            }
+        )*};
+    }
+
+    ignore_events!(
+        wl_registry::WlRegistry => (),
+        wl_compositor::WlCompositor => (),
+        wl_surface::WlSurface => (),
+        xdg_wm_base::XdgWmBase => (),
+        zxdg_decoration_manager_v1::ZxdgDecorationManagerV1 => (),
+        xdg_surface::XdgSurface => ObjectId,
+        xdg_toplevel::XdgToplevel => ObjectId,
+        zxdg_toplevel_decoration_v1::ZxdgToplevelDecorationV1 => ObjectId,
+        XdgDialogV1 => (),
+    );
+
+    // Request opcodes, from the protocol XML.
+    const DESTROY: u16 = 0;
+    const WL_SURFACE_ATTACH: u16 = 1;
+    const WL_SURFACE_COMMIT: u16 = 6;
+    const XDG_WM_BASE_GET_XDG_SURFACE: u16 = 2;
+    const XDG_SURFACE_GET_TOPLEVEL: u16 = 1;
+    const XDG_TOPLEVEL_SET_TITLE: u16 = 2;
+    const XDG_TOPLEVEL_SET_APP_ID: u16 = 3;
+    const DECORATION_MANAGER_GET_TOPLEVEL_DECORATION: u16 = 1;
+
+    struct Harness {
+        conn: Connection,
+        server: UnixStream,
+        qh: QueueHandle<Requests>,
+        wm_base: xdg_wm_base::XdgWmBase,
+        decoration_manager: zxdg_decoration_manager_v1::ZxdgDecorationManagerV1,
+        surface: wl_surface::WlSurface,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let (client, server) = UnixStream::pair().unwrap();
+            server.set_nonblocking(true).unwrap();
+            let conn = Connection::from_socket(client).unwrap();
+            let qh = conn.new_event_queue::<Requests>().handle();
+            // Binding needs no reply, so no server has to answer.
+            let registry = conn.display().get_registry(&qh, ());
+            let compositor: wl_compositor::WlCompositor = registry.bind(1, 4, &qh, ());
+            let wm_base = registry.bind(2, 1, &qh, ());
+            let decoration_manager = registry.bind(3, 1, &qh, ());
+            let surface = compositor.create_surface(&qh, ());
+            let mut harness = Self {
+                conn,
+                server,
+                qh,
+                wm_base,
+                decoration_manager,
+                surface,
+            };
+            harness.sent();
+            harness
+        }
+
+        fn factory(&self) -> XdgRoleFactory<'_, Requests> {
+            XdgRoleFactory {
+                wm_base: &self.wm_base,
+                decoration_manager: Some(&self.decoration_manager),
+                dialog_manager: None,
+                qh: &self.qh,
+            }
+        }
+
+        /// The `(object id, opcode)` of each request written since the last call.
+        fn sent(&mut self) -> Vec<(u32, u16)> {
+            self.conn.flush().unwrap();
+            let mut bytes = Vec::new();
+            let mut chunk = [0u8; 4096];
+            loop {
+                match self.server.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => bytes.extend_from_slice(&chunk[..n]),
+                    Err(err) if err.kind() == ErrorKind::WouldBlock => break,
+                    Err(err) => panic!("reading the test socket: {err}"),
+                }
+            }
+            let word = |at: usize| u32::from_ne_bytes(bytes[at..at + 4].try_into().unwrap());
+            let mut requests = Vec::new();
+            let mut at = 0;
+            while at < bytes.len() {
+                let header = word(at + 4);
+                requests.push((word(at), (header & 0xffff) as u16));
+                at += (header >> 16) as usize;
+            }
+            requests
+        }
+    }
+
+    fn id(proxy: &impl Proxy) -> u32 {
+        proxy.id().protocol_id()
+    }
+
+    #[test]
+    fn hiding_a_toplevel_destroys_its_roles_before_unmapping() {
+        let mut harness = Harness::new();
+        let roles = harness.factory().create(
+            &harness.surface,
+            Some("Unity Hub"),
+            Some("unityhub"),
+            None,
+            false,
+        );
+        let mut state = WaylandSurfaceState::Xdg(Some(roles));
+        let toplevel = id(state.toplevel().unwrap());
+        let xdg_surface = id(state.xdg_surface().unwrap());
+        let decoration = id(state.decoration().unwrap());
+        let surface = id(&harness.surface);
+        harness.sent();
+
+        state.unmap(&harness.surface);
+
+        // A null buffer alone keeps the toplevel, which Mutter then lists as an
+        // untitled, app_id-less window ("Unknown" in GNOME Shell).
+        assert_eq!(
+            harness.sent(),
+            [
+                (decoration, DESTROY),
+                (toplevel, DESTROY),
+                (xdg_surface, DESTROY),
+                (surface, WL_SURFACE_ATTACH),
+                (surface, WL_SURFACE_COMMIT),
+            ]
+        );
+        assert!(state.toplevel().is_none());
+        assert!(state.decoration().is_none());
+    }
+
+    #[test]
+    fn showing_a_hidden_toplevel_creates_new_roles() {
+        let mut harness = Harness::new();
+        let roles = harness
+            .factory()
+            .create(&harness.surface, None, None, None, false);
+        let old_toplevel = id(&roles.toplevel);
+        let mut state = WaylandSurfaceState::Xdg(Some(roles));
+        state.unmap(&harness.surface);
+        harness.sent();
+
+        assert!(state.remap(&harness.factory(), &harness.surface, false));
+
+        let toplevel = state.toplevel().unwrap();
+        assert!(toplevel.is_alive());
+        assert_ne!(id(toplevel), old_toplevel);
+        let sent = harness.sent();
+        assert_eq!(
+            sent,
+            [
+                (id(&harness.wm_base), XDG_WM_BASE_GET_XDG_SURFACE),
+                (id(state.xdg_surface().unwrap()), XDG_SURFACE_GET_TOPLEVEL),
+                (
+                    id(&harness.decoration_manager),
+                    DECORATION_MANAGER_GET_TOPLEVEL_DECORATION
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn creating_roles_names_the_toplevel_in_the_same_flush() {
+        let mut harness = Harness::new();
+        let roles = harness.factory().create(
+            &harness.surface,
+            Some("Unity Hub"),
+            Some("unityhub"),
+            None,
+            false,
+        );
+        let toplevel = id(&roles.toplevel);
+        let sent = harness.sent();
+        assert!(sent.contains(&(toplevel, XDG_TOPLEVEL_SET_TITLE)));
+        assert!(sent.contains(&(toplevel, XDG_TOPLEVEL_SET_APP_ID)));
+    }
+
+    #[test]
+    fn showing_a_toplevel_that_was_never_hidden_keeps_its_roles() {
+        let mut harness = Harness::new();
+        let roles = harness
+            .factory()
+            .create(&harness.surface, None, None, None, false);
+        let toplevel = id(&roles.toplevel);
+        let mut state = WaylandSurfaceState::Xdg(Some(roles));
+        harness.sent();
+
+        assert!(!state.remap(&harness.factory(), &harness.surface, false));
+
+        assert_eq!(id(state.toplevel().unwrap()), toplevel);
+        assert!(harness.sent().is_empty());
+    }
 }
