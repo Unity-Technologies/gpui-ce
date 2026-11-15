@@ -2132,6 +2132,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "fontique"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb17c03da08e75b2a84346a7548f34c038fa24d9d5cb12b1ed18c1ea8dbe86d8"
+dependencies = [
+ "hashbrown 0.17.1",
+ "linebender_resource_handle",
+ "memmap2",
+ "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-core-text",
+ "objc2-foundation 0.3.2",
+ "parlance",
+ "read-fonts 0.46.0",
+ "roxmltree 0.21.2",
+ "smallvec",
+ "windows",
+ "windows-core",
+ "yeslogic-fontconfig-sys",
+]
+
+[[package]]
 name = "foreign-types"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2732,7 +2754,7 @@ version = "0.4.0-unity.20261112"
 dependencies = [
  "anyhow",
  "criterion",
- "fontique",
+ "fontique 0.13.0",
  "gpui-ce",
  "gpui-ce-fonts",
  "gpui_ce_collections",
@@ -4760,7 +4782,7 @@ version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61bd0c0c1737f0b3d3726dc06b225083af213b61913e4fbae1670613a106c6ce"
 dependencies = [
- "fontique",
+ "fontique 0.12.0",
  "hashbrown 0.17.1",
  "linebender_resource_handle",
  "parlance",
@@ -4790,7 +4812,7 @@ version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b74c0d373e462e504ad4436710a39f099e18e848e1ee711f70cd2dcd5a69b290"
 dependencies = [
- "fontique",
+ "fontique 0.12.0",
  "harfrust 0.12.0",
  "hashbrown 0.17.1",
  "icu_locale_core",
