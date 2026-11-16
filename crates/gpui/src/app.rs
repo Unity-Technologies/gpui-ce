@@ -86,6 +86,26 @@ pub struct AppCell {
     app: RefCell<App>,
 }
 
+thread_local! {
+    /// Live `AppRef` and `AppRefMut` guards on this thread.
+    static APP_BORROWS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Whether this thread holds a borrow of an app.
+///
+/// A platform whose OS can re-enter it from inside an app update (a Win32
+/// nested modal loop pumping its messages) checks this before running
+/// foreground tasks, which would otherwise update the app and panic on the
+/// held borrow.
+#[doc(hidden)]
+pub fn app_borrowed_on_this_thread() -> bool {
+    APP_BORROWS.with(|borrows| borrows.get() > 0)
+}
+
+fn note_app_borrow(delta: isize) {
+    APP_BORROWS.with(|borrows| borrows.set(borrows.get().saturating_add_signed(delta)));
+}
+
 impl AppCell {
     #[doc(hidden)]
     #[track_caller]
@@ -94,7 +114,9 @@ impl AppCell {
             let thread_id = std::thread::current().id();
             eprintln!("borrowed {thread_id:?}");
         }
-        AppRef(self.app.borrow())
+        let app = self.app.borrow();
+        note_app_borrow(1);
+        AppRef(app)
     }
 
     #[doc(hidden)]
@@ -104,7 +126,9 @@ impl AppCell {
             let thread_id = std::thread::current().id();
             eprintln!("borrowed {thread_id:?}");
         }
-        AppRefMut(self.app.borrow_mut())
+        let app = self.app.borrow_mut();
+        note_app_borrow(1);
+        AppRefMut(app)
     }
 
     #[doc(hidden)]
@@ -114,7 +138,9 @@ impl AppCell {
             let thread_id = std::thread::current().id();
             eprintln!("borrowed {thread_id:?}");
         }
-        Ok(AppRefMut(self.app.try_borrow_mut()?))
+        let app = self.app.try_borrow_mut()?;
+        note_app_borrow(1);
+        Ok(AppRefMut(app))
     }
 }
 
@@ -124,6 +150,7 @@ pub struct AppRef<'a>(Ref<'a, App>);
 
 impl Drop for AppRef<'_> {
     fn drop(&mut self) {
+        note_app_borrow(-1);
         if option_env!("TRACK_THREAD_BORROWS").is_some() {
             let thread_id = std::thread::current().id();
             eprintln!("dropped borrow from {thread_id:?}");
@@ -137,6 +164,7 @@ pub struct AppRefMut<'a>(RefMut<'a, App>);
 
 impl Drop for AppRefMut<'_> {
     fn drop(&mut self) {
+        note_app_borrow(-1);
         if option_env!("TRACK_THREAD_BORROWS").is_some() {
             let thread_id = std::thread::current().id();
             eprintln!("dropped {thread_id:?}");
@@ -3295,6 +3323,21 @@ mod test {
     use std::os::unix::ffi::OsStringExt;
 
     use crate::{AppContext, Context, Empty, IntoElement, Render, TestAppContext, Window};
+
+    // Adapted for unity/hub-4.0, which has no `Application::run` handle: the
+    // test context borrows the app the same way a platform callback does.
+    #[gpui::test]
+    fn app_borrow_is_visible_to_the_platform_only_while_held(cx: &mut TestAppContext) {
+        assert!(!super::app_borrowed_on_this_thread());
+        assert!(cx.update(|_| super::app_borrowed_on_this_thread()));
+        assert!(!super::app_borrowed_on_this_thread());
+
+        // A failed re-entrant borrow must not leave the count raised.
+        let app = cx.app.clone();
+        let refused = cx.update(|_| app.try_borrow_mut().is_err());
+        assert!(refused);
+        assert!(!super::app_borrowed_on_this_thread());
+    }
 
     struct RenderCounter(Rc<Cell<usize>>);
 
