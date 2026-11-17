@@ -6,7 +6,10 @@ use std::{
     path::PathBuf,
     rc::{Rc, Weak},
     str::FromStr,
-    sync::{Arc, Once, atomic::AtomicBool},
+    sync::{
+        Arc, Once,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -59,6 +62,9 @@ pub struct WindowsWindowState {
     pub last_reported_modifiers: Cell<Option<Modifiers>>,
     pub last_reported_capslock: Cell<Option<Capslock>>,
     pub hovered: Cell<bool>,
+    /// Client-area position of the last `WM_MOUSEMOVE` forwarded, to drop the
+    /// synthetic ones Windows sends when the pointer has not moved.
+    pub last_mouse_position: Cell<Option<(i16, i16)>>,
     pub direct_manipulation: DirectManipulationHandler,
 
     pub renderer: RefCell<WindowRenderer>,
@@ -139,17 +145,39 @@ impl WindowsWindowState {
         };
         let border_offset = WindowBorderOffset::default();
         let restore_from_minimized = None;
-        #[cfg(not(feature = "wgpu"))]
-        let renderer = DirectXRenderer::new(hwnd, directx_devices, disable_direct_composition)
-            .context("Creating DirectX renderer")?;
+        // A WGPU window owns its own device, so WARP devices would not change what it draws on.
         #[cfg(feature = "wgpu")]
-        let renderer = WindowRenderer::new(
-            hwnd,
-            renderer_choice,
+        let retry_cannot_help =
+            directx_devices.is_software() || renderer_choice == WindowsRenderer::Wgpu;
+        #[cfg(not(feature = "wgpu"))]
+        let retry_cannot_help = directx_devices.is_software();
+        let (renderer, fell_back) = retry_on_software(
             directx_devices,
-            renderer_context,
-            disable_direct_composition,
+            retry_cannot_help,
+            |devices| {
+                simulated_hardware_renderer_failure(devices)
+                    .context("Creating DirectX renderer")?;
+                #[cfg(not(feature = "wgpu"))]
+                let renderer = DirectXRenderer::new(hwnd, devices, disable_direct_composition)
+                    .context("Creating DirectX renderer");
+                #[cfg(feature = "wgpu")]
+                let renderer = WindowRenderer::new(
+                    hwnd,
+                    renderer_choice,
+                    devices,
+                    renderer_context,
+                    disable_direct_composition,
+                );
+                renderer
+            },
+            DirectXDevices::new_software,
         )?;
+        if fell_back {
+            // Later device rebuilds now pick WARP. The device-lost path moves the platform's
+            // devices, the text system and every open window onto one WARP device.
+            mark_software_fallback();
+            invalidate_devices.store(true, Ordering::Release);
+        }
         let callbacks = Callbacks::default();
         let input_handler = None;
         let pending_surrogate = None;
@@ -181,6 +209,7 @@ impl WindowsWindowState {
             last_reported_modifiers: Cell::new(last_reported_modifiers),
             last_reported_capslock: Cell::new(last_reported_capslock),
             hovered: Cell::new(hovered),
+            last_mouse_position: Cell::new(None),
             renderer: RefCell::new(renderer),
             force_render_pending: Cell::new(false),
             click_state,

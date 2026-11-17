@@ -90,6 +90,7 @@ struct PlatformCallbacks {
     validate_app_menu_command: Cell<Option<Box<dyn FnMut(&dyn Action) -> bool>>>,
     keyboard_layout_change: Cell<Option<Box<dyn FnMut()>>>,
     system_wake: Cell<Option<Box<dyn FnMut()>>>,
+    gpu_device_lost: Cell<Option<Box<dyn FnMut(GpuDeviceLostError)>>>,
 }
 
 impl WindowsPlatformState {
@@ -339,7 +340,19 @@ impl WindowsPlatform {
                             &all_windows,
                             &text_system,
                         ) {
-                            panic!("Device lost: {err}");
+                            // Report once to the main thread, then stop
+                            // watching the dead device: retrying would only
+                            // fail and report again.
+                            post_gpu_device_unrecoverable(
+                                platform_window.as_raw(),
+                                validation_number,
+                                GpuDeviceLostError {
+                                    adapter_name: adapter_name(&directx_device.adapter),
+                                    stage: "recreating the DirectX devices".to_string(),
+                                    message: format!("{err:#}"),
+                                },
+                            );
+                            directx_devices = None;
                         }
                     }
                     let Some(all_windows) = all_windows.upgrade() else {
@@ -428,6 +441,14 @@ impl Platform for WindowsPlatform {
 
     fn keyboard_mapper(&self) -> Rc<dyn PlatformKeyboardMapper> {
         Rc::new(WindowsKeyboardMapper::new())
+    }
+
+    fn on_gpu_device_lost(&self, callback: Box<dyn FnMut(GpuDeviceLostError)>) {
+        self.inner
+            .state
+            .callbacks
+            .gpu_device_lost
+            .set(Some(callback));
     }
 
     fn on_keyboard_layout_change(&self, callback: Box<dyn FnMut()>) {
@@ -623,12 +644,8 @@ impl Platform for WindowsPlatform {
         options: PathPromptOptions,
     ) -> Receiver<Result<Option<Vec<PathBuf>>>> {
         let (tx, rx) = oneshot::channel();
-        let window = self.find_current_active_window();
-        self.foreground_executor()
-            .spawn(async move {
-                let _ = tx.send(file_open_dialog(options, window));
-            })
-            .detach();
+        let owner = self.find_current_active_window();
+        run_dialog_on_sta_thread(owner, tx, move |window| file_open_dialog(options, window));
 
         rx
     }
@@ -641,12 +658,10 @@ impl Platform for WindowsPlatform {
         let directory = directory.to_owned();
         let suggested_name = suggested_name.map(|s| s.to_owned());
         let (tx, rx) = oneshot::channel();
-        let window = self.find_current_active_window();
-        self.foreground_executor()
-            .spawn(async move {
-                let _ = tx.send(file_save_dialog(directory, suggested_name, window));
-            })
-            .detach();
+        let owner = self.find_current_active_window();
+        run_dialog_on_sta_thread(owner, tx, move |window| {
+            file_save_dialog(directory, suggested_name, window)
+        });
 
         rx
     }
@@ -802,7 +817,7 @@ impl Platform for WindowsPlatform {
         if self.inner.state.current_cursor.get().map(|c| c.0) != hcursor.map(|c| c.0) {
             self.post_message(
                 WM_GPUI_CURSOR_STYLE_CHANGED,
-                WPARAM(0),
+                WPARAM(self.inner.validation_number),
                 LPARAM(hcursor.map_or(0, |c| c.0 as isize)),
             );
             self.inner.state.current_cursor.set(hcursor);
@@ -1015,8 +1030,12 @@ impl WindowsPlatformInner {
             | WM_GPUI_DOCK_MENU_ACTION
             | WM_GPUI_KEYBOARD_LAYOUT_CHANGED
             | WM_GPUI_GPU_DEVICE_LOST
+            | WM_GPUI_GPU_DEVICE_UNRECOVERABLE
             | WM_GPUI_END_SESSION => self.handle_gpui_events(msg, wparam, lparam),
             WM_POWERBROADCAST => self.handle_power_broadcast(wparam),
+            WM_TIMER if wparam.0 == DEFERRED_FOREGROUND_TASKS_TIMER_ID => {
+                self.handle_deferred_foreground_tasks_timer()
+            }
             _ => None,
         };
         if let Some(result) = handled {
@@ -1029,6 +1048,11 @@ impl WindowsPlatformInner {
     fn handle_gpui_events(&self, message: u32, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
         if wparam.0 != self.validation_number {
             log::error!("Wrong validation number while processing message: {message}");
+            if message == WM_GPUI_GPU_DEVICE_UNRECOVERABLE {
+                // Only our own post carries this message, so the box is
+                // ours to free even when the number does not match.
+                drop(unsafe { Box::from_raw(lparam.0 as *mut GpuDeviceLostError) });
+            }
             return None;
         }
         match message {
@@ -1040,6 +1064,7 @@ impl WindowsPlatformInner {
             WM_GPUI_DOCK_MENU_ACTION => self.handle_dock_action_event(lparam.0 as _),
             WM_GPUI_KEYBOARD_LAYOUT_CHANGED => self.handle_keyboard_layout_change(),
             WM_GPUI_GPU_DEVICE_LOST => self.handle_device_lost(lparam),
+            WM_GPUI_GPU_DEVICE_UNRECOVERABLE => self.handle_device_unrecoverable(lparam),
             WM_GPUI_END_SESSION => self.handle_end_session(),
             _ => unreachable!(),
         }
@@ -1081,6 +1106,16 @@ impl WindowsPlatformInner {
     #[inline]
     fn run_foreground_task(&self) -> Option<isize> {
         const MAIN_TASK_TIMEOUT: u128 = 10;
+
+        // A nested modal loop (a tray menu's `TrackPopupMenu`, `SetWindowPlacement`
+        // dispatching into another window) can pump this message from inside an
+        // app update. Running a task then would update the app re-entrantly and
+        // panic on the held borrow, so leave the queue and retry on a timer.
+        // `wake_posted` stays set: the timer is now the pending wake.
+        if gpui::app_borrowed_on_this_thread() {
+            self.defer_foreground_tasks();
+            return Some(0);
+        }
 
         let start = std::time::Instant::now();
         'tasks: loop {
@@ -1145,6 +1180,32 @@ impl WindowsPlatformInner {
         Some(0)
     }
 
+    fn defer_foreground_tasks(&self) {
+        let handle = self.dispatcher.platform_window_handle.as_raw();
+        let armed = unsafe {
+            SetTimer(
+                Some(handle),
+                DEFERRED_FOREGROUND_TASKS_TIMER_ID,
+                USER_TIMER_MINIMUM,
+                None,
+            )
+        };
+        if armed == 0 {
+            log::error!(
+                "unable to defer foreground tasks: {}",
+                std::io::Error::last_os_error()
+            );
+            // Fall back to a fresh post so the queue is not stranded.
+            self.dispatcher.wake_posted.store(false, Ordering::Release);
+        }
+    }
+
+    fn handle_deferred_foreground_tasks_timer(&self) -> Option<isize> {
+        let handle = self.dispatcher.platform_window_handle.as_raw();
+        unsafe { KillTimer(Some(handle), DEFERRED_FOREGROUND_TASKS_TIMER_ID) }.log_err();
+        self.run_foreground_task()
+    }
+
     fn handle_dock_action_event(&self, action_idx: usize) -> Option<isize> {
         let Some(action) = self
             .state
@@ -1177,6 +1238,22 @@ impl WindowsPlatformInner {
             self.with_callback(|callbacks| &callbacks.system_wake, |callback| callback());
         }
         Some(1)
+    }
+
+    /// A lost GPU device that could not be rebuilt
+    /// ([`post_gpu_device_unrecoverable`]): hand it to the app's handler, or
+    /// panic as this backend always did when nothing is registered.
+    fn handle_device_unrecoverable(&self, lparam: LPARAM) -> Option<isize> {
+        // SAFETY: `post_gpu_device_unrecoverable` is the only sender, and it
+        // gives up ownership of this box to the message.
+        let error = *unsafe { Box::from_raw(lparam.0 as *mut GpuDeviceLostError) };
+        log::error!("{error}");
+        let Some(mut callback) = self.state.callbacks.gpu_device_lost.take() else {
+            panic!("Device lost: {error}");
+        };
+        callback(error);
+        self.state.callbacks.gpu_device_lost.set(Some(callback));
+        Some(0)
     }
 
     fn handle_device_lost(&self, lparam: LPARAM) -> Option<isize> {
@@ -1313,6 +1390,59 @@ fn open_target_in_explorer(target: &Path) -> Result<()> {
             Err(anyhow::anyhow!("Can not open target path: {}", err))
         }
     })
+}
+
+/// One lock per owner window, so a second request for the same owner waits instead of stacking
+/// a second modal dialog on it.
+fn owner_dialog_lock(owner: isize) -> Arc<std::sync::Mutex<()>> {
+    static LOCKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<isize, Arc<std::sync::Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(owner)
+        .or_default()
+        .clone()
+}
+
+/// Runs a common file dialog on its own single-threaded-apartment thread, so the UI thread keeps
+/// pumping messages while the dialog is open. `owner` stays the dialog's owner window.
+///
+/// Dropping the receiver is the cancel flag: a request whose receiver is gone by the time it
+/// reaches the front of its owner's queue never shows a dialog.
+fn run_dialog_on_sta_thread<T: Send + 'static>(
+    owner: Option<HWND>,
+    tx: oneshot::Sender<Result<Option<T>>>,
+    dialog: impl FnOnce(Option<HWND>) -> Result<Option<T>> + Send + 'static,
+) {
+    let owner_raw = owner.map(|hwnd| hwnd.0 as isize);
+    let spawned = std::thread::Builder::new()
+        .name("FileDialog".to_string())
+        .spawn(move || {
+            let lock = owner_dialog_lock(owner_raw.unwrap_or(0));
+            let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if tx.is_canceled() {
+                return;
+            }
+            // Dialogs need an STA; the thread owns this apartment for its whole life.
+            let init = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+            let result = if init.is_ok() {
+                let owner = owner_raw.map(|raw| HWND(raw as *mut std::ffi::c_void));
+                let result = dialog(owner);
+                unsafe { CoUninitialize() };
+                result
+            } else {
+                Err(anyhow::anyhow!(
+                    "CoInitializeEx failed for the file dialog thread: {init:?}"
+                ))
+            };
+            let _ = tx.send(result);
+        });
+    if let Err(error) = spawned {
+        log::error!("failed to spawn the file dialog thread: {error}");
+    }
 }
 
 fn file_open_dialog(
@@ -1534,6 +1664,7 @@ fn handle_gpu_device_lost(
 }
 
 const PLATFORM_WINDOW_CLASS_NAME: PCWSTR = w!("Zed::PlatformWindow");
+const DEFERRED_FOREGROUND_TASKS_TIMER_ID: usize = 1;
 
 fn register_platform_window_class() {
     let wc = WNDCLASSW {
@@ -1815,6 +1946,81 @@ mod tests {
         Ok(())
     }
 
+    /// Another process or an injected DLL can send `WM_USER + 7` to a gpui window. The window
+    /// must not read that message's lparam as its `DirectXDevices` pointer unless it carries the
+    /// app's validation number: a null lparam faults at the `device` field, a random one corrupts
+    /// memory.
+    #[test]
+    fn a_foreign_device_lost_message_is_ignored() -> anyhow::Result<()> {
+        use super::WindowsPlatform;
+        use crate::{WM_GPUI_GPU_DEVICE_LOST, WindowsWindow};
+        use gpui::{
+            AnyWindowHandle, Bounds, PlatformWindow as _, WindowHandle, WindowId, WindowKind,
+            WindowParams, point, px, size,
+        };
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{DestroyWindow, SendMessageW};
+
+        struct Root;
+        impl gpui::Render for Root {
+            fn render(
+                &mut self,
+                _: &mut gpui::Window,
+                _: &mut gpui::Context<Self>,
+            ) -> impl gpui::IntoElement {
+                gpui::Empty
+            }
+        }
+
+        let platform = WindowsPlatform::new(false)?;
+        let validation_number = platform.inner.validation_number;
+        let handle: AnyWindowHandle = WindowHandle::<Root>::new(WindowId::from(1)).into();
+        let window = WindowsWindow::new(
+            handle,
+            WindowParams {
+                bounds: Bounds::new(point(px(100.), px(100.)), size(px(400.), px(300.))),
+                titlebar: None,
+                kind: WindowKind::Normal,
+                is_movable: true,
+                app_owns_titlebar_drag: false,
+                is_resizable: true,
+                is_minimizable: true,
+                focus: false,
+                show: false,
+                icon: None,
+                display_id: None,
+                app_id: None,
+                window_min_size: None,
+                windows_renderer: Default::default(),
+            },
+            platform.generate_creation_info(),
+        )?;
+        let hwnd = window.get_raw_handle();
+        let size_before = window.0.state.renderer.borrow().drawable_size();
+
+        // Neither message carries the token, so neither lparam may be dereferenced. Before the
+        // check, the null one crashed with an access violation at 0x10.
+        for (wparam, lparam) in [(0, 0), (validation_number.wrapping_add(1), 0x10)] {
+            unsafe {
+                SendMessageW(
+                    hwnd,
+                    WM_GPUI_GPU_DEVICE_LOST,
+                    Some(WPARAM(wparam)),
+                    Some(LPARAM(lparam)),
+                );
+            }
+        }
+
+        assert_eq!(
+            window.0.state.renderer.borrow().drawable_size(),
+            size_before,
+            "the renderer must be untouched by a message without the token"
+        );
+
+        unsafe { DestroyWindow(hwnd)? };
+        Ok(())
+    }
+
     #[test]
     fn test_clipboard() {
         let item = ClipboardItem::new_string("你好，我是张小白".to_string());
@@ -1828,5 +2034,45 @@ mod tests {
         let item = ClipboardItem::new_string_with_json_metadata("abcdef".to_string(), vec![3, 4]);
         write_to_clipboard(item.clone());
         assert_eq!(read_from_clipboard(), Some(item));
+    }
+
+    #[test]
+    fn a_foreground_task_pumped_inside_an_app_update_waits_for_it() {
+        use std::{cell::Cell, rc::Rc};
+
+        use windows::Win32::{
+            Foundation::{LPARAM, WPARAM},
+            UI::WindowsAndMessaging::SendMessageW,
+        };
+
+        let platform = Rc::new(super::WindowsPlatform::new(true).unwrap());
+        let handle = platform.handle;
+        let validation_number = platform.inner.validation_number;
+        let ran = Rc::new(Cell::new(false));
+        let ran_inside_update = Rc::new(Cell::new(None));
+
+        gpui::Application::with_platform(platform).run({
+            let ran = ran.clone();
+            let ran_inside_update = ran_inside_update.clone();
+            move |cx| {
+                let task_ran = ran.clone();
+                cx.spawn(async move |_| task_ran.set(true)).detach();
+                // The launch callback holds the app borrow, as `open_window` does
+                // when a tray menu's modal loop pumps the wake synchronously.
+                unsafe {
+                    SendMessageW(
+                        handle,
+                        super::WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD,
+                        Some(WPARAM(validation_number)),
+                        Some(LPARAM(0)),
+                    )
+                };
+                ran_inside_update.set(Some(ran.get()));
+                cx.quit();
+            }
+        });
+
+        assert_eq!(ran_inside_update.get(), Some(false));
+        assert!(ran.get(), "the deferred task runs once the update ends");
     }
 }

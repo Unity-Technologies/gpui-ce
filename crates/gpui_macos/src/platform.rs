@@ -196,8 +196,8 @@ pub(crate) struct MacPlatformState {
     renderer_context: renderer::Context,
     headless: bool,
     activation_policy: Option<MacActivationPolicy>,
-    general_pasteboard: Pasteboard,
-    find_pasteboard: Pasteboard,
+    general_pasteboard: Option<Pasteboard>,
+    find_pasteboard: Option<Pasteboard>,
     reopen: Option<Box<dyn FnMut()>>,
     on_keyboard_layout_change: Option<Box<dyn FnMut()>>,
     on_thermal_state_change: Option<Box<dyn FnMut()>>,
@@ -810,7 +810,13 @@ impl Platform for MacPlatform {
         self.foreground_executor()
             .spawn(async move {
                 {
-                    let panel = NSOpenPanel::openPanel(MainThreadMarker::new().unwrap());
+                    // A nil panel (AppKit under memory or sandbox pressure) must not panic.
+                    let panel: Option<Retained<NSOpenPanel>> =
+                        unsafe { msg_send![NSOpenPanel::class(), openPanel] };
+                    let Some(panel) = panel else {
+                        let _ = done_tx.send(Err(anyhow!("AppKit returned no open panel")));
+                        return;
+                    };
                     panel.setCanChooseDirectories(options.directories);
                     panel.setCanChooseFiles(options.files);
                     panel.setAllowsMultipleSelection(options.multiple);
@@ -867,7 +873,12 @@ impl Platform for MacPlatform {
         self.foreground_executor()
             .spawn(async move {
                 {
-                    let panel = NSSavePanel::savePanel(MainThreadMarker::new().unwrap());
+                    let panel: Option<Retained<NSSavePanel>> =
+                        unsafe { msg_send![NSSavePanel::class(), savePanel] };
+                    let Some(panel) = panel else {
+                        let _ = done_tx.send(Err(anyhow!("AppKit returned no save panel")));
+                        return;
+                    };
                     let path = ns_string(directory.to_string_lossy().as_ref());
                     let url = NSURL::fileURLWithPath_isDirectory(&path, true);
                     panel.setDirectoryURL(Some(&url));
@@ -1124,22 +1135,26 @@ impl Platform for MacPlatform {
 
     fn read_from_clipboard(&self) -> Option<ClipboardItem> {
         let state = self.0.lock();
-        state.general_pasteboard.read()
+        state.general_pasteboard.as_ref()?.read()
     }
 
     fn write_to_clipboard(&self, item: ClipboardItem) {
         let state = self.0.lock();
-        state.general_pasteboard.write(item);
+        if let Some(pasteboard) = state.general_pasteboard.as_ref() {
+            pasteboard.write(item);
+        }
     }
 
     fn read_from_find_pasteboard(&self) -> Option<ClipboardItem> {
         let state = self.0.lock();
-        state.find_pasteboard.read()
+        state.find_pasteboard.as_ref()?.read()
     }
 
     fn write_to_find_pasteboard(&self, item: ClipboardItem) {
         let state = self.0.lock();
-        state.find_pasteboard.write(item);
+        if let Some(pasteboard) = state.find_pasteboard.as_ref() {
+            pasteboard.write(item);
+        }
     }
 
     fn write_credentials(&self, url: &str, username: &str, password: &[u8]) -> Task<Result<()>> {

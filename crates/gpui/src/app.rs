@@ -86,6 +86,26 @@ pub struct AppCell {
     app: RefCell<App>,
 }
 
+thread_local! {
+    /// Live `AppRef` and `AppRefMut` guards on this thread.
+    static APP_BORROWS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Whether this thread holds a borrow of an app.
+///
+/// A platform whose OS can re-enter it from inside an app update (a Win32
+/// nested modal loop pumping its messages) checks this before running
+/// foreground tasks, which would otherwise update the app and panic on the
+/// held borrow.
+#[doc(hidden)]
+pub fn app_borrowed_on_this_thread() -> bool {
+    APP_BORROWS.with(|borrows| borrows.get() > 0)
+}
+
+fn note_app_borrow(delta: isize) {
+    APP_BORROWS.with(|borrows| borrows.set(borrows.get().saturating_add_signed(delta)));
+}
+
 impl AppCell {
     #[doc(hidden)]
     #[track_caller]
@@ -94,7 +114,9 @@ impl AppCell {
             let thread_id = std::thread::current().id();
             eprintln!("borrowed {thread_id:?}");
         }
-        AppRef(self.app.borrow())
+        let app = self.app.borrow();
+        note_app_borrow(1);
+        AppRef(app)
     }
 
     #[doc(hidden)]
@@ -104,7 +126,9 @@ impl AppCell {
             let thread_id = std::thread::current().id();
             eprintln!("borrowed {thread_id:?}");
         }
-        AppRefMut(self.app.borrow_mut())
+        let app = self.app.borrow_mut();
+        note_app_borrow(1);
+        AppRefMut(app)
     }
 
     #[doc(hidden)]
@@ -114,7 +138,9 @@ impl AppCell {
             let thread_id = std::thread::current().id();
             eprintln!("borrowed {thread_id:?}");
         }
-        Ok(AppRefMut(self.app.try_borrow_mut()?))
+        let app = self.app.try_borrow_mut()?;
+        note_app_borrow(1);
+        Ok(AppRefMut(app))
     }
 }
 
@@ -124,6 +150,7 @@ pub struct AppRef<'a>(Ref<'a, App>);
 
 impl Drop for AppRef<'_> {
     fn drop(&mut self) {
+        note_app_borrow(-1);
         if option_env!("TRACK_THREAD_BORROWS").is_some() {
             let thread_id = std::thread::current().id();
             eprintln!("dropped borrow from {thread_id:?}");
@@ -137,6 +164,7 @@ pub struct AppRefMut<'a>(RefMut<'a, App>);
 
 impl Drop for AppRefMut<'_> {
     fn drop(&mut self) {
+        note_app_borrow(-1);
         if option_env!("TRACK_THREAD_BORROWS").is_some() {
             let thread_id = std::thread::current().id();
             eprintln!("dropped {thread_id:?}");
@@ -759,6 +787,9 @@ pub struct App {
     pub(crate) keyboard_layout_observers: SubscriberSet<(), Handler>,
     pub(crate) thermal_state_observers: SubscriberSet<(), Handler>,
     pub(crate) system_wake_observers: SubscriberSet<(), Handler>,
+    /// Whether the platform wake callback is registered. It is added with the
+    /// first observer, so an app with none never subscribes to wake events.
+    system_wake_registered: Cell<bool>,
     pub(crate) release_listeners: SubscriberSet<EntityId, ReleaseListener>,
     pub(crate) global_observers: SubscriberSet<TypeId, Handler>,
     pub(crate) quit_observers: SubscriberSet<(), QuitHandler>,
@@ -901,6 +932,7 @@ impl App {
                 keyboard_layout_observers: SubscriberSet::new(),
                 thermal_state_observers: SubscriberSet::new(),
                 system_wake_observers: SubscriberSet::new(),
+                system_wake_registered: Cell::new(false),
                 global_observers: SubscriberSet::new(),
                 quit_observers: SubscriberSet::new(),
                 restart_observers: SubscriberSet::new(),
@@ -955,18 +987,6 @@ impl App {
                 if let Some(app) = app.upgrade() {
                     let cx = &mut app.borrow_mut();
                     cx.thermal_state_observers
-                        .clone()
-                        .retain(&(), move |callback| (callback)(cx));
-                }
-            }
-        }));
-
-        platform.on_system_wake(Box::new({
-            let app = Rc::downgrade(&app);
-            move || {
-                if let Some(app) = app.upgrade() {
-                    let cx = &mut app.borrow_mut();
-                    cx.system_wake_observers
                         .clone()
                         .retain(&(), move |callback| (callback)(cx));
                 }
@@ -1167,20 +1187,21 @@ impl App {
         })
     }
 
+    /// Runs `callback` and returns every entity it read, including ones
+    /// already read earlier this frame: a cached view depends on all of them,
+    /// not only on the ones its parent did not read first.
     pub(crate) fn detect_accessed_entities<R>(
         &mut self,
         callback: impl FnOnce(&mut App) -> R,
     ) -> (R, FxHashSet<EntityId>) {
-        let accessed_entities_start = self.entities.accessed_entities.get_mut().clone();
+        let outer = mem::take(self.entities.accessed_entities.get_mut());
         let result = callback(self);
-        let entities_accessed_in_callback = self
-            .entities
+        let accessed = mem::replace(self.entities.accessed_entities.get_mut(), outer);
+        self.entities
             .accessed_entities
             .get_mut()
-            .difference(&accessed_entities_start)
-            .copied()
-            .collect::<FxHashSet<EntityId>>();
-        (result, entities_accessed_in_callback)
+            .extend(accessed.iter().copied());
+        (result, accessed)
     }
 
     pub(crate) fn record_entities_accessed(
@@ -1439,11 +1460,58 @@ impl App {
         subscription
     }
 
+    /// Registers the handler for a GPU device that was lost and could not be
+    /// rebuilt ([`GpuDeviceLostError`]), replacing the backend's panic. Only
+    /// Windows reports one. The handler runs on the main thread from the
+    /// platform's message loop and gets no `App`, so it can never re-enter an
+    /// `App` borrow; nothing can draw afterwards, so it should end the process.
+    pub fn on_gpu_device_lost<F>(&self, callback: F)
+    where
+        F: 'static + FnMut(crate::GpuDeviceLostError),
+    {
+        self.platform.on_gpu_device_lost(Box::new(callback));
+    }
+
+    fn register_system_wake_handler(&self) {
+        if self.system_wake_registered.replace(true) {
+            return;
+        }
+        fn notify(cx: &mut App) {
+            cx.system_wake_observers
+                .clone()
+                .retain(&(), move |callback| (callback)(cx));
+        }
+        let app = self.this.clone();
+        let executor = self.foreground_executor.clone();
+        self.platform.on_system_wake(Box::new(move || {
+            let Some(strong) = app.upgrade() else {
+                return;
+            };
+            match strong.try_borrow_mut() {
+                Ok(mut cx) => notify(&mut cx),
+                Err(_) => {
+                    // The wake message arrived in a message pump nested inside a
+                    // callback that holds the App, so run the observers once it
+                    // is free instead of panicking on the borrow.
+                    let app = app.clone();
+                    executor
+                        .spawn(async move {
+                            if let Some(app) = app.upgrade() {
+                                notify(&mut app.borrow_mut());
+                            }
+                        })
+                        .detach();
+                }
+            }
+        }));
+    }
+
     /// Invokes a handler when the system wakes from sleep.
     pub fn on_system_wake<F>(&self, mut callback: F) -> Subscription
     where
         F: 'static + FnMut(&mut App),
     {
+        self.register_system_wake_handler();
         let (subscription, activate) = self.system_wake_observers.insert(
             (),
             Box::new(move |cx| {
@@ -3255,6 +3323,21 @@ mod test {
     use std::os::unix::ffi::OsStringExt;
 
     use crate::{AppContext, Context, Empty, IntoElement, Render, TestAppContext, Window};
+
+    // Adapted for unity/hub-4.0, which has no `Application::run` handle: the
+    // test context borrows the app the same way a platform callback does.
+    #[gpui::test]
+    fn app_borrow_is_visible_to_the_platform_only_while_held(cx: &mut TestAppContext) {
+        assert!(!super::app_borrowed_on_this_thread());
+        assert!(cx.update(|_| super::app_borrowed_on_this_thread()));
+        assert!(!super::app_borrowed_on_this_thread());
+
+        // A failed re-entrant borrow must not leave the count raised.
+        let app = cx.app.clone();
+        let refused = cx.update(|_| app.try_borrow_mut().is_err());
+        assert!(refused);
+        assert!(!super::app_borrowed_on_this_thread());
+    }
 
     struct RenderCounter(Rc<Cell<usize>>);
 

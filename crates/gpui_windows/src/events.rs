@@ -29,6 +29,10 @@ pub(crate) const WM_GPUI_KEYBOARD_LAYOUT_CHANGED: u32 = WM_USER + 6;
 pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
 pub(crate) const WM_GPUI_KEYDOWN: u32 = WM_USER + 8;
 pub(crate) const WM_GPUI_END_SESSION: u32 = WM_USER + 9;
+/// Posted to the platform window when a lost GPU device could not be
+/// rebuilt. Its `LPARAM` owns a `Box<GpuDeviceLostError>`
+/// ([`post_gpu_device_unrecoverable`]).
+pub(crate) const WM_GPUI_GPU_DEVICE_UNRECOVERABLE: u32 = WM_USER + 11;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
 
@@ -159,9 +163,9 @@ impl WindowsWindowInner {
             WM_SETTINGCHANGE => self.handle_system_settings_changed(handle, wparam, lparam),
             WM_INPUTLANGCHANGE => self.handle_input_language_changed(),
             WM_SHOWWINDOW => self.handle_window_visibility_changed(handle, wparam),
-            WM_GPUI_CURSOR_STYLE_CHANGED => self.handle_cursor_changed(lparam),
+            WM_GPUI_CURSOR_STYLE_CHANGED => self.handle_cursor_changed(wparam, lparam),
             WM_GPUI_FORCE_UPDATE_WINDOW => self.draw_window(handle, true),
-            WM_GPUI_GPU_DEVICE_LOST => self.handle_device_lost(lparam),
+            WM_GPUI_GPU_DEVICE_LOST => self.handle_device_lost(wparam, lparam),
             DM_POINTERHITTEST => self.handle_dm_pointer_hit_test(wparam),
             WM_GETOBJECT => self.handle_wm_getobject(wparam, lparam),
             _ => None,
@@ -272,12 +276,21 @@ impl WindowsWindowInner {
         let new_logical_size = device_size.to_pixels(scale_factor);
 
         self.state.logical_size.set(new_logical_size);
-        if let Err(e) = self.state.renderer.borrow_mut().resize(device_size) {
-            log::error!("Failed to resize renderer, invalidating devices: {}", e);
-            self.state
-                .invalidate_devices
-                .store(true, std::sync::atomic::Ordering::Release);
+        let mut renderer = self.state.renderer.borrow_mut();
+        if let Err(e) = renderer.resize(device_size) {
+            // Only a removed device needs recovery. Any other failure (an
+            // out-of-memory resize, say) leaves the device usable, and the
+            // renderer retries the resize on its next draw.
+            if renderer.is_device_removed() {
+                log::error!("Failed to resize renderer, invalidating devices: {}", e);
+                self.state
+                    .invalidate_devices
+                    .store(true, std::sync::atomic::Ordering::Release);
+            } else {
+                log::warn!("Failed to resize renderer, will retry: {}", e);
+            }
         }
+        drop(renderer);
         if let Some(mut callback) = self.state.callbacks.resize.take() {
             callback(new_logical_size, scale_factor);
             self.state.callbacks.resize.set(Some(callback));
@@ -318,9 +331,13 @@ impl WindowsWindowInner {
 
     fn handle_timer_msg(&self, handle: HWND, wparam: WPARAM) -> Option<isize> {
         if wparam.0 == SIZE_MOVE_LOOP_TIMER_ID {
-            let mut runnables = self.main_receiver.clone().try_iter();
-            while let Some(Ok(runnable)) = runnables.next() {
-                WindowsDispatcher::execute_runnable(runnable);
+            // A move loop entered from inside an app update leaves the tasks
+            // queued; their pending wake runs them once the borrow ends.
+            if !gpui::app_borrowed_on_this_thread() {
+                let mut runnables = self.main_receiver.clone().try_iter();
+                while let Some(Ok(runnable)) = runnables.next() {
+                    WindowsDispatcher::execute_runnable(runnable);
+                }
             }
             self.handle_paint_msg(handle)
         } else {
@@ -366,6 +383,14 @@ impl WindowsWindowInner {
 
     fn handle_mouse_move_msg(&self, handle: HWND, lparam: LPARAM, wparam: WPARAM) -> Option<isize> {
         self.start_tracking_mouse(handle, TME_LEAVE);
+
+        // Windows also sends WM_MOUSEMOVE when content moves under a still
+        // pointer (a list scrolling, a window appearing). Forwarding those would
+        // let hover steal keyboard selection and un-hide a hidden cursor.
+        let position = (lparam.signed_loword(), lparam.signed_hiword());
+        if self.state.last_mouse_position.replace(Some(position)) == Some(position) {
+            return Some(0);
+        }
         self.restore_cursor_after_hide();
 
         let Some(mut func) = self.state.callbacks.input.take() else {
@@ -400,6 +425,7 @@ impl WindowsWindowInner {
 
     fn handle_mouse_leave_msg(&self) -> Option<isize> {
         self.state.hovered.set(false);
+        self.state.last_mouse_position.set(None);
         // The next window's `WM_SETCURSOR` picks its own cursor, so we just clear
         // the flag for tight `is_cursor_visible()` semantics.
         self.state.cursor_visible.store(true, Ordering::Relaxed);
@@ -1163,7 +1189,13 @@ impl WindowsWindowInner {
         None
     }
 
-    fn handle_cursor_changed(&self, lparam: LPARAM) -> Option<isize> {
+    fn handle_cursor_changed(&self, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
+        // lparam is read as an HCURSOR handle, so only trust a message that
+        // carries this app's token, as the platform-window messages do.
+        if wparam.0 != self.validation_number {
+            log::error!("Wrong validation number while processing cursor style message");
+            return None;
+        }
         let had_cursor = self.state.current_cursor.get().is_some();
 
         self.state.current_cursor.set(if lparam.0 == 0 {
@@ -1271,7 +1303,14 @@ impl WindowsWindowInner {
         None
     }
 
-    fn handle_device_lost(&self, lparam: LPARAM) -> Option<isize> {
+    fn handle_device_lost(&self, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
+        // lparam is read as a `*const DirectXDevices`. `WM_USER + 7` is a common
+        // number that IMEs, overlays and accessibility tools also send, so only
+        // trust a message that carries this app's token.
+        if wparam.0 != self.validation_number {
+            log::error!("Wrong validation number while processing device lost message");
+            return None;
+        }
         let devices = lparam.0 as *const DirectXDevices;
         let devices = unsafe { &*devices };
         if let Err(err) = self
@@ -1280,7 +1319,22 @@ impl WindowsWindowInner {
             .borrow_mut()
             .handle_device_lost(&devices)
         {
-            panic!("Device lost: {err}");
+            // This window cannot draw on the new device. Hand the failure to
+            // the app on the platform window, after this message returns, so
+            // the handler never runs inside the renderer borrow. A failed
+            // recovery leaves the renderer without devices, so the draws
+            // that come before the handler fail (and log) instead of
+            // touching the dead device.
+            post_gpu_device_unrecoverable(
+                self.platform_window_handle,
+                self.validation_number,
+                GpuDeviceLostError {
+                    adapter_name: adapter_name(&devices.adapter),
+                    stage: "recreating the window renderer".to_string(),
+                    message: format!("{err:#}"),
+                },
+            );
+            return Some(0);
         }
         // Make sure the first `draw_window` after recovery (whether it comes
         // from the forced WM_GPUI_FORCE_UPDATE_WINDOW or a stray WM_PAINT in
@@ -1785,5 +1839,32 @@ fn notify_frame_changed(handle: HWND) {
 fn park_frame_callback<T>(request_frame: &Cell<Option<T>>, parked: &Cell<Option<T>>) {
     if let Some(callback) = request_frame.take() {
         parked.set(Some(callback));
+    }
+}
+
+/// Post a [`GpuDeviceLostError`] to the platform window, which hands it to
+/// the app's `on_gpu_device_lost` handler (or panics without one). Safe from
+/// any thread: the platform window frees the box on the main thread. When the
+/// post fails, nothing would ever report the failure, so this panics as the
+/// code it replaced did.
+pub(crate) fn post_gpu_device_unrecoverable(
+    platform_window: HWND,
+    validation_number: usize,
+    error: GpuDeviceLostError,
+) {
+    let error = Box::into_raw(Box::new(error));
+    let posted = unsafe {
+        PostMessageW(
+            Some(platform_window),
+            WM_GPUI_GPU_DEVICE_UNRECOVERABLE,
+            WPARAM(validation_number),
+            LPARAM(error as isize),
+        )
+    };
+    if let Err(post_error) = posted {
+        // SAFETY: the post failed, so the message (and the box's ownership)
+        // never reached the platform window; this is the only owner left.
+        let error = unsafe { Box::from_raw(error) };
+        panic!("Device lost: {error} (could not report it: {post_error})");
     }
 }

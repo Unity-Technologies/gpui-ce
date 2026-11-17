@@ -25,8 +25,13 @@ impl MetalAtlas {
         }))
     }
 
-    pub(crate) fn metal_texture(&self, id: AtlasTextureId) -> metal::Texture {
-        self.0.lock().texture(id).metal_texture.clone()
+    /// The Metal texture behind `id`, or `None` once the atlas released it. A batch can name a
+    /// texture the atlas dropped between painting and encoding, so the renderer skips it.
+    pub(crate) fn metal_texture(&self, id: AtlasTextureId) -> Option<metal::Texture> {
+        self.0
+            .lock()
+            .texture(id)
+            .map(|texture| texture.metal_texture.clone())
     }
 }
 
@@ -123,7 +128,9 @@ impl MetalAtlasState {
         let tile = self
             .allocate(size, key.texture_kind())
             .context("failed to allocate")?;
-        self.texture(tile.texture_id).upload(tile.bounds, bytes);
+        self.texture(tile.texture_id)
+            .context("atlas texture missing right after allocation")?
+            .upload(tile.bounds, bytes);
         self.tiles_by_key.insert(key, tile);
 
         Ok(tile)
@@ -228,13 +235,13 @@ impl MetalAtlasState {
         .unwrap()
     }
 
-    fn texture(&self, id: AtlasTextureId) -> &MetalAtlasTexture {
+    fn texture(&self, id: AtlasTextureId) -> Option<&MetalAtlasTexture> {
         let textures = match id.kind {
             AtlasTextureKind::Monochrome => &self.monochrome_textures,
             AtlasTextureKind::Polychrome => &self.polychrome_textures,
             AtlasTextureKind::Subpixel => unreachable!(),
         };
-        textures[id.index as usize].as_ref().unwrap()
+        textures.textures.get(id.index as usize)?.as_ref()
     }
 }
 
@@ -442,7 +449,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            atlas.metal_texture(tile.texture_id).pixel_format(),
+            atlas.metal_texture(tile.texture_id).unwrap().pixel_format(),
             metal::MTLPixelFormat::R8Unorm
         );
     }
