@@ -1051,6 +1051,9 @@ impl WindowsPlatformInner {
             | WM_GPUI_GPU_DEVICE_UNRECOVERABLE
             | WM_GPUI_END_SESSION => self.handle_gpui_events(msg, wparam, lparam),
             WM_POWERBROADCAST => self.handle_power_broadcast(wparam),
+            WM_TIMER if wparam.0 == DEFERRED_FOREGROUND_TASKS_TIMER_ID => {
+                self.handle_deferred_foreground_tasks_timer()
+            }
             _ => None,
         };
         if let Some(result) = handled {
@@ -1123,6 +1126,16 @@ impl WindowsPlatformInner {
     fn run_foreground_task(&self) -> Option<isize> {
         const MAIN_TASK_TIMEOUT: u128 = 10;
 
+        // A nested modal loop (a tray menu's `TrackPopupMenu`, `SetWindowPlacement`
+        // dispatching into another window) can pump this message from inside an
+        // app update. Running a task then would update the app re-entrantly and
+        // panic on the held borrow, so leave the queue and retry on a timer.
+        // `wake_posted` stays set: the timer is now the pending wake.
+        if gpui::app_borrowed_on_this_thread() {
+            self.defer_foreground_tasks();
+            return Some(0);
+        }
+
         let start = std::time::Instant::now();
         'tasks: loop {
             'timeout_loop: loop {
@@ -1184,6 +1197,32 @@ impl WindowsPlatformInner {
         }
 
         Some(0)
+    }
+
+    fn defer_foreground_tasks(&self) {
+        let handle = self.dispatcher.platform_window_handle.as_raw();
+        let armed = unsafe {
+            SetTimer(
+                Some(handle),
+                DEFERRED_FOREGROUND_TASKS_TIMER_ID,
+                USER_TIMER_MINIMUM,
+                None,
+            )
+        };
+        if armed == 0 {
+            log::error!(
+                "unable to defer foreground tasks: {}",
+                std::io::Error::last_os_error()
+            );
+            // Fall back to a fresh post so the queue is not stranded.
+            self.dispatcher.wake_posted.store(false, Ordering::Release);
+        }
+    }
+
+    fn handle_deferred_foreground_tasks_timer(&self) -> Option<isize> {
+        let handle = self.dispatcher.platform_window_handle.as_raw();
+        unsafe { KillTimer(Some(handle), DEFERRED_FOREGROUND_TASKS_TIMER_ID) }.log_err();
+        self.run_foreground_task()
     }
 
     fn handle_dock_action_event(&self, action_idx: usize) -> Option<isize> {
@@ -1652,6 +1691,7 @@ fn handle_gpu_device_lost(
 }
 
 const PLATFORM_WINDOW_CLASS_NAME: PCWSTR = w!("Zed::PlatformWindow");
+const DEFERRED_FOREGROUND_TASKS_TIMER_ID: usize = 1;
 
 fn register_platform_window_class() {
     let wc = WNDCLASSW {
@@ -2021,5 +2061,45 @@ mod tests {
         let item = ClipboardItem::new_string_with_json_metadata("abcdef".to_string(), vec![3, 4]);
         write_to_clipboard(item.clone());
         assert_eq!(read_from_clipboard(), Some(item));
+    }
+
+    #[test]
+    fn a_foreground_task_pumped_inside_an_app_update_waits_for_it() {
+        use std::{cell::Cell, rc::Rc};
+
+        use windows::Win32::{
+            Foundation::{LPARAM, WPARAM},
+            UI::WindowsAndMessaging::SendMessageW,
+        };
+
+        let platform = Rc::new(super::WindowsPlatform::new(true).unwrap());
+        let handle = platform.handle;
+        let validation_number = platform.inner.validation_number;
+        let ran = Rc::new(Cell::new(false));
+        let ran_inside_update = Rc::new(Cell::new(None));
+
+        gpui::Application::with_platform(platform).run({
+            let ran = ran.clone();
+            let ran_inside_update = ran_inside_update.clone();
+            move |cx| {
+                let task_ran = ran.clone();
+                cx.spawn(async move |_| task_ran.set(true)).detach();
+                // The launch callback holds the app borrow, as `open_window` does
+                // when a tray menu's modal loop pumps the wake synchronously.
+                unsafe {
+                    SendMessageW(
+                        handle,
+                        super::WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD,
+                        Some(WPARAM(validation_number)),
+                        Some(LPARAM(0)),
+                    )
+                };
+                ran_inside_update.set(Some(ran.get()));
+                cx.quit();
+            }
+        });
+
+        assert_eq!(ran_inside_update.get(), Some(false));
+        assert!(ran.get(), "the deferred task runs once the update ends");
     }
 }
