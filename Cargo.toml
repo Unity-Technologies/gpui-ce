@@ -257,7 +257,7 @@ objc2-screen-capture-kit = { version = "0.3", default-features = false, features
   "objc2-core-media",
 ] }
 semver = { version = "1.0", features = ["serde"] }
-windows-core = "0.62.2"
+windows-core = "0.100.0"
 tokio = { version = "1" }
 gpui_util = { path = "crates/gpui_ce_util", version = "=0.4.0-unity.20261112", registry = "unity", package = "gpui_ce_util" }
 
