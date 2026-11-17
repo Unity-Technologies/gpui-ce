@@ -282,7 +282,7 @@ gpui_tokio = { path = "./crates/gpui_tokio/", version = "=0.4.0-unity.20261112",
 as-raw-xcb-connection = "1"
 async-fs = "2.1"
 async_zip = "0.0.19"
-bindgen = "0.72"
+bindgen = "0.73"
 bytemuck = "1"
 calloop = "0.14.3"
 calloop-wayland-source = "0.4.1"
