@@ -1363,102 +1363,40 @@ impl TruncationCandidate {
     }
 }
 
-/// Keeps independent prefix and suffix iterators because middle truncation moves
-/// their cuts in opposite directions. Narrowing them with the candidate search
-/// limits rescanning without collecting offsets into a vector. Bounds remain
-/// inclusive so adjacent middle candidates can reuse the same cut.
-struct TruncationBoundaries<Boundaries> {
+/// Byte offsets of every grapheme boundary, read once front to back. Walking a
+/// grapheme iterator from its back end can panic inside `unicode-segmentation`,
+/// so the candidate search indexes this list instead of consuming an iterator
+/// from both ends.
+struct TruncationBoundaries {
     grapheme_count: usize,
-    front: BoundaryWindow<Boundaries>,
-    back: BoundaryWindow<Boundaries>,
+    offsets: Vec<usize>,
 }
 
-impl<Boundaries: DoubleEndedIterator<Item = usize> + Clone> TruncationBoundaries<Boundaries> {
-    fn new(boundaries: Boundaries, grapheme_count: usize) -> Self {
+impl TruncationBoundaries {
+    fn new(boundaries: impl Iterator<Item = usize>, grapheme_count: usize) -> Self {
+        let mut offsets = Vec::with_capacity(grapheme_count + 1);
+        offsets.extend(boundaries);
+
         Self {
             grapheme_count,
-            front: BoundaryWindow {
-                boundaries: boundaries.clone(),
-                first: 0,
-                last: grapheme_count,
-            },
-            back: BoundaryWindow {
-                boundaries,
-                first: 0,
-                last: grapheme_count,
-            },
+            offsets,
         }
     }
 
-    fn narrow(&mut self, keep: usize, direction: TruncateFrom, fits: bool) {
-        let (front_count, back_count) = match direction {
-            TruncateFrom::End => (keep, 0),
-            TruncateFrom::Start => (0, keep),
-            TruncateFrom::Middle => {
-                let front_count = keep.saturating_mul(2).div_ceil(3);
-
-                (front_count, keep - front_count)
-            }
-        };
-
-        if direction != TruncateFrom::Start {
-            if fits {
-                self.front.retain_after(front_count);
-            } else {
-                self.front.retain_before(front_count);
-            }
-        }
-
-        if direction != TruncateFrom::End {
-            let back_index = self.grapheme_count - back_count;
-
-            if fits {
-                self.back.retain_before(back_index);
-            } else {
-                self.back.retain_after(back_index);
-            }
-        }
-    }
-}
-
-struct BoundaryWindow<Boundaries> {
-    boundaries: Boundaries,
-    first: usize,
-    last: usize,
-}
-
-impl<Boundaries: DoubleEndedIterator<Item = usize> + Clone> BoundaryWindow<Boundaries> {
+    /// Offset of boundary `index`, clamped so a short list never panics.
     fn get(&self, index: usize) -> usize {
-        let from_start = index - self.first;
-        let from_end = self.last - index;
-
-        if from_start <= from_end {
-            self.boundaries.clone().nth(from_start)
-        } else {
-            self.boundaries.clone().nth_back(from_end)
-        }
-        .expect("grapheme boundary is present")
-    }
-
-    fn retain_after(&mut self, index: usize) {
-        if index > self.first {
-            let _boundary = self.boundaries.nth(index - self.first - 1);
-            self.first = index;
-        }
-    }
-
-    fn retain_before(&mut self, index: usize) {
-        if index < self.last {
-            let _boundary = self.boundaries.nth_back(self.last - index - 1);
-            self.last = index;
-        }
+        self.offsets
+            .get(index)
+            .or(self.offsets.last())
+            .copied()
+            .unwrap_or_default()
     }
 }
 
 /// Keeps the measured candidate with its output. Even an estimated starting point must fit.
 pub(crate) fn truncate_with_measured_candidates<Layout>(
     text: &str,
-    boundaries: impl DoubleEndedIterator<Item = usize> + Clone,
+    boundaries: impl Iterator<Item = usize> + Clone,
     initial_keep: Option<usize>,
     affix: &str,
     runs: &[TextRun],
@@ -1467,7 +1405,7 @@ pub(crate) fn truncate_with_measured_candidates<Layout>(
 ) -> (TruncationCandidate, Layout) {
     let boundary_count = boundaries.clone().count();
     let grapheme_count = boundary_count.saturating_sub(1);
-    let mut boundaries = TruncationBoundaries::new(boundaries, grapheme_count);
+    let boundaries = TruncationBoundaries::new(boundaries, grapheme_count);
 
     let mut lower = 0;
     let mut upper = boundary_count.saturating_sub(2);
@@ -1492,14 +1430,13 @@ pub(crate) fn truncate_with_measured_candidates<Layout>(
             return best.expect("a fitting candidate was measured");
         }
 
-        boundaries.narrow(keep, direction, fits);
         keep = lower + (upper - lower) / 2;
     }
 }
 
 fn make_truncation_candidate(
     text: &str,
-    boundaries: &TruncationBoundaries<impl DoubleEndedIterator<Item = usize> + Clone>,
+    boundaries: &TruncationBoundaries,
     keep: usize,
     affix: &str,
     runs: &[TextRun],
@@ -1509,25 +1446,25 @@ fn make_truncation_candidate(
     let keep = keep.min(grapheme_count);
     let (front_end, back_start, affix_source) = match direction {
         TruncateFrom::End => {
-            let prefix = text[..boundaries.front.get(keep)]
+            let prefix = text[..boundaries.get(keep)]
                 .trim_end_matches(|ch: char| ch.is_whitespace() || ch.is_ascii_punctuation());
             let end = prefix.len();
 
             (end, text.len(), end.min(text.len().saturating_sub(1)))
         }
         TruncateFrom::Start => {
-            let start = boundaries.back.get(grapheme_count - keep);
+            let start = boundaries.get(grapheme_count - keep);
 
             (0, start, start.saturating_sub(1))
         }
         TruncateFrom::Middle => {
             let front_count = keep.saturating_mul(2).div_ceil(3);
             let back_count = keep - front_count;
-            let end = boundaries.front.get(front_count);
+            let end = boundaries.get(front_count);
 
             (
                 end,
-                boundaries.back.get(grapheme_count - back_count),
+                boundaries.get(grapheme_count - back_count),
                 end.saturating_sub(1),
             )
         }
@@ -1619,6 +1556,68 @@ mod truncation_tests {
                 "style runs must cover {:?} after {direction:?} truncation",
                 candidate.text
             );
+        }
+    }
+
+    /// Forward and backward grapheme walks of the same string can disagree, so
+    /// the search must only ever read boundaries produced by one forward walk.
+    #[test]
+    fn measured_truncation_survives_every_width_over_awkward_graphemes() {
+        let pieces = [
+            "a",
+            "\\",
+            "e\u{301}",
+            "\u{200d}",
+            "🇺",
+            "🇸",
+            "👩",
+            "\u{915}",
+            "\u{94d}",
+            "\u{937}",
+            "\u{1f3fb}",
+            "\r",
+            "\n",
+            "\u{0600}",
+            "x",
+        ];
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed as usize
+        };
+
+        for _ in 0..2000 {
+            let text: String = (0..next() % 24)
+                .map(|_| pieces[next() % pieces.len()])
+                .collect();
+            let runs = [TextRun {
+                len: text.len(),
+                ..Default::default()
+            }];
+            let boundaries = text
+                .grapheme_indices(true)
+                .map(|(index, _grapheme)| index)
+                .chain(std::iter::once(text.len()));
+
+            for direction in [TruncateFrom::Start, TruncateFrom::End, TruncateFrom::Middle] {
+                for width in 0..=text.len() + 1 {
+                    let (candidate, _) = truncate_with_measured_candidates(
+                        &text,
+                        boundaries.clone(),
+                        None,
+                        "…",
+                        &runs,
+                        direction,
+                        |candidate| (candidate.text.clone(), candidate.text.len() <= width),
+                    );
+                    assert!(
+                        candidate.text.contains('…'),
+                        "{text:?} {direction:?} {width}"
+                    );
+                }
+            }
         }
     }
 
