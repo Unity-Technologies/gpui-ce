@@ -65,7 +65,9 @@ pub struct WindowsWindowState {
     /// Client-area position of the last `WM_MOUSEMOVE` forwarded, to drop the
     /// synthetic ones Windows sends when the pointer has not moved.
     pub last_mouse_position: Cell<Option<(i16, i16)>>,
-    pub direct_manipulation: DirectManipulationHandler,
+    /// `None` when Direct Manipulation is unavailable on this machine; precision
+    /// touchpad smooth scrolling is off then, wheel scrolling is unaffected.
+    pub direct_manipulation: Option<DirectManipulationHandler>,
 
     pub renderer: RefCell<WindowRenderer>,
     /// Set when the next `draw_window` call must be treated as a forced
@@ -189,8 +191,16 @@ impl WindowsWindowState {
         let fullscreen = None;
         let initial_placement = None;
 
-        let direct_manipulation = DirectManipulationHandler::new(hwnd, scale_factor)
-            .context("initializing Direct Manipulation")?;
+        // Some machines return E_NOTIMPL here; that must not stop the window opening.
+        let direct_manipulation = match DirectManipulationHandler::new(hwnd, scale_factor) {
+            Ok(handler) => Some(handler),
+            Err(err) => {
+                log::warn!(
+                    "Direct Manipulation unavailable, touchpad smooth scrolling disabled: {err:#}"
+                );
+                None
+            }
+        };
 
         Ok(Self {
             origin: Cell::new(origin),
