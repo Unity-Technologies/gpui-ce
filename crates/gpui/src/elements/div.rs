@@ -1712,6 +1712,16 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         self
     }
 
+    /// Like [`aria_active_descendant`][Self::aria_active_descendant], for a
+    /// child that lives outside its owner's subtree, such as a listbox row in
+    /// a deferred popup while focus stays in the text field that opened it.
+    /// The claim holds only while `owner` has keyboard focus, so it is safe
+    /// to set unconditionally on the highlighted row.
+    fn aria_active_descendant_of(mut self, owner: &FocusHandle) -> Self {
+        self.interactivity().active_descendant_owner = Some(owner.id);
+        self
+    }
+
     /// Contribute synthetic accessibility nodes — nodes that don't correspond
     /// to any element — as children of this element's a11y node. For example,
     /// text runs describing an editor's text content.
@@ -2897,6 +2907,7 @@ pub struct Interactivity {
         Vec<(accesskit::Action, crate::window::a11y::A11yActionListener)>,
     pub(crate) a11y_synthetic_children: Option<Box<dyn FnOnce(&mut crate::A11ySubtreeBuilder)>>,
     pub(crate) report_active_descendant_focus: bool,
+    pub(crate) active_descendant_owner: Option<crate::FocusId>,
     pub(crate) override_role: Option<accesskit::Role>,
     pub(crate) aria: AriaProperties,
 
@@ -3092,6 +3103,16 @@ impl Interactivity {
                 window
                     .a11y
                     .set_active_descendant(global_id.accesskit_node_id());
+            }
+        }
+
+        if let Some(owner) = self.active_descendant_owner {
+            if window.a11y.is_active() && window.focus == Some(owner) {
+                if let Some(global_id) = global_id {
+                    window
+                        .a11y
+                        .set_active_descendant_outside_focus(global_id.accesskit_node_id());
+                }
             }
         }
         window.with_optional_element_state::<InteractiveElementState, _>(
@@ -7154,5 +7175,72 @@ mod tests {
         assert!(node.supports_action(accesskit::Action::ScrollDown));
         assert_eq!(node.scroll_y(), Some(0.));
         assert_eq!(node.scroll_y_max(), Some(200.));
+    }
+
+    /// A text field with a listbox row that is a sibling of the field rather
+    /// than a descendant, as a popup attached to the window root is.
+    struct DetachedListbox {
+        input: FocusHandle,
+        claim_by_owner: bool,
+    }
+
+    impl Render for DetachedListbox {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let row = div()
+                .id("row")
+                .role(accesskit::Role::ListBoxOption)
+                .aria_label("Highlighted row");
+            let row = if self.claim_by_owner {
+                row.aria_active_descendant_of(&self.input)
+            } else {
+                row.aria_active_descendant()
+            };
+            div()
+                .size_full()
+                .child(
+                    div()
+                        .id("input")
+                        .role(accesskit::Role::TextInput)
+                        .aria_label("Search")
+                        .track_focus(&self.input)
+                        .size(px(50.)),
+                )
+                .child(div().id("popup").role(accesskit::Role::ListBox).child(row))
+        }
+    }
+
+    fn reported_focus_label(
+        claim_by_owner: bool,
+        focus_input: bool,
+        cx: &mut TestAppContext,
+    ) -> String {
+        let (_view, cx) = cx.add_window_view(move |_window, cx| DetachedListbox {
+            input: cx.focus_handle(),
+            claim_by_owner,
+        });
+        cx.update(|window, cx| {
+            window.set_a11y_forced(true);
+            if focus_input {
+                let input = _view.read(cx).input.clone();
+                window.focus(&input, cx);
+            }
+            window.draw(cx).clear(cx);
+            let tree = window.a11y_tree().unwrap();
+            tree.nodes
+                .iter()
+                .find(|(id, _)| *id == tree.focus)
+                .and_then(|(_, node)| node.label().map(str::to_owned))
+                .unwrap_or_default()
+        })
+    }
+
+    #[gpui::test]
+    fn owner_named_active_descendant_outside_the_focused_subtree(cx: &mut TestAppContext) {
+        // The ancestor-only claim cannot reach a row outside the field.
+        assert_eq!(reported_focus_label(false, true, cx), "Search");
+        // Naming the field as owner makes the row the reported focus.
+        assert_eq!(reported_focus_label(true, true, cx), "Highlighted row");
+        // The claim lapses when the owner is not focused.
+        assert_ne!(reported_focus_label(true, false, cx), "Highlighted row");
     }
 }

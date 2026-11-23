@@ -276,17 +276,37 @@ impl A11y {
     pub(crate) fn set_active_descendant(&mut self, node_id: NodeId) {
         // The active descendant must be a descendant of the focused container,
         // not the focused node itself.
-        if self.nodes.node_is_focused(node_id) {
-            if cfg!(debug_assertions) {
-                panic!("set_active_descendant called on the focused node");
-            } else {
-                log::warn!("a11y: set_active_descendant called on the focused node ({node_id:?})");
-            }
+        if self.rejects_focused_node(node_id) {
             return;
         }
         if self.nodes.has_node(node_id) && self.nodes.focus_is_ancestor_of_current() {
             self.nodes.set_active_descendant(node_id);
         }
+    }
+
+    /// Active descendant named by an owner that holds keyboard focus but is
+    /// not an ancestor (a popup row attached to the root). The caller has
+    /// already checked that the owner is focused, so the ancestor rule is
+    /// skipped.
+    pub(crate) fn set_active_descendant_outside_focus(&mut self, node_id: NodeId) {
+        if self.rejects_focused_node(node_id) {
+            return;
+        }
+        if self.nodes.has_node(node_id) {
+            self.nodes.set_active_descendant(node_id);
+        }
+    }
+
+    fn rejects_focused_node(&self, node_id: NodeId) -> bool {
+        if !self.nodes.node_is_focused(node_id) {
+            return false;
+        }
+        if cfg!(debug_assertions) {
+            panic!("set_active_descendant called on the focused node");
+        } else {
+            log::warn!("a11y: set_active_descendant called on the focused node ({node_id:?})");
+        }
+        true
     }
 
     /// Clear per-frame state and push the root node to start a new frame.
