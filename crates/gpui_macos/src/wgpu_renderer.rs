@@ -41,6 +41,10 @@ pub fn new_renderer(
 pub struct MacWgpuRenderer {
     renderer: WgpuRenderer,
     layer: Retained<CAMetalLayer>,
+    transparent: bool,
+    /// Whether the last scene let native views show through the layer, which
+    /// then needs a transparent surface even in an opaque window.
+    shows_native_views: bool,
 }
 
 impl MacWgpuRenderer {
@@ -57,7 +61,12 @@ impl MacWgpuRenderer {
         };
         let renderer =
             WgpuRenderer::new_for_metal_layer(context.gpu, &layer, config, context.requirements)?;
-        Ok(Self { renderer, layer })
+        Ok(Self {
+            renderer,
+            layer,
+            transparent,
+            shows_native_views: false,
+        })
     }
 
     /// wgpu acquires its own surface textures, so windows keep the
@@ -102,7 +111,9 @@ impl MacWgpuRenderer {
     /// The surface's alpha mode sets the layer's opacity whenever WGPU
     /// configures it, so it must not be set on the layer directly.
     pub fn update_transparency(&mut self, transparent: bool) {
-        self.renderer.update_transparency(transparent);
+        self.transparent = transparent;
+        self.renderer
+            .update_transparency(transparent || self.shows_native_views);
     }
 
     pub fn destroy(&mut self) {
@@ -117,6 +128,14 @@ impl MacWgpuRenderer {
                 log::warn!("GPU recovery failed, will retry on next frame: {error}");
             }
             return true;
+        }
+        // Reconfiguring the surface rebuilds its pipelines, so this happens only
+        // when native views appear or all of them go.
+        let shows_native_views = !scene.native_views.is_empty();
+        if shows_native_views != self.shows_native_views {
+            self.shows_native_views = shows_native_views;
+            self.renderer
+                .update_transparency(self.transparent || shows_native_views);
         }
         self.renderer.draw(scene);
         self.renderer.needs_redraw()

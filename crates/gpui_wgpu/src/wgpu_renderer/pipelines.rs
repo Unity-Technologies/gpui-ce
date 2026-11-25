@@ -66,6 +66,7 @@ enum DepthMode {
 pub(super) struct WgpuPipelines {
     pub(super) quads: WgpuRenderPipeline,
     pub(super) opaque_quads: WgpuRenderPipeline,
+    pub(super) native_views: WgpuRenderPipeline,
     pub(super) smoothed_quads: WgpuRenderPipeline,
     pub(super) shadows: WgpuRenderPipeline,
     pub(super) smoothed_shadows: WgpuRenderPipeline,
@@ -489,6 +490,13 @@ impl WgpuPipelines {
                 shader::OPAQUE_QUADS,
                 &overwrite_target,
                 TestAndWrite,
+                &shader_module,
+            ),
+            // Unblended, so the transparent output replaces what was drawn beneath the view.
+            native_views: create(
+                shader::NATIVE_VIEWS,
+                &overwrite_target,
+                Test,
                 &shader_module,
             ),
             smoothed_quads: create(shader::SMOOTHED_QUADS, &scene_target, Test, &shader_module),

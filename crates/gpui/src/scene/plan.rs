@@ -266,7 +266,8 @@ impl ScenePlanRequirements {
         match batch {
             PrimitiveBatch::Shadows { range, .. }
             | PrimitiveBatch::Quads { range, .. }
-            | PrimitiveBatch::Underlines(range) => {
+            | PrimitiveBatch::Underlines(range)
+            | PrimitiveBatch::NativeViews(range) => {
                 self.instance_batch_count += usize::from(!range.is_empty());
             }
             PrimitiveBatch::Paths { tiles, .. } => {
@@ -301,6 +302,7 @@ struct SceneLengths {
     polychrome_sprites: usize,
     surfaces: usize,
     backdrop_filters: usize,
+    native_views: usize,
     filter_boundaries: usize,
 }
 
@@ -316,6 +318,7 @@ impl SceneLengths {
             polychrome_sprites: scene.polychrome_sprites.len(),
             surfaces: scene.surfaces.len(),
             backdrop_filters: scene.backdrop_filters.len(),
+            native_views: scene.native_views.len(),
             filter_boundaries: scene.filter_boundaries.len(),
         }
     }
@@ -354,6 +357,8 @@ pub enum PrimitiveBatch {
     },
     Surfaces(Range<usize>),
     BackdropFilters(Range<usize>),
+    /// Indexes [`Scene::native_views`]; each cuts a hole the native view shows through.
+    NativeViews(Range<usize>),
     FilterBoundary(usize),
 }
 
@@ -461,6 +466,7 @@ impl PrimitiveBatch {
             ),
             Self::Surfaces(range) => format!("surfaces ({})", range.len()),
             Self::BackdropFilters(range) => format!("backdrop filters ({})", range.len()),
+            Self::NativeViews(range) => format!("native views ({})", range.len()),
             Self::FilterBoundary(index) => format!("filter boundary ({index})"),
         }
     }

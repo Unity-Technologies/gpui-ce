@@ -658,6 +658,8 @@ impl DirectXRenderer {
                     target: FilterRenderTarget::Inline,
                     ..
                 } => Ok(()),
+                // Windows never attaches native views, so no scene has any.
+                RenderCommand::Batch(PrimitiveBatch::NativeViews(_)) => Ok(()),
                 RenderCommand::Batch(PrimitiveBatch::FilterBoundary(_)) => {
                     unreachable!("filter boundaries are resolved by the render plan")
                 }

@@ -1,6 +1,6 @@
 use gpui::{
-    AtlasTextureId, MonochromeSprite, PathTile, PolychromeSprite, Quad, Shadow, SubpixelSprite,
-    Underline,
+    AtlasTextureId, MonochromeSprite, PaintNativeView, PathTile, PolychromeSprite, Quad, Shadow,
+    SubpixelSprite, Underline,
 };
 
 use crate::WgpuTextureInfo;
@@ -66,6 +66,33 @@ impl WgpuRenderer {
             fills,
             pass,
         );
+    }
+
+    /// Cuts each native view's hole: the shader reads only a quad's bounds and content mask.
+    pub(super) fn draw_native_views(
+        &self,
+        native_views: &[PaintNativeView],
+        instances: &mut InstanceUpload,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) -> frame::DrawResult {
+        if native_views.is_empty() {
+            return Ok(());
+        }
+        let holes = native_views.iter().map(|native_view| Quad {
+            bounds: native_view.bounds,
+            content_mask: native_view.content_mask,
+            ..Default::default()
+        });
+        let Some(slice) = instances.write_iter(native_views.len(), holes) else {
+            return Err(frame::DrawError::CapacityPlanningInvariant);
+        };
+        self.draw_bound_slice(
+            &self.resources().pipelines.native_views,
+            self.resources().instances.bind_group(),
+            &slice,
+            pass,
+        );
+        Ok(())
     }
 
     pub(super) fn draw_shadows(

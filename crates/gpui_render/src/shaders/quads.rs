@@ -640,6 +640,32 @@ pub mod quad {
     }
 
     #[derive(Wgsl)]
+    pub struct NativeViewVarying {
+        #[builtin(position)]
+        pub position: Vec4f,
+    }
+
+    /// Cuts a hole where a native view shows through: the view sits beneath the window's
+    /// layer, so the renderer draws this unblended, writing transparent black over what was
+    /// drawn before it. Each instance is a quad with only its bounds and content mask set.
+    #[vertex]
+    pub fn vertex_native_view(
+        #[builtin(vertex_index)] vertex_id: u32,
+        #[builtin(instance_index)] instance_id: u32,
+    ) -> NativeViewVarying {
+        let quad = get!(QUADS)[instance_id as usize];
+        let vertex = clipped_rectangle_vertex(vertex_id, quad.bounds, quad.content_mask.bounds);
+        NativeViewVarying {
+            position: vertex.clip_position,
+        }
+    }
+
+    #[fragment]
+    pub fn fragment_native_view(_input: NativeViewVarying) -> Vec4f {
+        vec4f(0.0, 0.0, 0.0, 0.0)
+    }
+
+    #[derive(Wgsl)]
     pub struct SmoothedQuadVarying {
         #[builtin(position)]
         pub position: Vec4f,

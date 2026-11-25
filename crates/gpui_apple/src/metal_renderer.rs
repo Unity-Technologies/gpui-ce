@@ -3,9 +3,9 @@ use anyhow::Result;
 use block2::RcBlock;
 use gpui::{
     AtlasTextureId, Bounds, Corners, DevicePixels, FilterRenderTarget, MAX_FILTER_GROUP_DEPTH,
-    MonochromeSprite, PaintSurface, PathCurve, PathPaint, PathTile, PolychromeSprite,
-    PrimitiveBatch, Quad, RenderCommand, ScaledPixels, Scene, Shadow, Size, SurfaceSource,
-    Underline, size,
+    MonochromeSprite, PaintNativeView, PaintSurface, PathCurve, PathPaint, PathTile,
+    PolychromeSprite, PrimitiveBatch, Quad, RenderCommand, ScaledPixels, Scene, Shadow, Size,
+    SurfaceSource, Underline, size,
 };
 use gpui_render::{
     TargetStack,
@@ -485,6 +485,8 @@ pub struct MetalRenderer {
     display_link_mode: DisplayLinkMode,
     /// For headless rendering, tracks whether output should be opaque
     opaque: bool,
+    /// Whether the last scene drawn to the layer let native views show through it.
+    shows_native_views: bool,
     command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     path_tiles_pipeline_state: Retained<MtlPipeline>,
     shadows_pipeline_state: Retained<MtlPipeline>,
@@ -496,6 +498,7 @@ pub struct MetalRenderer {
     polychrome_sprites_pipeline_state: Retained<MtlPipeline>,
     smoothed_polychrome_sprites_pipeline_state: Retained<MtlPipeline>,
     surfaces_pipeline_state: Retained<MtlPipeline>,
+    native_views_pipeline_state: Retained<MtlPipeline>,
     // Blur pipelines: downsample (no blend, also used for the final blit), separable gaussian
     // (no blend), and composite (alpha blend into a rounded rect), from shared shader sources.
     blur_downsample_pipeline_state: Retained<MtlPipeline>,
@@ -719,6 +722,17 @@ impl MetalRenderer {
             surfaces_shader,
             MTLPixelFormat::BGRA8Unorm,
         )?;
+        // Blending is off so that the transparent output replaces what was drawn beneath it.
+        let (native_views_shader, native_views_library) = pipeline("native_views")?;
+        let native_views_descriptor = new_pipeline_descriptor(
+            &device,
+            &native_views_library,
+            native_views_shader,
+            MTLPixelFormat::BGRA8Unorm,
+            Blend::None,
+        )?;
+        let native_views_pipeline_state =
+            new_pipeline_state(&device, native_views_shader, &native_views_descriptor)?;
         let (blur_downsample_shader, blur_downsample_library) = pipeline("blur_downsample")?;
         let blur_downsample_pipeline_state = build_blur_pipeline_state(
             &device,
@@ -779,6 +793,7 @@ impl MetalRenderer {
             display_link_mode: DisplayLinkMode::Detached,
             is_unified_memory,
             opaque,
+            shows_native_views: false,
             command_queue,
             path_tiles_pipeline_state,
             shadows_pipeline_state,
@@ -790,6 +805,7 @@ impl MetalRenderer {
             polychrome_sprites_pipeline_state,
             smoothed_polychrome_sprites_pipeline_state,
             surfaces_pipeline_state,
+            native_views_pipeline_state,
             blur_downsample_pipeline_state,
             blur_pipeline_state,
             blur_composite_pipeline_state,
@@ -948,7 +964,7 @@ impl MetalRenderer {
     pub fn update_transparency(&mut self, transparent: bool) {
         self.opaque = !transparent;
         if let Some(layer) = &self.layer {
-            layer.setOpaque(!transparent);
+            layer.setOpaque(self.opaque && !self.shows_native_views);
         }
     }
 
@@ -969,12 +985,15 @@ impl MetalRenderer {
             overlay.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
             overlay.setMaximumDrawableCount(3);
         }
-        let saved = (self.opaque, self.layer.take());
+        // The window layer's opacity follows whether the base scene shows native views;
+        // drawing the overlay must not change what the next base frame compares against.
+        let saved = (self.opaque, self.layer.take(), self.shows_native_views);
         self.opaque = std::env::var_os("OVERLAY_SPIKE_DEBUG").is_some();
         self.layer = Some(overlay.retain());
         self.draw(scene);
         self.opaque = saved.0;
         self.layer = saved.1;
+        self.shows_native_views = saved.2;
     }
 
     pub fn draw(&mut self, scene: &Scene) {
@@ -987,6 +1006,13 @@ impl MetalRenderer {
                 return;
             }
         };
+        // Native views sit beneath the layer, so it can only be opaque, and
+        // eligible for direct-to-display presentation, while none are showing.
+        let shows_native_views = !scene.native_views.is_empty();
+        if shows_native_views != self.shows_native_views {
+            self.shows_native_views = shows_native_views;
+            layer.setOpaque(self.opaque && !shows_native_views);
+        }
         let drawable = match &mut self.display_link_mode {
             DisplayLinkMode::Attached { drawable } => {
                 let Some(drawable) = drawable.take() else {
@@ -1466,6 +1492,13 @@ impl MetalRenderer {
                     target: FilterRenderTarget::Inline,
                     ..
                 } => true,
+                RenderCommand::Batch(PrimitiveBatch::NativeViews(range)) => self.draw_native_views(
+                    &scene.native_views[range.clone()],
+                    instance_buffer,
+                    &mut instance_offset,
+                    &scene_uniforms,
+                    &command_encoder,
+                ),
                 RenderCommand::Batch(PrimitiveBatch::SubpixelSprites { .. }) => unreachable!(),
                 RenderCommand::Batch(PrimitiveBatch::FilterBoundary(_)) => {
                     unreachable!("filter boundaries are resolved by the render plan")
@@ -1836,6 +1869,52 @@ impl MetalRenderer {
             MTLPrimitiveType::TriangleStrip,
             4,
             quads.len(),
+        );
+        *instance_offset = next_offset;
+        true
+    }
+
+    /// Cuts each native view's hole with an unblended pass over its clipped bounds.
+    /// The vertex stage reads only a quad's bounds and content mask.
+    fn draw_native_views(
+        &self,
+        native_views: &[PaintNativeView],
+        instance_buffer: &mut InstanceBuffer,
+        instance_offset: &mut usize,
+        scene_uniforms: &SceneUniforms,
+        command_encoder: &MtlEncoder,
+    ) -> bool {
+        if native_views.is_empty() {
+            return true;
+        }
+        align_offset(instance_offset);
+        let holes: SmallVec<[Quad; 4]> = native_views
+            .iter()
+            .map(|native_view| Quad {
+                bounds: native_view.bounds,
+                content_mask: native_view.content_mask,
+                ..Default::default()
+            })
+            .collect();
+        let next_offset = *instance_offset + mem::size_of_val(holes.as_slice());
+        if next_offset > instance_buffer.size {
+            return false;
+        }
+
+        command_encoder.setRenderPipelineState(&self.native_views_pipeline_state);
+        bind_scene_uniforms(command_encoder, scene_uniforms);
+        write_instances(instance_buffer, *instance_offset, &holes);
+        bind_instances(
+            command_encoder,
+            &instance_buffer.metal_buffer,
+            *instance_offset,
+            &holes,
+        );
+        draw_instanced(
+            command_encoder,
+            MTLPrimitiveType::TriangleStrip,
+            4,
+            holes.len(),
         );
         *instance_offset = next_offset;
         true
@@ -2347,7 +2426,9 @@ fn required_instance_buffer_size(scene: &Scene) -> usize {
         };
         match batch {
             PrimitiveBatch::Shadows { range, .. } => reserve(mem::size_of::<Shadow>(), range.len()),
-            PrimitiveBatch::Quads { range, .. } => reserve(mem::size_of::<Quad>(), range.len()),
+            PrimitiveBatch::Quads { range, .. } | PrimitiveBatch::NativeViews(range) => {
+                reserve(mem::size_of::<Quad>(), range.len())
+            }
             PrimitiveBatch::Paths { tiles, .. } => reserve(mem::size_of::<PathTile>(), tiles.len()),
             PrimitiveBatch::Underlines(range) => reserve(mem::size_of::<Underline>(), range.len()),
             PrimitiveBatch::MonochromeSprites { range, .. } => {

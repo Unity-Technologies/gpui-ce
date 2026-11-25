@@ -5,9 +5,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Path, PathTiles,
-    Pixels, Point, Radians, ScaledFilter, ScaledPixels, Size, TimedTransformation,
-    bounds_tree::BoundsTree, point,
+    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, HitboxId, Hsla,
+    NativeViewId, Path, PathTiles, Pixels, Point, Radians, ScaledFilter, ScaledPixels, Size,
+    TimedTransformation, bounds_tree::BoundsTree, point,
 };
 use smallvec::SmallVec;
 use std::{
@@ -72,6 +72,9 @@ struct Layer {
     bounds: Bounds<ScaledPixels>,
     max_kind: PrimitiveKind,
     max_shared_kind: PrimitiveKind,
+    /// Whether a native view was painted in the layer, which then can't be
+    /// drawn as one: what was painted after the view has to cover it.
+    has_native_view: bool,
 }
 
 #[derive(Default)]
@@ -99,6 +102,7 @@ pub struct Scene {
     pub polychrome_sprites: Vec<PolychromeSprite>,
     pub surfaces: Vec<PaintSurface>,
     surface_opacities: Vec<f32>,
+    pub native_views: Vec<PaintNativeView>,
     pub backdrop_filters: Vec<BackdropFilter>,
     pub filter_boundaries: Vec<FilterBoundary>,
     render_plan: ScenePlan,
@@ -129,6 +133,7 @@ impl Scene {
         self.polychrome_sprites.clear();
         self.surfaces.clear();
         self.surface_opacities.clear();
+        self.native_views.clear();
         self.backdrop_filters.clear();
         self.filter_boundaries.clear();
         self.render_plan.clear();
@@ -148,6 +153,7 @@ impl Scene {
             bounds: Bounds::default(),
             max_kind: PrimitiveKind::FilterBoundaryStart,
             max_shared_kind: PrimitiveKind::FilterBoundaryEnd,
+            has_native_view: false,
         });
         self.paint_operations.push(PaintOperation::StartLayer);
     }
@@ -173,6 +179,10 @@ impl Scene {
         if layer.primitives.is_empty() {
             return;
         }
+        if layer.has_native_view {
+            self.insert_layer_around_native_views(layer);
+            return;
+        }
         let order =
             self.primitive_bounds
                 .insert(layer.bounds, layer.max_kind, layer.max_shared_kind);
@@ -181,6 +191,50 @@ impl Scene {
                 let primitive = primitive.clone();
                 self.push_primitive(primitive, order);
             }
+        }
+    }
+
+    /// Inserts a layer that a native view was painted in.
+    ///
+    /// A layer's primitives share one place in the drawing order, where they
+    /// are drawn by kind and not in the order they were painted. A native
+    /// view erases what is drawn before it, so the layer is inserted in parts:
+    /// what was painted before each view, the view, and what was painted after.
+    fn insert_layer_around_native_views(&mut self, layer: Layer) {
+        let mut part = Vec::new();
+        for index in layer.primitives.into_iter().flatten() {
+            let PaintOperation::Primitive(primitive) = &self.paint_operations[index] else {
+                continue;
+            };
+            let primitive = primitive.clone();
+            if primitive.kind() == PrimitiveKind::NativeView {
+                self.insert_layer_part(std::mem::take(&mut part));
+                self.insert_layer_part(vec![primitive]);
+            } else {
+                part.push(primitive);
+            }
+        }
+        self.insert_layer_part(part);
+    }
+
+    fn insert_layer_part(&mut self, primitives: Vec<Primitive>) {
+        let Some(first) = primitives.first() else {
+            return;
+        };
+        let mut bounds = first.clipped_bounds();
+        let mut max_kind = PrimitiveKind::FilterBoundaryStart;
+        let mut max_shared_kind = PrimitiveKind::FilterBoundaryEnd;
+        for primitive in &primitives {
+            let kind = primitive.kind();
+            bounds = bounds.join(&primitive.clipped_bounds());
+            max_kind = max_kind.max(kind);
+            max_shared_kind = max_shared_kind.min(kind.max_shared_kind());
+        }
+        let order = self
+            .primitive_bounds
+            .insert(bounds, max_kind, max_shared_kind);
+        for primitive in primitives {
+            self.push_primitive(primitive, order);
         }
     }
 
@@ -310,6 +364,7 @@ impl Scene {
                 layer.bounds = layer.bounds.join(&clipped_bounds);
                 layer.max_kind = layer.max_kind.max(kind);
                 layer.max_shared_kind = layer.max_shared_kind.min(kind.max_shared_kind());
+                layer.has_native_view |= kind == PrimitiveKind::NativeView;
                 let index = self.paint_operations.len();
                 match layer.primitives.last_mut() {
                     Some(range) if range.end == index => range.end += 1,
@@ -353,6 +408,10 @@ impl Scene {
                 self.surfaces.push(surface);
                 self.surface_opacities.push(1.0);
             }
+            Primitive::NativeView(native_view) => self.native_views.push(PaintNativeView {
+                order,
+                ..native_view
+            }),
             Primitive::BackdropFilter(mut filter) => {
                 filter.order = order;
                 self.backdrop_filters.push(filter);
@@ -436,6 +495,15 @@ impl Scene {
         });
         self.surfaces.sort_by_key(|surface| surface.order);
         self.surface_opacities.resize(self.surfaces.len(), 1.0);
+        self.native_views
+            .sort_by_key(|native_view| native_view.order);
+        // A platform view can only be in one place, which is where it was painted first.
+        let mut shown = Vec::new();
+        self.native_views.retain(|native_view| {
+            let is_first = !shown.contains(&native_view.id);
+            shown.push(native_view.id);
+            is_first
+        });
         self.backdrop_filters.sort_by_key(|filter| filter.order);
         // Markers normally get distinct, monotonically-increasing orders (children overlap
         // their group bounds and so sort strictly between the start and end). The `!is_start`
@@ -608,6 +676,7 @@ pub(crate) enum PrimitiveKind {
     PolychromeSprite,
     Surface,
     BackdropFilter,
+    NativeView,
     // Highest discriminant: at an equal order, a group-end is emitted after the group's content
     // so the renderer composites the filtered group only once every child has been drawn.
     FilterBoundaryEnd,
@@ -654,6 +723,7 @@ pub enum Primitive {
     Surface(PaintSurface),
     BackdropFilter(BackdropFilter),
     FilterBoundary(FilterBoundary),
+    NativeView(PaintNativeView),
 }
 
 #[expect(missing_docs)]
@@ -669,6 +739,7 @@ impl Primitive {
             Primitive::PolychromeSprite(_) => PrimitiveKind::PolychromeSprite,
             Primitive::Surface(_) => PrimitiveKind::Surface,
             Primitive::BackdropFilter(_) => PrimitiveKind::BackdropFilter,
+            Primitive::NativeView(_) => PrimitiveKind::NativeView,
             Primitive::FilterBoundary(boundary) if boundary.is_start => {
                 PrimitiveKind::FilterBoundaryStart
             }
@@ -704,6 +775,7 @@ impl Primitive {
             Primitive::Surface(surface) => &surface.bounds,
             Primitive::BackdropFilter(filter) => &filter.bounds,
             Primitive::FilterBoundary(boundary) => &boundary.bounds,
+            Primitive::NativeView(native_view) => &native_view.bounds,
         }
     }
 
@@ -719,6 +791,7 @@ impl Primitive {
             Primitive::Surface(surface) => &surface.content_mask,
             Primitive::BackdropFilter(filter) => &filter.content_mask,
             Primitive::FilterBoundary(boundary) => &boundary.content_mask,
+            Primitive::NativeView(native_view) => &native_view.content_mask,
         }
     }
 }
@@ -750,6 +823,8 @@ struct BatchIterator<'a> {
     surfaces_iter: Peekable<slice::Iter<'a, PaintSurface>>,
     backdrop_filters_start: usize,
     backdrop_filters_iter: Peekable<slice::Iter<'a, BackdropFilter>>,
+    native_views_start: usize,
+    native_views_iter: Peekable<slice::Iter<'a, PaintNativeView>>,
     filter_boundaries_start: usize,
     filter_boundaries_iter: Peekable<slice::Iter<'a, FilterBoundary>>,
 }
@@ -776,6 +851,8 @@ impl<'a> BatchIterator<'a> {
             surfaces_iter: scene.surfaces.iter().peekable(),
             backdrop_filters_start: 0,
             backdrop_filters_iter: scene.backdrop_filters.iter().peekable(),
+            native_views_start: 0,
+            native_views_iter: scene.native_views.iter().peekable(),
             filter_boundaries_start: 0,
             filter_boundaries_iter: scene.filter_boundaries.iter().peekable(),
         }
@@ -828,6 +905,10 @@ impl<'a> Iterator for BatchIterator<'a> {
             (
                 self.backdrop_filters_iter.peek().map(|f| f.order),
                 PrimitiveKind::BackdropFilter,
+            ),
+            (
+                self.native_views_iter.peek().map(|v| v.order),
+                PrimitiveKind::NativeView,
             ),
             (
                 self.filter_boundaries_iter.peek().map(|b| b.order),
@@ -1035,6 +1116,22 @@ impl<'a> Iterator for BatchIterator<'a> {
                 self.backdrop_filters_start = backdrop_filters_end;
                 Some(PrimitiveBatch::BackdropFilters(
                     backdrop_filters_start..backdrop_filters_end,
+                ))
+            }
+            PrimitiveKind::NativeView => {
+                let native_views_start = self.native_views_start;
+                let mut native_views_end = native_views_start + 1;
+                self.native_views_iter.next();
+                while self
+                    .native_views_iter
+                    .next_if(|view| precedes_limit(view.order, batch_kind, max_order_and_kind))
+                    .is_some()
+                {
+                    native_views_end += 1;
+                }
+                self.native_views_start = native_views_end;
+                Some(PrimitiveBatch::NativeViews(
+                    native_views_start..native_views_end,
                 ))
             }
             // Boundaries are emitted one at a time (never merged) so the renderer can switch
@@ -1600,6 +1697,34 @@ pub struct PaintSurface {
 impl From<PaintSurface> for Primitive {
     fn from(surface: PaintSurface) -> Self {
         Primitive::Surface(surface)
+    }
+}
+
+/// Where a platform view shows through the scene.
+///
+/// The view sits beneath the window's rendered content, so the renderer
+/// erases everything painted earlier within these bounds, and everything
+/// painted later covers the view. The view is therefore treated as opaque.
+#[derive(Clone, Copy, Debug)]
+pub struct PaintNativeView {
+    /// The view's position among the scene's other primitives.
+    pub order: DrawOrder,
+    /// The view these bounds belong to.
+    pub id: NativeViewId,
+    /// The hitbox that decides whether a mouse position reaches the view.
+    pub hitbox_id: HitboxId,
+    /// Where the view is laid out, before clipping.
+    pub bounds: Bounds<ScaledPixels>,
+    /// The clip applied to the view.
+    pub content_mask: ContentMask<ScaledPixels>,
+    /// The color to show where the view has not caught up with these bounds,
+    /// or a transparent color for none.
+    pub background: Hsla,
+}
+
+impl From<PaintNativeView> for Primitive {
+    fn from(native_view: PaintNativeView) -> Self {
+        Primitive::NativeView(native_view)
     }
 }
 
@@ -2351,6 +2476,32 @@ mod tests {
     fn batch_labels(scene: &mut Scene) -> Vec<String> {
         scene.finish();
         scene.batches().map(|batch| batch.label()).collect()
+    }
+
+    #[test]
+    fn a_native_view_in_a_layer_is_covered_by_what_the_layer_paints_after_it() {
+        let mut scene = Scene::default();
+        scene.push_layer();
+        scene.insert_primitive(square_quad(0.));
+        scene.insert_primitive(PaintNativeView {
+            order: 0,
+            id: NativeViewId::for_test(1),
+            hitbox_id: HitboxId::placeholder(),
+            bounds: square(0.),
+            content_mask: ContentMask {
+                bounds: square(0.),
+                ..Default::default()
+            },
+            background: Hsla::default(),
+        });
+        scene.insert_primitive(square_quad(0.));
+        // A quad beside the view shares nothing with it, so it isn't held back.
+        scene.insert_primitive(square_quad(20.));
+        scene.pop_layer();
+        assert_eq!(
+            batch_labels(&mut scene),
+            ["quads (1)", "native views (1)", "quads (2)"]
+        );
     }
 
     #[test]

@@ -263,7 +263,7 @@ impl FrameRequirements {
                 PrimitiveBatch::Shadows { range, .. } => {
                     reserve(std::mem::size_of::<Shadow>(), range.len())
                 }
-                PrimitiveBatch::Quads { range, .. } => {
+                PrimitiveBatch::Quads { range, .. } | PrimitiveBatch::NativeViews(range) => {
                     reserve(std::mem::size_of::<Quad>(), range.len())
                 }
                 PrimitiveBatch::Paths { tiles, .. } => {
@@ -752,6 +752,9 @@ fn encode_inline_batch(
         ),
         PrimitiveBatch::Surfaces(range) => {
             renderer.draw_surfaces(&scene.surfaces[range.clone()], pass)
+        }
+        PrimitiveBatch::NativeViews(range) => {
+            renderer.draw_native_views(&scene.native_views[range.clone()], instances, pass)
         }
         PrimitiveBatch::Paths { tiles, .. } => {
             renderer.draw_path_tiles(&scene.path_tiles[tiles.clone()], instances, pass)

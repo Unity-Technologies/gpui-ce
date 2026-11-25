@@ -194,6 +194,9 @@ image = { workspace = true, features = ["png"] }
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 proptest = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2.workspace = true
+
 [target.'cfg(target_family = "wasm")'.dev-dependencies]
 wasm-bindgen = { workspace = true }
 web-sys = { workspace = true, features = ["console"] }
@@ -210,6 +213,14 @@ ignored = [
   "tracing",
 ]
 ignored-paths = ["src/_ownership_and_data_flow.rs", "benches/focus_cleanup.rs", "benches/randomized_element_tree.rs"]
+
+[[example]]
+name = "native_view"
+path = "examples/native_view.rs"
+
+[[example]]
+name = "native_view_appkit_field"
+path = "examples/native_view_appkit_field.rs"
 
 # ============================================================================
 # Learn Examples - Educational examples for learning GPUI
