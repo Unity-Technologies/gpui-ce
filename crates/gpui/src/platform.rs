@@ -108,6 +108,25 @@ pub use threaded_dispatcher::ThreadedDispatcher;
 #[cfg(all(target_os = "macos", any(test, feature = "test-support")))]
 pub use visual_test::VisualTestPlatform;
 
+/// Keeps an operating system activity, such as an idle sleep inhibitor, alive until dropped.
+pub struct ActivityGuard {
+    _release: gpui_util::Deferred<Box<dyn FnOnce() + Send>>,
+}
+
+impl ActivityGuard {
+    /// Runs `release` when the guard is dropped.
+    pub fn new(release: impl FnOnce() + Send + 'static) -> Self {
+        Self {
+            _release: gpui_util::defer(Box::new(release)),
+        }
+    }
+
+    /// A guard for platforms without a corresponding activity.
+    pub fn noop() -> Self {
+        Self::new(|| {})
+    }
+}
+
 // TODO(jk): return an enum instead of a string
 /// Return which compositor we're guessing we'll use.
 /// Does not attempt to connect to the given compositor.
@@ -305,6 +324,7 @@ pub trait Platform: 'static {
         false
     }
     fn on_thermal_state_change(&self, callback: Box<dyn FnMut()>);
+    fn prevent_idle_sleep(&self, reason: &str) -> Task<Result<ActivityGuard>>;
 
     /// Returns the user's system-wide contrast setting.
     fn contrast_preference(&self) -> ContrastPreference {
@@ -1293,6 +1313,10 @@ pub trait PlatformDispatcher: Send + Sync {
 
     fn increase_timer_resolution(&self) -> TimerResolutionGuard {
         gpui_util::defer(Box::new(|| {}))
+    }
+
+    fn prevent_app_nap(&self, _reason: &str) -> ActivityGuard {
+        ActivityGuard::noop()
     }
 
     #[cfg(any(test, feature = "test-support", feature = "bench-support"))]

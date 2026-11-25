@@ -282,6 +282,21 @@ impl TestAppContext {
         self.test_platform.did_prompt_for_new_path()
     }
 
+    /// Returns the number of active idle sleep prevention tokens.
+    pub fn active_idle_sleep_preventions(&self) -> usize {
+        self.test_platform.active_idle_sleep_preventions()
+    }
+
+    /// Sets the delay for subsequent idle sleep prevention acquisitions.
+    pub fn set_idle_sleep_prevention_delay(&self, delay: Duration) {
+        self.test_platform.set_idle_sleep_prevention_delay(delay);
+    }
+
+    /// Makes subsequent idle sleep prevention acquisitions fail or succeed.
+    pub fn set_idle_sleep_prevention_fails(&self, fails: bool) {
+        self.test_platform.set_idle_sleep_prevention_fails(fails);
+    }
+
     /// Creates another app that shares this context's scheduler, so tasks from both apps interleave deterministically.
     ///
     /// The new app has its own state, windows and globals.

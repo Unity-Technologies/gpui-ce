@@ -1,5 +1,5 @@
 use crate::{
-    MacDispatcher, MacDisplay, MacKeyboardLayout, MacKeyboardMapper, MacWindow,
+    MacActivity, MacDispatcher, MacDisplay, MacKeyboardLayout, MacKeyboardMapper, MacWindow,
     events::key_to_native, haptic_feedback::MacHaptics, pasteboard::Pasteboard, renderer,
     set_active_window_cursor_style,
 };
@@ -16,11 +16,11 @@ use core_foundation::{
 use dispatch2::DispatchQueue;
 use futures::channel::oneshot;
 use gpui::{
-    Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, ContrastPreference, CursorStyle,
-    ForegroundExecutor, KeyContext, Keymap, MacActivationPolicy, Menu, MenuItem, OsMenu, OwnedMenu,
-    PathPromptOptions, Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper,
-    PlatformTextSystem, PlatformWindow, Result, SystemMenuType, Task, ThermalState,
-    WindowAppearance, WindowKind, WindowParams, popup::PopupNotSupportedError,
+    Action, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem, ContrastPreference,
+    CursorStyle, ForegroundExecutor, KeyContext, Keymap, MacActivationPolicy, Menu, MenuItem,
+    OsMenu, OwnedMenu, PathPromptOptions, Platform, PlatformDisplay, PlatformKeyboardLayout,
+    PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, Result, SystemMenuType, Task,
+    ThermalState, WindowAppearance, WindowKind, WindowParams, popup::PopupNotSupportedError,
 };
 use gpui_util::{ResultExt, new_std_command};
 use itertools::Itertools;
@@ -33,6 +33,7 @@ use objc2_app_kit::{
     NSMenuDelegate, NSMenuItem, NSModalResponseOK, NSOpenPanel, NSResponder, NSSavePanel,
     NSScroller, NSWorkspace,
 };
+use objc2_foundation::NSActivityOptions;
 use objc2_foundation::NSOperatingSystemVersion;
 use objc2_foundation::{
     NSArray, NSAutoreleasePool, NSBundle, NSInteger, NSNotification, NSNotificationCenter,
@@ -1062,6 +1063,13 @@ impl Platform for MacPlatform {
             minorVersion: 0,
             patchVersion: 0,
         }) && process_info.isLowPowerModeEnabled()
+    }
+
+    fn prevent_idle_sleep(&self, reason: &str) -> Task<Result<ActivityGuard>> {
+        Task::ready(Ok(MacActivity::begin(
+            reason,
+            NSActivityOptions::UserInitiated,
+        )))
     }
 
     fn show_system_notification(&self, notification: gpui::SystemNotification) {

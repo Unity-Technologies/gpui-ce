@@ -1,15 +1,15 @@
 use crate::{
-    Action, ActionBuildError, ActionRegistry, Any, AnyView, AnyWindowHandle, AppContext, Arena,
-    ArenaBox, Asset, AssetRegistry, BackgroundExecutor, Bounds, ClipboardItem, ClipboardReadError,
-    ContrastPreference, CursorStyle, DispatchPhase, DisplayId, EventEmitter, ExternalDragPayload,
-    FocusHandle, FocusMap, ForegroundExecutor, Global, HapticFeedbackStyle, KeyBinding, KeyContext,
-    Keymap, Keystroke, LayoutId, Menu, MenuItem, OwnedMenu, PathPromptOptions, Pixels, Platform,
-    PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, Point, Priority,
-    PromptBuilder, PromptButton, PromptHandle, PromptLevel, Render, RenderImage,
-    RenderablePromptHandle, Reservation, ScreenCaptureSource, SharedString, SubscriberSet,
-    Subscription, SvgRenderer, SystemColors, SystemNotification, SystemNotificationResponse, Task,
-    TextRenderingMode, TextSystem, ThermalState, Window, WindowAppearance, WindowButtonLayout,
-    WindowHandle, WindowId, WindowInvalidator,
+    Action, ActionBuildError, ActionRegistry, ActivityGuard, Any, AnyView, AnyWindowHandle,
+    AppContext, Arena, ArenaBox, Asset, AssetRegistry, BackgroundExecutor, Bounds, ClipboardItem,
+    ClipboardReadError, ContrastPreference, CursorStyle, DispatchPhase, DisplayId, EventEmitter,
+    ExternalDragPayload, FocusHandle, FocusMap, ForegroundExecutor, Global, HapticFeedbackStyle,
+    KeyBinding, KeyContext, Keymap, Keystroke, LayoutId, Menu, MenuItem, OwnedMenu,
+    PathPromptOptions, Pixels, Platform, PlatformDisplay, PlatformKeyboardLayout,
+    PlatformKeyboardMapper, Point, Priority, PromptBuilder, PromptButton, PromptHandle,
+    PromptLevel, Render, RenderImage, RenderablePromptHandle, Reservation, ScreenCaptureSource,
+    SharedString, SubscriberSet, Subscription, SvgRenderer, SystemColors, SystemNotification,
+    SystemNotificationResponse, Task, TextRenderingMode, TextSystem, ThermalState, Window,
+    WindowAppearance, WindowButtonLayout, WindowHandle, WindowId, WindowInvalidator,
     colors::{Colors, GlobalColors},
     hash,
     http_client::{HttpClient, NullHttpClient},
@@ -1689,6 +1689,11 @@ impl App {
     /// computation, and reduce the work when the system is hot.
     pub fn thermal_state(&self) -> ThermalState {
         self.platform.thermal_state()
+    }
+
+    /// Prevents idle sleep while the returned guard is held.
+    pub fn prevent_idle_sleep(&self, reason: &str) -> Task<Result<ActivityGuard>> {
+        self.platform.prevent_idle_sleep(reason)
     }
 
     /// Whether the system is in a low power mode (macOS Low Power Mode).
