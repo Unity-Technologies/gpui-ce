@@ -163,11 +163,8 @@ mod tests {
         }
     }
 
+    // Real D-Bus I/O needs a wall-clock timeout, not a GPUI scheduler timer.
     #[test]
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "real D-Bus I/O requires a wall-clock timeout, not a GPUI scheduler timer"
-    )]
     fn monitors_profiles_and_service_restarts() -> anyhow::Result<()> {
         smol::block_on(futures::future::select(
             Box::pin(check_service_lifecycle()),
