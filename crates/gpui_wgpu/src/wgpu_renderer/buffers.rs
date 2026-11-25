@@ -1,5 +1,5 @@
 use collections::FxHashMap;
-use gpui::AtlasTextureId;
+use gpui::{AtlasTextureId, PathCurve, PathPaint};
 use gpui_render::InstanceRange;
 use gpui_render::artifacts::DATA_TEXTURE_WIDTH;
 use gpui_render::shaders::interface::{self as shader_interface, BufferData};
@@ -88,6 +88,8 @@ pub(super) struct InstanceUpload {
     range_upload: Option<RangeUpload>,
     /// Downlevel only: staging-to-texture copy recorded at finish.
     texture_copy: Option<TextureCopy>,
+    /// Absolute element indices of the frame's first path curve and paint.
+    path_bases: (u32, u32),
 }
 
 impl InstanceUpload {
@@ -135,6 +137,45 @@ impl InstanceUpload {
             return None;
         }
         Some(self.batch(offset, stride, count, range_offset))
+    }
+
+    /// Writes the frame's path curves and paints. Path tiles index them by absolute element
+    /// on both transports: the storage buffer binds the whole arena, and the downlevel
+    /// dialect reads them from the data texture without a `DATA_RANGE` base.
+    pub(super) fn write_path_frame_data(
+        &mut self,
+        curves: &[PathCurve],
+        paints: &[PathPaint],
+    ) -> Option<()> {
+        let curve_base = self.write_indexed(curves)?;
+        let paint_base = self.write_indexed(paints)?;
+        self.path_bases = (curve_base, paint_base);
+        Some(())
+    }
+
+    /// The bases [`Self::write_path_frame_data`] added to the path tiles' indices.
+    pub(super) fn path_bases(&self) -> (u32, u32) {
+        self.path_bases
+    }
+
+    /// Writes values at a multiple of their stride and returns the first one's element index.
+    fn write_indexed<T: BufferData>(&mut self, values: &[T]) -> Option<u32> {
+        if values.is_empty() {
+            return Some(0);
+        }
+        let stride = std::mem::size_of::<T>() as u64;
+        let data = shader_interface::slice_as_bytes(values);
+        let offset = self.cursor.next_multiple_of(stride);
+        let end = offset.checked_add(data.len() as u64)?;
+        if end > self.size {
+            return None;
+        }
+        self.cursor = end;
+        self.staging
+            .as_mut()?
+            .slice(offset as usize..end as usize)
+            .copy_from_slice(data);
+        u32::try_from(offset / stride).ok()
     }
 
     /// Reserves an aligned batch region, allocating its downlevel range slot.
@@ -363,6 +404,7 @@ pub(super) struct InstanceBufferArena {
     transport: InstanceTransport,
     storage: InstanceStorage,
     bind_group: wgpu::BindGroup,
+    path_tile_bind_group: wgpu::BindGroup,
     textured_bind_groups: RefCell<TexturedBindGroups>,
     capacity: u64,
     maximum_size: u64,
@@ -444,7 +486,6 @@ struct TexturedBindGroups {
         (shader_interface::DataLayout, AtlasTextureId),
         (WgpuTextureIdentity, wgpu::BindGroup),
     >,
-    path: FxHashMap<shader_interface::DataLayout, wgpu::BindGroup>,
 }
 
 impl InstanceBufferArena {
@@ -494,10 +535,12 @@ impl InstanceBufferArena {
             }
         };
         let bind_group = instance_bind_group(device, layouts, &storage);
+        let path_tile_bind_group = path_tile_bind_group(device, layouts, &storage);
         Self {
             transport,
             storage,
             bind_group,
+            path_tile_bind_group,
             textured_bind_groups: RefCell::default(),
             capacity,
             maximum_size,
@@ -573,6 +616,7 @@ impl InstanceBufferArena {
             }
         }
         self.bind_group = instance_bind_group(device, layouts, &self.storage);
+        self.path_tile_bind_group = path_tile_bind_group(device, layouts, &self.storage);
         *self.textured_bind_groups.get_mut() = TexturedBindGroups::default();
         log::info!("increased instance buffer size to {}", self.capacity);
         true
@@ -618,6 +662,7 @@ impl InstanceBufferArena {
             size: required,
             transport: self.transport,
             range_upload,
+            path_bases: (0, 0),
             texture_copy: match &self.storage {
                 InstanceStorage::DataTexture {
                     texture, staging, ..
@@ -632,6 +677,10 @@ impl InstanceBufferArena {
 
     pub(super) fn bind_group(&self) -> &wgpu::BindGroup {
         &self.bind_group
+    }
+
+    pub(super) fn path_tile_bind_group(&self) -> &wgpu::BindGroup {
+        &self.path_tile_bind_group
     }
 
     pub(super) fn textured_bind_group(
@@ -665,30 +714,6 @@ impl InstanceBufferArena {
         bind_group
     }
 
-    pub(super) fn path_bind_group(
-        &self,
-        device: &wgpu::Device,
-        layouts: &WgpuBindGroupLayouts,
-        data_layout: shader_interface::DataLayout,
-        texture: &wgpu::TextureView,
-        sampler: &wgpu::Sampler,
-    ) -> wgpu::BindGroup {
-        let mut cache = self.textured_bind_groups.borrow_mut();
-        cache
-            .path
-            .entry(data_layout)
-            .or_insert_with(|| {
-                layouts.create_textured_instances(
-                    device,
-                    data_layout,
-                    self.binding_source(),
-                    texture,
-                    sampler,
-                )
-            })
-            .clone()
-    }
-
     pub(super) fn binding_source(&self) -> InstanceBindingSource<'_> {
         match &self.storage {
             InstanceStorage::Buffer(buffer) => InstanceBindingSource::Buffer(whole_buffer(buffer)),
@@ -706,20 +731,32 @@ impl InstanceBufferArena {
     }
 }
 
+fn binding_source_of(storage: &InstanceStorage) -> InstanceBindingSource<'_> {
+    match storage {
+        InstanceStorage::Buffer(buffer) => InstanceBindingSource::Buffer(whole_buffer(buffer)),
+        InstanceStorage::DataTexture { view, ranges, .. } => InstanceBindingSource::DataTexture {
+            texture: view,
+            range_uniforms: ranges.binding(),
+        },
+    }
+}
+
 /// Creates the group-1 bind group for the arena's current storage.
 fn instance_bind_group(
     device: &wgpu::Device,
     layouts: &WgpuBindGroupLayouts,
     storage: &InstanceStorage,
 ) -> wgpu::BindGroup {
-    let source = match storage {
-        InstanceStorage::Buffer(buffer) => InstanceBindingSource::Buffer(whole_buffer(buffer)),
-        InstanceStorage::DataTexture { view, ranges, .. } => InstanceBindingSource::DataTexture {
-            texture: view,
-            range_uniforms: ranges.binding(),
-        },
-    };
-    layouts.create_instances(device, source)
+    layouts.create_instances(device, binding_source_of(storage))
+}
+
+/// Creates the path-tile bind group, which also exposes the arena as curves and paints.
+fn path_tile_bind_group(
+    device: &wgpu::Device,
+    layouts: &WgpuBindGroupLayouts,
+    storage: &InstanceStorage,
+) -> wgpu::BindGroup {
+    layouts.create_path_tiles(device, binding_source_of(storage))
 }
 
 fn create_data_texture(device: &wgpu::Device, texels: u64) -> wgpu::Texture {

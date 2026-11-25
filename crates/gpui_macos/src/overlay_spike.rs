@@ -8,7 +8,6 @@ use std::ffi::{CStr, c_void};
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex, Once};
 
-use foreign_types::{ForeignType, ForeignTypeRef};
 use gpui::{ScaledPixels, Scene};
 use objc2::{
     class, msg_send,
@@ -17,6 +16,7 @@ use objc2::{
     sel,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize};
+use objc2_quartz_core::CAMetalLayer;
 
 use crate::renderer;
 
@@ -29,7 +29,7 @@ type Rects = Arc<Mutex<Vec<[f64; 4]>>>;
 
 pub(crate) struct Overlay {
     view: Retained<AnyObject>,
-    layer: metal::MetalLayer,
+    layer: Retained<CAMetalLayer>,
     rects: Rects,
 }
 
@@ -123,7 +123,7 @@ unsafe fn create(native_view: NonNull<AnyObject>) -> Option<Overlay> {
         let layer = renderer::new_window_layer(true);
         let _: () = msg_send![&*view, setWantsLayer: Bool::YES];
         let host: *mut AnyObject = msg_send![&*view, layer];
-        let _: () = msg_send![host, addSublayer: layer.as_ptr() as *mut AnyObject];
+        let _: () = msg_send![host, addSublayer: &*layer];
         // width|height sizable
         let _: () = msg_send![&*view, setAutoresizingMask: 18usize];
         let rects: Rects = Arc::new(Mutex::new(Vec::new()));
@@ -197,13 +197,13 @@ pub(crate) fn draw(
             WAS_MODAL.store(false, std::sync::atomic::Ordering::Relaxed);
         }
         if let Some(bl) = renderer.layer() {
-            let ds = bl.drawable_size();
-            let scale: f64 = msg_send![bl.as_ptr() as *mut AnyObject, contentsScale];
-            let _: () = msg_send![o.layer.as_ptr() as *mut AnyObject, setContentsScale: scale];
-            o.layer.set_drawable_size(ds);
+            let ds = bl.drawableSize();
+            let scale: f64 = msg_send![bl, contentsScale];
+            let _: () = msg_send![&*o.layer, setContentsScale: scale];
+            o.layer.setDrawableSize(ds);
             // Layer-hosting views do not size their layer for us.
             let b: NSRect = msg_send![&*o.view, bounds];
-            let _: () = msg_send![o.layer.as_ptr() as *mut AnyObject, setFrame: b];
+            let _: () = msg_send![&*o.layer, setFrame: b];
             let to_pt = |v: ScaledPixels| f64::from(v.0) / scale;
             *o.rects.lock().unwrap() = rects
                 .iter()
@@ -232,7 +232,7 @@ pub(crate) fn draw(
                 "overlay: frame={:?} subviews={n} hidden={hidden:?} rects={} ds={:?}",
                 f,
                 rects.len(),
-                o.layer.drawable_size()
+                o.layer.drawableSize()
             );
         }
     }

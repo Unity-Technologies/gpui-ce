@@ -1,22 +1,26 @@
 use gpui::{
-    AtlasTextureId, MonochromeSprite, Path, PolychromeSprite, Quad, ScaledPixels, Shadow,
+    AtlasTextureId, MonochromeSprite, PaintNativeView, PathTile, PolychromeSprite, Quad, Shadow,
     SubpixelSprite, Underline,
 };
 
 use crate::WgpuTextureInfo;
-use gpui_render::shaders::interface::{self as shader_interface, BufferData};
+use gpui_render::shaders::interface::BufferData;
 
 use super::{
     WgpuRenderer,
     buffers::{InstanceSlice, InstanceUpload},
-    frame, path_types, pipelines,
+    frame, pipelines,
 };
 
 impl WgpuRenderer {
+    /// Draws quads `first_index..` of the scene at their depths, leaving out the opaque
+    /// rectangles the pass's opaque fills already drew.
     pub(super) fn draw_quads(
         &self,
         quads: &[Quad],
+        first_index: usize,
         smoothed: bool,
+        depth: &frame::SceneDepth,
         instances: &mut InstanceUpload,
         pass: &mut wgpu::RenderPass<'_>,
     ) -> frame::DrawResult {
@@ -26,7 +30,62 @@ impl WgpuRenderer {
         } else {
             &pipelines.quads
         };
-        self.draw_instances(quads, pipeline, instances, pass)
+        let count = depth.shared.blended_quad_count(quads);
+        if count == 0 {
+            return Ok(());
+        }
+        let blended = depth.shared.blended_quads(quads, first_index);
+        let Some(slice) = instances.write_iter(count, blended) else {
+            return Err(frame::DrawError::CapacityPlanningInvariant);
+        };
+        self.draw_bound_slice(
+            pipeline,
+            self.resources().instances.bind_group(),
+            &slice,
+            pass,
+        );
+        Ok(())
+    }
+
+    pub(super) fn draw_opaque_fills(
+        &self,
+        fills: &InstanceSlice<Quad>,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) {
+        let resources = self.resources();
+        self.draw_bound_slice(
+            &resources.pipelines.opaque_quads,
+            resources.instances.bind_group(),
+            fills,
+            pass,
+        );
+    }
+
+    /// Cuts each native view's hole: the shader reads only a quad's bounds and content mask.
+    pub(super) fn draw_native_views(
+        &self,
+        native_views: &[PaintNativeView],
+        instances: &mut InstanceUpload,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) -> frame::DrawResult {
+        if native_views.is_empty() {
+            return Ok(());
+        }
+        let holes = native_views.iter().map(|native_view| Quad {
+            bounds: native_view.bounds,
+            content_mask: native_view.content_mask,
+            ..Default::default()
+        });
+        let Some(slice) = instances.write_iter(native_views.len(), holes) else {
+            return Err(frame::DrawError::CapacityPlanningInvariant);
+        };
+        self.draw_bound_slice(
+            &self.resources().pipelines.native_views,
+            self.resources().instances.bind_group(),
+            &slice,
+            pass,
+        );
+        Ok(())
     }
 
     pub(super) fn draw_shadows(
@@ -193,86 +252,35 @@ impl WgpuRenderer {
         self.draw_bound_instances(values, pipeline, &bind_group, instances, pass)
     }
 
-    pub(super) fn draw_paths_from_intermediate(
+    /// Draws path tiles, pointing them at the frame's curves and paints, which
+    /// `PreparedTargets::prepare` wrote ahead of every batch.
+    pub(super) fn draw_path_tiles(
         &self,
-        paths: &[Path<ScaledPixels>],
+        tiles: &[PathTile],
         instances: &mut InstanceUpload,
         pass: &mut wgpu::RenderPass<'_>,
     ) -> frame::DrawResult {
-        let sprite_count = path_types::sprite_count(paths);
-        let Some(sprite_slice) = instances.write_iter(sprite_count, path_types::sprites(paths))
-        else {
-            return Err(frame::DrawError::CapacityPlanningInvariant);
-        };
-        let resources = self.resources();
-        let Some(path_intermediate_view) = resources.path_intermediate_view.as_ref() else {
-            return Err(frame::DrawError::MissingIntermediateTarget);
-        };
-        let bind_group = resources.instances.path_bind_group(
-            &resources.device,
-            &resources.bind_group_layouts,
-            resources.pipelines.paths.data_layout(),
-            path_intermediate_view,
-            &resources.atlas_sampler,
-        );
-        self.draw_bound_slice(&resources.pipelines.paths, &bind_group, &sprite_slice, pass);
-        Ok(())
-    }
-
-    pub(super) fn draw_paths_to_intermediate(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        paths: &[Path<ScaledPixels>],
-        instances: &mut InstanceUpload,
-    ) -> frame::DrawResult {
-        let vertex_count = path_types::rasterization_vertex_count(paths);
-        if vertex_count == 0 {
+        if tiles.is_empty() {
             return Ok(());
         }
-
-        let Some(vertex_slice) =
-            instances.write_iter(vertex_count, path_types::rasterization_vertices(paths))
-        else {
+        let (curve_base, paint_base) = instances.path_bases();
+        let Some(slice) = instances.write_iter(
+            tiles.len(),
+            tiles.iter().map(|tile| PathTile {
+                paint: tile.paint + paint_base,
+                curve_start: tile.curve_start + curve_base,
+                ..*tile
+            }),
+        ) else {
             return Err(frame::DrawError::CapacityPlanningInvariant);
         };
         let resources = self.resources();
-        let Some(path_intermediate_view) = resources.path_intermediate_view.as_ref() else {
-            return Err(frame::DrawError::MissingIntermediateTarget);
-        };
-        let (target_view, resolve_target) = if let Some(msaa_view) = &resources.path_msaa_view {
-            (msaa_view, Some(path_intermediate_view))
-        } else {
-            (path_intermediate_view, None)
-        };
-
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("path_rasterization_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target_view,
-                resolve_target,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                    // Only the resolved texture is sampled later. The MSAA
-                    // attachment is transient and cannot use StoreOp::Store.
-                    store: if resolve_target.is_some() {
-                        wgpu::StoreOp::Discard
-                    } else {
-                        wgpu::StoreOp::Store
-                    },
-                },
-                depth_slice: None,
-            })],
-            depth_stencil_attachment: None,
-            ..Default::default()
-        });
-        pass.set_pipeline(&resources.pipelines.path_rasterization);
-        pass.set_bind_group(
-            shader_interface::GLOBAL_BIND_GROUP,
-            &resources.path_globals_bind_group,
-            &[],
+        self.draw_bound_slice(
+            &resources.pipelines.path_tiles,
+            resources.instances.path_tile_bind_group(),
+            &slice,
+            pass,
         );
-        vertex_slice.set_data_bind_group(&mut pass, resources.instances.bind_group());
-        pass.draw(vertex_slice.range(), 0..1);
         Ok(())
     }
 }

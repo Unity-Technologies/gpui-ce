@@ -1,7 +1,7 @@
 use crate::{
-    MacDispatcher, MacDisplay, MacKeyboardLayout, MacKeyboardMapper, MacWindow,
-    events::key_to_native, haptic_feedback::MacHaptics, pasteboard::Pasteboard, renderer,
-    set_active_window_cursor_style,
+    MacActivity, MacDispatcher, MacDisplay, MacKeyboardLayout, MacKeyboardMapper, MacWindow,
+    events::key_to_menu_equivalent, haptic_feedback::MacHaptics, pasteboard::Pasteboard, renderer,
+    set_active_window_cursor_style, system_notifications::NotificationCommand,
 };
 use anyhow::{Context as _, anyhow};
 use block2::RcBlock;
@@ -16,11 +16,12 @@ use core_foundation::{
 use dispatch2::DispatchQueue;
 use futures::channel::oneshot;
 use gpui::{
-    Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, ContrastPreference, CursorStyle,
-    ForegroundExecutor, KeyContext, Keymap, MacActivationPolicy, Menu, MenuItem, OsMenu, OwnedMenu,
-    PathPromptOptions, Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper,
-    PlatformTextSystem, PlatformWindow, Result, SystemMenuType, Task, ThermalState,
-    WindowAppearance, WindowKind, WindowParams, popup::PopupNotSupportedError,
+    Action, ActivationPolicy, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem,
+    ContrastPreference, CursorStyle, ForegroundExecutor, GraphicalEnvironment, KeyContext, Keymap,
+    MacActivationPolicy, Menu, MenuItem, OsMenu, OwnedMenu, PathPromptOptions, Platform,
+    PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
+    PlatformWindow, PowerMode, Result, SystemMenuType, Task, ThermalState, WindowAppearance,
+    WindowKind, WindowParams, WindowingRequest, popup::PopupNotSupportedError,
 };
 use gpui_util::{ResultExt, new_std_command};
 use itertools::Itertools;
@@ -29,10 +30,12 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSAppearance, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
-    NSControlStateValueOn, NSCursor, NSDocumentController, NSEventModifierFlags, NSMenu,
-    NSMenuDelegate, NSMenuItem, NSModalResponseOK, NSOpenPanel, NSResponder, NSSavePanel,
-    NSScroller, NSWorkspace,
+    NSApplicationOcclusionState, NSControlStateValueOn, NSCursor, NSDocumentController,
+    NSEventModifierFlags, NSMenu, NSMenuDelegate, NSMenuItem, NSModalResponseOK, NSOpenPanel,
+    NSResponder, NSSavePanel, NSScroller, NSWorkspace,
 };
+use objc2_foundation::NSActivityOptions;
+#[cfg(feature = "screen-capture")]
 use objc2_foundation::NSOperatingSystemVersion;
 use objc2_foundation::{
     NSArray, NSAutoreleasePool, NSBundle, NSInteger, NSNotification, NSNotificationCenter,
@@ -53,6 +56,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
+use strum::IntoEnumIterator as _;
 
 fn ns_string(value: &str) -> Retained<NSString> {
     NSString::from_str(value)
@@ -167,9 +171,21 @@ define_class!(
         fn thermal_state_change(&self, _: &NSNotification) {
             on_thermal_state_change(self);
         }
+        #[unsafe(method(onPowerStateChange:))]
+        fn power_state_change(&self, _: &NSNotification) {
+            on_power_mode_change(self);
+        }
+        #[unsafe(method(onScreenParametersChange:))]
+        fn screen_parameters_change(&self, _: &NSNotification) {
+            on_screen_parameters_change(self);
+        }
         #[unsafe(method(onAccessibilityDisplayOptionsChange:))]
         fn accessibility_display_options_change(&self, _: &NSNotification) {
             on_contrast_preference_change(self);
+        }
+        #[unsafe(method(onSystemSleep:))]
+        fn system_sleep(&self, _: &NSNotification) {
+            on_system_sleep(self);
         }
         #[unsafe(method(onSystemWake:))]
         fn system_wake(&self, _: &NSNotification) {
@@ -185,7 +201,7 @@ define_class!(
 impl GPUIApplicationDelegate {
     fn new() -> Retained<Self> {
         let this =
-            Self::alloc(MainThreadMarker::new().unwrap()).set_ivars(PlatformIvars::default());
+            Self::alloc(crate::main_thread_marker().unwrap()).set_ivars(PlatformIvars::default());
         unsafe { msg_send![super(this), init] }
     }
 }
@@ -199,14 +215,19 @@ pub(crate) struct MacPlatformState {
     renderer_context: renderer::Context,
     headless: bool,
     activation_policy: Option<MacActivationPolicy>,
+    /// Whether `run` has created the shared `NSApplication`, so a policy change applies now.
+    application_created: bool,
     general_pasteboard: Option<Pasteboard>,
     find_pasteboard: Option<Pasteboard>,
     reopen: Option<Box<dyn FnMut()>>,
     on_keyboard_layout_change: Option<Box<dyn FnMut()>>,
     on_thermal_state_change: Option<Box<dyn FnMut()>>,
+    on_power_mode_change: Option<Box<dyn FnMut()>>,
     on_contrast_preference_change: Option<Box<dyn FnMut()>>,
+    on_displays_changed: Option<Box<dyn FnMut()>>,
+    on_system_sleep: Option<Box<dyn FnMut()>>,
     on_system_wake: Option<Box<dyn FnMut()>>,
-    system_wake_observer_registered: bool,
+    system_power_observers_registered: bool,
     quit: Option<Box<dyn FnMut() -> bool>>,
     menu_command: Option<Box<dyn FnMut(&dyn Action)>>,
     validate_menu_command: Option<Box<dyn FnMut(&dyn Action) -> bool>>,
@@ -225,9 +246,46 @@ pub(crate) struct MacPlatformState {
     haptics: MacHaptics,
 }
 
+/// The activation policy that stands for a windowing mode: an app is headless while it has no
+/// Dock icon or menu bar.
+fn activation_policy_for(request: &WindowingRequest) -> MacActivationPolicy {
+    match request {
+        WindowingRequest::Headless => MacActivationPolicy::Accessory,
+        WindowingRequest::Windowed(_) => MacActivationPolicy::Regular,
+    }
+}
+
+fn mac_activation_policy(policy: ActivationPolicy) -> MacActivationPolicy {
+    match policy {
+        ActivationPolicy::Regular => MacActivationPolicy::Regular,
+        ActivationPolicy::Accessory => MacActivationPolicy::Accessory,
+    }
+}
+
+fn native_activation_policy(policy: MacActivationPolicy) -> NSApplicationActivationPolicy {
+    match policy {
+        MacActivationPolicy::Regular => NSApplicationActivationPolicy::Regular,
+        MacActivationPolicy::Accessory => NSApplicationActivationPolicy::Accessory,
+        MacActivationPolicy::Prohibited => NSApplicationActivationPolicy::Prohibited,
+    }
+}
+
 impl MacPlatform {
+    /// Records the activation policy, and applies it now if the application already exists.
+    /// Before that, `will_finish_launching` applies it.
+    fn apply_activation_policy(&self, policy: MacActivationPolicy) {
+        let mut state = self.0.lock();
+        state.activation_policy = Some(policy);
+        let should_apply = state.application_created && !state.headless;
+        drop(state);
+        if should_apply && let Some(marker) = crate::main_thread_marker() {
+            NSApplication::sharedApplication(marker)
+                .setActivationPolicy(native_activation_policy(policy));
+        }
+    }
+
     pub fn new(headless: bool) -> Self {
-        let marker = MainThreadMarker::new().expect("Mac platform not created on main thread");
+        let marker = crate::main_thread_marker().expect("Mac platform not created on main thread");
         let dispatcher = Arc::new(MacDispatcher::new());
 
         let text_system = Arc::new(crate::MacTextSystem::new());
@@ -237,6 +295,7 @@ impl MacPlatform {
 
         let state = Mutex::new(MacPlatformState {
             headless,
+            application_created: false,
             text_system,
             background_executor: BackgroundExecutor::new(dispatcher.clone()),
             foreground_executor: ForegroundExecutor::new(dispatcher),
@@ -256,9 +315,12 @@ impl MacPlatform {
             app_delegate: None,
             on_keyboard_layout_change: None,
             on_thermal_state_change: None,
+            on_power_mode_change: None,
             on_contrast_preference_change: None,
+            on_displays_changed: None,
+            on_system_sleep: None,
             on_system_wake: None,
-            system_wake_observer_registered: false,
+            system_power_observers_registered: false,
             menus: None,
             keyboard_mapper,
             cursor_visible: Arc::new(AtomicBool::new(true)),
@@ -357,11 +419,14 @@ impl MacPlatform {
                     .find_or_first(|binding| {
                         binding.predicate().is_none_or(|predicate| {
                             predicate.eval(DEFAULT_CONTEXT.get_or_init(|| {
-                                let mut workspace_context = KeyContext::new_with_defaults();
+                                let mut workspace_context =
+                                    KeyContext::new_with_defaults(gpui::OperatingSystem::Mac);
                                 workspace_context.add("Workspace");
-                                let mut pane_context = KeyContext::new_with_defaults();
+                                let mut pane_context =
+                                    KeyContext::new_with_defaults(gpui::OperatingSystem::Mac);
                                 pane_context.add("Pane");
-                                let mut editor_context = KeyContext::new_with_defaults();
+                                let mut editor_context =
+                                    KeyContext::new_with_defaults(gpui::OperatingSystem::Mac);
                                 editor_context.add("Editor");
 
                                 pane_context.extend(&editor_context);
@@ -408,7 +473,7 @@ impl MacPlatform {
                                 NSMenuItem::alloc(marker),
                                 &ns_string(name),
                                 selector,
-                                &ns_string(key_to_native(keystroke.key()).as_ref()),
+                                &ns_string(key_to_menu_equivalent(keystroke.key()).as_ref()),
                             )
                         };
                         if Self::os_version() >= Version::new(12, 0, 0) {
@@ -494,9 +559,30 @@ impl MacPlatform {
             version.patchVersion as u64,
         )
     }
+
+    // Before the app finishes launching there is no delegate yet;
+    // `did_finish_launching` registers the observers then.
+    fn ensure_system_power_observers(&self) {
+        if self.0.lock().system_power_observers_registered {
+            return;
+        }
+
+        let delegate = self.0.lock().app_delegate.clone();
+        if let Some(delegate) = delegate {
+            register_system_power_observers(&delegate);
+            self.0.lock().system_power_observers_registered = true;
+        }
+    }
 }
 
 impl Platform for MacPlatform {
+    fn platform_info(&self) -> gpui::PlatformInfo {
+        gpui::PlatformInfo {
+            os: gpui::OperatingSystem::Mac,
+            target: gpui::PlatformTarget::Native,
+        }
+    }
+
     fn background_executor(&self) -> BackgroundExecutor {
         self.0.lock().background_executor.clone()
     }
@@ -510,7 +596,7 @@ impl Platform for MacPlatform {
     }
 
     fn set_mac_activation_policy(&self, policy: MacActivationPolicy) {
-        self.0.lock().activation_policy = Some(policy);
+        self.apply_activation_policy(policy);
     }
 
     fn run(&self, on_finish_launching: Box<dyn FnOnce()>) {
@@ -527,6 +613,7 @@ impl Platform for MacPlatform {
         unsafe {
             let app: Retained<GPUIApplication> =
                 msg_send![GPUIApplication::class(), sharedApplication];
+            self.0.lock().application_created = true;
             let app_delegate = GPUIApplicationDelegate::new();
             let app_delegate_protocol = ProtocolObject::from_ref(&*app_delegate);
             app.as_super().setDelegate(Some(&app_delegate_protocol));
@@ -543,6 +630,7 @@ impl Platform for MacPlatform {
             app.ivars().platform.set(null_mut());
             self.0.lock().app_delegate = None;
         }
+        self.0.lock().application_created = false;
     }
 
     fn quit(&self) {
@@ -558,7 +646,7 @@ impl Platform for MacPlatform {
         }
 
         extern "C" fn quit(_: *mut c_void) {
-            NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None);
+            NSApplication::sharedApplication(crate::main_thread_marker().unwrap()).terminate(None);
         }
     }
 
@@ -612,7 +700,7 @@ impl Platform for MacPlatform {
 
     fn activate(&self, ignoring_other_apps: bool) {
         unsafe {
-            let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+            let app = NSApplication::sharedApplication(crate::main_thread_marker().unwrap());
             if ignoring_other_apps {
                 let _: () = msg_send![&*app, activateIgnoringOtherApps: true];
             } else {
@@ -621,17 +709,58 @@ impl Platform for MacPlatform {
         }
     }
 
+    fn set_activation_policy(&self, policy: ActivationPolicy) {
+        self.apply_activation_policy(mac_activation_policy(policy));
+    }
+
+    fn set_initial_windowing(&self, request: WindowingRequest) {
+        match request {
+            WindowingRequest::Headless => {
+                self.apply_activation_policy(MacActivationPolicy::Accessory)
+            }
+            // Leaves `Regular` to `did_finish_launching`: setting it before the run loop leaves
+            // the menu bar of an unbundled app launched from a terminal unclickable.
+            WindowingRequest::Windowed(_) => self.0.lock().activation_policy = None,
+        }
+    }
+
+    fn request_windowing(&self, request: WindowingRequest) -> Task<Result<()>> {
+        let state = self.0.lock();
+        if state.headless {
+            return Task::ready(Err(anyhow!(
+                "a platform created headless has no application to switch windowing modes"
+            )));
+        }
+        let policy = activation_policy_for(&request);
+        if state.activation_policy.unwrap_or_default() == policy {
+            return Task::ready(Err(match request {
+                WindowingRequest::Headless => anyhow!("already headless"),
+                WindowingRequest::Windowed(_) => anyhow!("already windowed"),
+            }));
+        }
+        drop(state);
+        self.apply_activation_policy(policy);
+        Task::ready(Ok(()))
+    }
+
+    fn graphical_environment(&self) -> Option<GraphicalEnvironment> {
+        let state = self.0.lock();
+        let policy = state.activation_policy.unwrap_or_default();
+        (!state.headless && policy == MacActivationPolicy::Regular)
+            .then(GraphicalEnvironment::detect)
+    }
+
     fn hide(&self) {
-        NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).hide(None);
+        NSApplication::sharedApplication(crate::main_thread_marker().unwrap()).hide(None);
     }
 
     fn hide_other_apps(&self) {
-        NSApplication::sharedApplication(MainThreadMarker::new().unwrap())
+        NSApplication::sharedApplication(crate::main_thread_marker().unwrap())
             .hideOtherApplications(None);
     }
 
     fn unhide_other_apps(&self) {
-        NSApplication::sharedApplication(MainThreadMarker::new().unwrap())
+        NSApplication::sharedApplication(crate::main_thread_marker().unwrap())
             .unhideAllApplications(None);
     }
 
@@ -643,6 +772,10 @@ impl Platform for MacPlatform {
         MacDisplay::all()
             .map(|screen| Rc::new(screen) as Rc<_>)
             .collect()
+    }
+
+    fn on_displays_changed(&self, callback: Box<dyn FnMut()>) {
+        self.0.lock().on_displays_changed = Some(callback);
     }
 
     #[cfg(feature = "screen-capture")]
@@ -705,6 +838,7 @@ impl Platform for MacPlatform {
             renderer_context,
             options.bounds.size.map(|pixels| pixels.as_f32()),
             false,
+            options.use_display_p3,
         )?;
         Ok(Box::new(MacWindow::open(
             handle,
@@ -1011,6 +1145,10 @@ impl Platform for MacPlatform {
         self.0.lock().on_thermal_state_change = Some(callback);
     }
 
+    fn on_power_mode_change(&self, callback: Box<dyn FnMut()>) {
+        self.0.lock().on_power_mode_change = Some(callback);
+    }
+
     fn contrast_preference(&self) -> ContrastPreference {
         // `msg_send!` rather than the typed binding, which needs objc2-app-kit's
         // large `NSAccessibility` feature for this one getter.
@@ -1028,19 +1166,42 @@ impl Platform for MacPlatform {
         self.0.lock().on_contrast_preference_change = Some(callback);
     }
 
-    fn on_system_wake(&self, callback: Box<dyn FnMut()>) {
-        let mut state = self.0.lock();
-        state.on_system_wake = Some(callback);
-        if state.system_wake_observer_registered {
-            return;
-        }
-        drop(state);
+    fn on_system_sleep(&self, callback: Box<dyn FnMut()>) {
+        self.0.lock().on_system_sleep = Some(callback);
+        self.ensure_system_power_observers();
+    }
 
-        let delegate = self.0.lock().app_delegate.clone();
-        if let Some(delegate) = delegate {
-            register_system_wake_observer(&delegate);
-            self.0.lock().system_wake_observer_registered = true;
-        }
+    fn on_system_wake(&self, callback: Box<dyn FnMut()>) {
+        self.0.lock().on_system_wake = Some(callback);
+        self.ensure_system_power_observers();
+    }
+
+    fn debug_state(&self) -> serde_json::Value {
+        let app = NSApplication::sharedApplication(self.1);
+        let key_window: *mut AnyObject = unsafe { msg_send![&*app, keyWindow] };
+        let main_window: *mut AnyObject = unsafe { msg_send![&*app, mainWindow] };
+        let window_number = |window: *mut AnyObject| -> Option<isize> {
+            (!window.is_null()).then(|| unsafe { msg_send![window, windowNumber] })
+        };
+        // AppKit's cursor for this app, mapped back to the style GPUI would
+        // have set it from. `None` when it is not one GPUI sets.
+        let current_cursor = Retained::as_ptr(&NSCursor::currentCursor()).cast::<AnyObject>();
+        let current_cursor_style = CursorStyle::iter().find(|style| {
+            // SAFETY: The platform is only used on the main thread.
+            let cursor = unsafe { crate::window::native_cursor(*style) };
+            ptr::eq(cursor, current_cursor)
+        });
+        serde_json::json!({
+            "current_cursor_style": current_cursor_style,
+            "app_is_active": app.isActive(),
+            "app_is_hidden": app.isHidden(),
+            "app_occlusion_state_visible": app
+                .occlusionState()
+                .contains(NSApplicationOcclusionState::Visible),
+            "key_window_number": window_number(key_window),
+            "main_window_number": window_number(main_window),
+            "power_mode": format!("{:?}", self.power_mode()),
+        })
     }
 
     fn thermal_state(&self) -> ThermalState {
@@ -1053,27 +1214,45 @@ impl Platform for MacPlatform {
         }
     }
 
-    fn low_power_mode(&self) -> bool {
-        // `isLowPowerModeEnabled` is macOS 12+; the deployment target is 10.15, where
-        // calling it raises an unrecognized-selector exception every frame.
-        let process_info = NSProcessInfo::processInfo();
-        process_info.isOperatingSystemAtLeastVersion(NSOperatingSystemVersion {
-            majorVersion: 12,
-            minorVersion: 0,
-            patchVersion: 0,
-        }) && process_info.isLowPowerModeEnabled()
+    fn power_mode(&self) -> PowerMode {
+        if NSProcessInfo::processInfo().isLowPowerModeEnabled() {
+            PowerMode::LowPower
+        } else {
+            // This API does not distinguish Automatic from High Power Mode on macOS.
+            PowerMode::Unknown
+        }
+    }
+
+    fn prevent_idle_sleep(&self, reason: &str) -> Task<Result<ActivityGuard>> {
+        Task::ready(Ok(MacActivity::begin(
+            reason,
+            NSActivityOptions::UserInitiated,
+        )))
     }
 
     fn show_system_notification(&self, notification: gpui::SystemNotification) {
         let mut state = self.0.lock();
-        let executor = state.foreground_executor.clone();
-        state.system_notifications.show(&executor, notification);
+        let foreground_executor = state.foreground_executor.clone();
+        let background_executor = state.background_executor.clone();
+        state
+            .system_notifications
+            .send(
+                &foreground_executor,
+                &background_executor,
+                NotificationCommand::Show(notification),
+            )
+            .detach();
     }
 
-    fn dismiss_system_notification(&self, tag: &str) {
+    fn dismiss_system_notification(&self, tag: &str) -> Task<()> {
         let mut state = self.0.lock();
-        let executor = state.foreground_executor.clone();
-        state.system_notifications.dismiss(&executor, tag);
+        let foreground_executor = state.foreground_executor.clone();
+        let background_executor = state.background_executor.clone();
+        state.system_notifications.send(
+            &foreground_executor,
+            &background_executor,
+            NotificationCommand::Dismiss(gpui::SharedString::from(tag.to_owned())),
+        )
     }
 
     fn on_system_notification_response(
@@ -1231,6 +1410,45 @@ impl Platform for MacPlatform {
         })
     }
 
+    fn write_credentials_if_not_exists(
+        &self,
+        url: &str,
+        username: &str,
+        password: &[u8],
+    ) -> Task<Result<bool>> {
+        let url = url.to_string();
+        let username = username.to_string();
+        let password = password.to_vec();
+        self.background_executor().spawn(async move {
+            unsafe {
+                use security::*;
+
+                let url = CFString::from(url.as_str());
+                let username = CFString::from(username.as_str());
+                let password = CFData::from_buffer(&password);
+
+                let mut attrs = CFMutableDictionary::with_capacity(4);
+                attrs.set(kSecClass as *const _, kSecClassInternetPassword as *const _);
+                attrs.set(kSecAttrServer as *const _, url.as_CFTypeRef());
+                attrs.set(kSecAttrAccount as *const _, username.as_CFTypeRef());
+                attrs.set(kSecValueData as *const _, password.as_CFTypeRef());
+
+                // A single SecItemAdd is atomic: an existing item for this server
+                // and account fails with errSecDuplicateItem and is left as is.
+                let status = SecItemAdd(attrs.as_concrete_TypeRef(), ptr::null_mut());
+                if status == errSecSuccess {
+                    Ok(true)
+                } else if status == errSecDuplicateItem {
+                    Ok(false)
+                } else if status == errSecUserCanceled {
+                    anyhow::bail!("Keychain access was cancelled.")
+                } else {
+                    anyhow::bail!("creating password failed: {status}")
+                }
+            }
+        })
+    }
+
     fn read_credentials(&self, url: &str) -> Task<Result<Option<(String, Vec<u8>)>>> {
         let url = url.to_string();
         self.background_executor().spawn(async move {
@@ -1251,7 +1469,10 @@ impl Platform for MacPlatform {
                 let status = SecItemCopyMatching(attrs.as_concrete_TypeRef(), &mut result);
                 match status {
                     security::errSecSuccess => {}
-                    security::errSecItemNotFound | security::errSecUserCanceled => return Ok(None),
+                    security::errSecItemNotFound => return Ok(None),
+                    // A cancelled prompt is not "no credentials": callers that
+                    // then write new ones could overwrite a shared secret.
+                    security::errSecUserCanceled => anyhow::bail!("Keychain access was cancelled."),
                     _ => anyhow::bail!("reading password failed: {status}"),
                 }
 
@@ -1330,12 +1551,8 @@ fn will_finish_launching(this: &GPUIApplicationDelegate) {
         if let Some(policy) = state.activation_policy {
             let app: Retained<GPUIApplication> =
                 unsafe { msg_send![GPUIApplication::class(), sharedApplication] };
-            let ns_policy = match policy {
-                MacActivationPolicy::Regular => NSApplicationActivationPolicy::Regular,
-                MacActivationPolicy::Accessory => NSApplicationActivationPolicy::Accessory,
-                MacActivationPolicy::Prohibited => NSApplicationActivationPolicy::Prohibited,
-            };
-            app.as_super().setActivationPolicy(ns_policy);
+            app.as_super()
+                .setActivationPolicy(native_activation_policy(policy));
         }
     }
 }
@@ -1362,6 +1579,17 @@ fn did_finish_launching(this: &GPUIApplicationDelegate) {
         );
     }
 
+    // Posted when a display is connected, disconnected, rearranged, or
+    // changes mode, which includes its refresh rate.
+    let screen_parameters_name = ns_string("NSApplicationDidChangeScreenParametersNotification");
+    unsafe {
+        notification_center.addObserver_selector_name_object(
+            as_any_object(this),
+            objc2::sel!(onScreenParametersChange:),
+            Some(&screen_parameters_name),
+            None,
+        );
+    }
     let thermal_name = ns_string("NSProcessInfoThermalStateDidChangeNotification");
     let process_info = NSProcessInfo::processInfo();
     unsafe {
@@ -1369,6 +1597,16 @@ fn did_finish_launching(this: &GPUIApplicationDelegate) {
             as_any_object(this),
             objc2::sel!(onThermalStateChange:),
             Some(&thermal_name),
+            Some(&process_info),
+        );
+    }
+    // Low Power Mode toggles post this; the app caches the mode from it.
+    let power_state_name = ns_string("NSProcessInfoPowerStateDidChangeNotification");
+    unsafe {
+        notification_center.addObserver_selector_name_object(
+            as_any_object(this),
+            objc2::sel!(onPowerStateChange:),
+            Some(&power_state_name),
             Some(&process_info),
         );
     }
@@ -1390,9 +1628,11 @@ fn did_finish_launching(this: &GPUIApplicationDelegate) {
     let platform = get_mac_platform(this);
     let callback = {
         let mut state = platform.0.lock();
-        if state.on_system_wake.is_some() && !state.system_wake_observer_registered {
-            register_system_wake_observer(this);
-            state.system_wake_observer_registered = true;
+        if (state.on_system_sleep.is_some() || state.on_system_wake.is_some())
+            && !state.system_power_observers_registered
+        {
+            register_system_power_observers(this);
+            state.system_power_observers_registered = true;
         }
         state.finish_launching.take()
     };
@@ -1405,12 +1645,19 @@ fn as_any_object<T>(object: &T) -> &AnyObject {
     unsafe { &*(object as *const T as *const AnyObject) }
 }
 
-fn register_system_wake_observer(observer: &GPUIApplicationDelegate) {
-    let workspace = NSWorkspace::sharedWorkspace();
-    let workspace_center = workspace.notificationCenter();
+/// Registers the delegate's `onSystemSleep:` and `onSystemWake:` handlers.
+fn register_system_power_observers(observer: &GPUIApplicationDelegate) {
+    let center = NSWorkspace::sharedWorkspace().notificationCenter();
+    let sleep_name = ns_string("NSWorkspaceWillSleepNotification");
     let wake_name = ns_string("NSWorkspaceDidWakeNotification");
     unsafe {
-        workspace_center.addObserver_selector_name_object(
+        center.addObserver_selector_name_object(
+            as_any_object(observer),
+            objc2::sel!(onSystemSleep:),
+            Some(&sleep_name),
+            None,
+        );
+        center.addObserver_selector_name_object(
             as_any_object(observer),
             objc2::sel!(onSystemWake:),
             Some(&wake_name),
@@ -1483,6 +1730,52 @@ fn on_thermal_state_change(this: &GPUIApplicationDelegate) {
     }
 }
 
+fn on_power_mode_change(this: &GPUIApplicationDelegate) {
+    // Deferred like `on_thermal_state_change`: Foundation posts this on the
+    // thread that changed the state, possibly while the App is borrowed.
+    let platform = get_mac_platform(this);
+    let platform_ptr = platform as *const MacPlatform as *mut c_void;
+    unsafe {
+        DispatchQueue::main().exec_async_f(platform_ptr, on_power_mode_change);
+    }
+
+    extern "C" fn on_power_mode_change(context: *mut c_void) {
+        let platform = unsafe { &*(context as *const MacPlatform) };
+        let mut lock = platform.0.lock();
+        if let Some(mut callback) = lock.on_power_mode_change.take() {
+            drop(lock);
+            callback();
+            platform
+                .0
+                .lock()
+                .on_power_mode_change
+                .get_or_insert(callback);
+        }
+    }
+}
+
+fn on_screen_parameters_change(this: &GPUIApplicationDelegate) {
+    // Deferred for the same reason as `on_thermal_state_change`.
+    let platform = get_mac_platform(this);
+    let platform_ptr = platform as *const MacPlatform as *mut c_void;
+    unsafe {
+        DispatchQueue::main().exec_async_f(platform_ptr, on_screen_parameters_change);
+    }
+
+    extern "C" fn on_screen_parameters_change(context: *mut c_void) {
+        let platform = unsafe { &*(context as *const MacPlatform) };
+        let callback = platform.0.lock().on_displays_changed.take();
+        if let Some(mut callback) = callback {
+            callback();
+            platform
+                .0
+                .lock()
+                .on_displays_changed
+                .get_or_insert(callback);
+        }
+    }
+}
+
 fn on_contrast_preference_change(this: &GPUIApplicationDelegate) {
     // Deferred like the thermal notification: it is delivered synchronously and
     // may arrive while the App RefCell is borrowed.
@@ -1503,6 +1796,29 @@ fn on_contrast_preference_change(this: &GPUIApplicationDelegate) {
                 .lock()
                 .on_contrast_preference_change
                 .get_or_insert(callback);
+        }
+    }
+}
+
+// Deferred to the main queue like the wake and thermal notifications. The
+// machine keeps running the main run loop for well over a frame after the
+// observers return, so the block runs before it suspends.
+fn on_system_sleep(this: &GPUIApplicationDelegate) {
+    let platform = get_mac_platform(this);
+    let platform_ptr = platform as *const MacPlatform as *mut c_void;
+    // SAFETY: platform lives for the process lifetime while callbacks are registered.
+    unsafe {
+        DispatchQueue::main().exec_async_f(platform_ptr, on_system_sleep);
+    }
+
+    extern "C" fn on_system_sleep(context: *mut c_void) {
+        // SAFETY: context is the MacPlatform pointer queued above.
+        let platform = unsafe { &*(context as *const MacPlatform) };
+        let mut lock = platform.0.lock();
+        if let Some(mut callback) = lock.on_system_sleep.take() {
+            drop(lock);
+            callback();
+            platform.0.lock().on_system_sleep.get_or_insert(callback);
         }
     }
 }
@@ -1661,4 +1977,5 @@ mod security {
     pub const errSecSuccess: OSStatus = 0;
     pub const errSecUserCanceled: OSStatus = -128;
     pub const errSecItemNotFound: OSStatus = -25300;
+    pub const errSecDuplicateItem: OSStatus = -25299;
 }

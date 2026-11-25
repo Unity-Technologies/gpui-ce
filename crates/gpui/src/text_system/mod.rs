@@ -80,6 +80,22 @@ mod layout_cache_tests {
     }
 
     #[test]
+    fn shape_line_shares_its_text_with_the_layout_cache() {
+        let system = window_text_system();
+        // Long enough to be stored on the heap rather than inline.
+        let text = SharedString::from("let value = compute_something(argument_one, argument_two);");
+        let run = TextRun {
+            len: text.len(),
+            ..Default::default()
+        };
+
+        system.shape_line(text.clone(), px(14.), &[run]);
+        let cached = system.line_layout_cache().current_frame_line_texts();
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].as_ptr(), text.as_ptr());
+    }
+
+    #[test]
     fn paint_changes_reuse_shaped_geometry() {
         let system = window_text_system();
         let text = SharedString::from("paint cache");
@@ -170,8 +186,8 @@ mod layout_cache_tests {
 mod raster_contract_tests {
     use super::*;
     use crate::{
-        AtlasKey, AtlasTextureKind, Bounds, DevicePixels, PlatformAtlas, PlatformTextSystem, Point,
-        Result, Size, TestAtlas, TestTextSystem, hsla, point, px, size,
+        AtlasKey, AtlasTextureKind, Bounds, DevicePixels, HeadlessAtlas, PlatformAtlas,
+        PlatformTextSystem, Point, Result, Size, TestTextSystem, hsla, point, px, size,
     };
     use std::{
         borrow::Cow,
@@ -378,7 +394,7 @@ mod raster_contract_tests {
         });
         let text_system = TextSystem::new(backend.clone());
         let params = params(PreparedRasterStyle::independent(GlyphRenderMode::Grayscale));
-        let atlas = TestAtlas::new();
+        let atlas = HeadlessAtlas::default();
 
         assert!(
             atlas
@@ -418,8 +434,8 @@ mod raster_contract_tests {
         let backend = Arc::new(ChangingRasterizer::default());
         let text_system = TextSystem::new(backend.clone());
         let params = params(PreparedRasterStyle::independent(GlyphRenderMode::Color));
-        let first_atlas = TestAtlas::new();
-        let second_atlas = TestAtlas::new();
+        let first_atlas = HeadlessAtlas::default();
+        let second_atlas = HeadlessAtlas::default();
 
         let silhouette = first_atlas
             .get_or_insert_glyph_with(&params, &mut || text_system.rasterize_glyph(&params))
@@ -454,7 +470,7 @@ mod raster_contract_tests {
 
     #[test]
     fn successful_empty_glyphs_are_cached_without_a_tile() {
-        let atlas = TestAtlas::new();
+        let atlas = HeadlessAtlas::default();
         let params = params(PreparedRasterStyle::independent(GlyphRenderMode::Grayscale));
         let mut builds = 0;
         let mut build = || {
@@ -472,7 +488,7 @@ mod raster_contract_tests {
 
     #[test]
     fn custom_glyph_builders_validate_before_caching() {
-        let atlas = TestAtlas::new();
+        let atlas = HeadlessAtlas::default();
         let params = params(PreparedRasterStyle::independent(GlyphRenderMode::Grayscale));
         let mut builds = 0;
         let mut build = || {

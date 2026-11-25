@@ -9,7 +9,11 @@ use anyhow::Result;
 use collections::FxHashSet;
 use refineable::Refineable;
 use std::mem;
-use std::{any::TypeId, fmt, ops::Range};
+use std::{
+    any::{TypeId, type_name},
+    fmt,
+    ops::Range,
+};
 
 /// A type-erased handle to a view.
 ///
@@ -49,6 +53,7 @@ use std::{any::TypeId, fmt, ops::Range};
 pub struct AnyView {
     entity: AnyEntity,
     render: fn(&AnyView, &mut Window, &mut App) -> AnyElement,
+    view_type_name: &'static str,
 }
 
 impl<V: Render> From<Entity<V>> for AnyView {
@@ -56,6 +61,7 @@ impl<V: Render> From<Entity<V>> for AnyView {
         AnyView {
             entity: value.into_any(),
             render: any_view::render::<V>,
+            view_type_name: type_name::<V>(),
         }
     }
 }
@@ -70,7 +76,7 @@ impl AnyView {
     /// definite size from `style`, because the contents aren't rendered to measure them. See
     /// [`Entity::cached`].
     pub fn cached(self, style: StyleRefinement) -> ViewElement<AnyView> {
-        ViewElement::new(self).cached(style)
+        self.into_element().cached(style)
     }
 
     /// Returns a weak handle to this view. The weak handle doesn't keep the view alive.
@@ -81,6 +87,7 @@ impl AnyView {
         AnyWeakView {
             entity: self.entity.downgrade(),
             render: self.render,
+            view_type_name: self.view_type_name,
         }
     }
 
@@ -93,6 +100,7 @@ impl AnyView {
             Err(entity) => Err(Self {
                 entity,
                 render: self.render,
+                view_type_name: self.view_type_name,
             }),
         }
     }
@@ -133,7 +141,7 @@ impl<V: 'static + Render> IntoElement for Entity<V> {
     type Element = ViewElement<Entity<V>>;
 
     fn into_element(self) -> Self::Element {
-        ViewElement::new(self)
+        ViewElement::with_type_name(self, type_name::<V>())
     }
 }
 
@@ -141,7 +149,8 @@ impl IntoElement for AnyView {
     type Element = ViewElement<AnyView>;
 
     fn into_element(self) -> Self::Element {
-        ViewElement::new(self)
+        let view_type_name = self.view_type_name;
+        ViewElement::with_type_name(self, view_type_name)
     }
 }
 
@@ -152,6 +161,7 @@ impl IntoElement for AnyView {
 pub struct AnyWeakView {
     entity: AnyWeakEntity,
     render: fn(&AnyView, &mut Window, &mut App) -> AnyElement,
+    view_type_name: &'static str,
 }
 
 impl AnyWeakView {
@@ -161,6 +171,7 @@ impl AnyWeakView {
         Some(AnyView {
             entity,
             render: self.render,
+            view_type_name: self.view_type_name,
         })
     }
 }
@@ -170,6 +181,7 @@ impl<V: 'static + Render> From<WeakEntity<V>> for AnyWeakView {
         AnyWeakView {
             entity: view.into(),
             render: any_view::render::<V>,
+            view_type_name: type_name::<V>(),
         }
     }
 }
@@ -329,7 +341,7 @@ impl<T: Render> Entity<T> {
     /// [the frame](crate::_documentation::concepts::the_frame) for when frames are redrawn.
     #[track_caller]
     pub fn cached(self, style: StyleRefinement) -> ViewElement<Entity<T>> {
-        ViewElement::new(self).cached(style)
+        ViewElement::with_type_name(self, type_name::<T>()).cached(style)
     }
 }
 
@@ -343,6 +355,8 @@ pub struct ViewElement<V: View> {
     view: Option<V>,
     entity_id: Option<EntityId>,
     cached_style: Option<StyleRefinement>,
+    #[cfg(feature = "profiler")]
+    view_type_name: &'static str,
     #[cfg(debug_assertions)]
     source: &'static core::panic::Location<'static>,
 }
@@ -351,10 +365,20 @@ impl<V: View> ViewElement<V> {
     /// Wraps `view` as an element. The element takes the view's entity id, if it has one.
     #[track_caller]
     pub fn new(view: V) -> Self {
+        Self::with_type_name(view, type_name::<V>())
+    }
+
+    /// Wraps a view whose draw time profiling attributes to `view_type_name`,
+    /// such as an entity's type rather than [`Entity`]'s.
+    #[track_caller]
+    #[cfg_attr(not(feature = "profiler"), expect(unused_variables))]
+    pub(crate) fn with_type_name(view: V, view_type_name: &'static str) -> Self {
         let entity_id = view.entity_id();
         ViewElement {
             entity_id,
             cached_style: None,
+            #[cfg(feature = "profiler")]
+            view_type_name,
             view: Some(view),
             #[cfg(debug_assertions)]
             source: core::panic::Location::caller(),
@@ -376,18 +400,12 @@ impl<V: View> ViewElement<V> {
     }
 }
 
-impl<V: View> IntoElement for ViewElement<V> {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 struct ViewElementState {
     prepaint_range: Range<PrepaintStateIndex>,
     paint_range: Range<PaintIndex>,
     cache_key: ViewElementCacheKey,
+    /// The entities the view accessed while it was last drawn, in any phase,
+    /// restored when its prepaint is reused so the window stays subscribed.
     accessed_entities: FxHashSet<EntityId>,
     /// Element states the view's subtree read while the direction probe
     /// rendered it in `request_layout`, before `prepaint_range` began. A reuse
@@ -513,7 +531,18 @@ impl<V: View> Element for ViewElement<V> {
         };
 
         if let Some(entity_id) = entity_id {
-            window.with_rendered_view(entity_id, request_layout)
+            #[cfg(feature = "profiler")]
+            let view_type_name = self.view_type_name;
+            #[cfg(feature = "profiler")]
+            let start = window.window_profiler.begin_view();
+            let layout = window.with_rendered_view(entity_id, request_layout);
+            #[cfg(feature = "profiler")]
+            window.window_profiler.end_view(
+                start,
+                view_type_name,
+                crate::profiler::ViewPhase::RequestLayout,
+            );
+            layout
         } else {
             window.with_id(
                 ElementId::Name(std::any::type_name::<V>().into()),
@@ -533,8 +562,10 @@ impl<V: View> Element for ViewElement<V> {
     ) -> Option<AnyElement> {
         if let Some(entity_id) = self.entity_id {
             // Stateful path.
+            #[cfg(feature = "profiler")]
+            let start = window.window_profiler.begin_view();
             window.set_view_id(entity_id);
-            window.with_rendered_view(entity_id, |window| {
+            let prepainted = window.with_rendered_view(entity_id, |window| {
                 if request_layout.detached_layout_id.is_none()
                     && let Some(mut element) = request_layout.element.take()
                 {
@@ -566,7 +597,7 @@ impl<V: View> Element for ViewElement<V> {
                                 .accessed_element_states
                                 .extend(element_state.layout_element_states.iter().cloned());
                             cx.entities
-                                .extend_accessed(&element_state.accessed_entities);
+                                .extend_accessed(element_state.accessed_entities.iter().copied());
                             window.next_frame.record_view_dependencies(
                                 entity_id,
                                 &element_state.accessed_entities,
@@ -629,7 +660,14 @@ impl<V: View> Element for ViewElement<V> {
                         )
                     },
                 )
-            })
+            });
+            #[cfg(feature = "profiler")]
+            window.window_profiler.end_view(
+                start,
+                self.view_type_name,
+                crate::profiler::ViewPhase::Prepaint,
+            );
+            prepainted
         } else {
             // Stateless path: just prepaint the element.
             window.with_id(
@@ -658,42 +696,25 @@ impl<V: View> Element for ViewElement<V> {
     ) {
         if let Some(entity_id) = self.entity_id {
             // Stateful path.
-            window.with_rendered_view(entity_id, |window| {
-                let caching_disabled = window.is_inspector_picking(cx);
-                if self.cached_style.is_some() && !caching_disabled {
-                    window.with_element_state::<ViewElementState, _>(
-                        global_id.unwrap(),
-                        |element_state, window| {
-                            let mut element_state = element_state.unwrap();
-
-                            let paint_start = window.paint_index();
-
-                            if let Some(element) = element {
-                                let refreshing = mem::replace(&mut window.refreshing, true);
-                                element.paint(window, cx);
-                                window.refreshing = refreshing;
-                            } else {
-                                window.reuse_paint(element_state.paint_range.clone());
-                            }
-
-                            let paint_end = window.paint_index();
-                            element_state.paint_range = paint_start..paint_end;
-
-                            ((), element_state)
-                        },
-                    )
-                } else {
-                    element.as_mut().unwrap().paint(window, cx);
-                }
-            });
+            #[cfg(feature = "profiler")]
+            let start = window.window_profiler.begin_view();
+            paint_view(
+                entity_id,
+                self.cached_style.is_some(),
+                global_id,
+                element,
+                window,
+                cx,
+            );
+            #[cfg(feature = "profiler")]
+            window.window_profiler.end_view(
+                start,
+                self.view_type_name,
+                crate::profiler::ViewPhase::Paint,
+            );
         } else {
             // Stateless path: just paint the element.
-            window.with_id(
-                ElementId::Name(std::any::type_name::<V>().into()),
-                |window| {
-                    element.as_mut().unwrap().paint(window, cx);
-                },
-            );
+            paint_component(std::any::type_name::<V>(), element, window, cx);
         }
     }
 }
@@ -708,4 +729,60 @@ impl Render for EmptyView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         Empty
     }
+}
+
+#[inline(never)]
+fn paint_view(
+    entity_id: EntityId,
+    cached: bool,
+    global_id: Option<&GlobalElementId>,
+    element: &mut Option<AnyElement>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    window.with_rendered_view(entity_id, |window| {
+        let caching_disabled = window.is_inspector_picking(cx);
+        if cached && !caching_disabled {
+            window.with_element_state::<ViewElementState, _>(
+                global_id.unwrap(),
+                |element_state, window| {
+                    let mut element_state = element_state.unwrap();
+
+                    let paint_start = window.paint_index();
+
+                    if let Some(element) = element {
+                        let refreshing = mem::replace(&mut window.refreshing, true);
+                        let ((), accessed_entities) =
+                            cx.detect_accessed_entities(|cx| element.paint(window, cx));
+                        window
+                            .next_frame
+                            .record_view_dependencies(entity_id, &accessed_entities);
+                        element_state.accessed_entities.extend(accessed_entities);
+                        window.refreshing = refreshing;
+                    } else {
+                        window.reuse_paint(element_state.paint_range.clone());
+                    }
+
+                    let paint_end = window.paint_index();
+                    element_state.paint_range = paint_start..paint_end;
+
+                    ((), element_state)
+                },
+            )
+        } else {
+            element.as_mut().unwrap().paint(window, cx);
+        }
+    });
+}
+
+#[inline(never)]
+fn paint_component(
+    name: &'static str,
+    element: &mut Option<AnyElement>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    window.with_id(ElementId::Name(name.into()), |window| {
+        element.as_mut().unwrap().paint(window, cx);
+    });
 }

@@ -1,6 +1,6 @@
 [package]
 name = "gpui_ce_windows"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 description.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -29,7 +29,7 @@ wgpu = [
 ]
 
 [dependencies]
-gpui = { path = "../gpui", version = "=0.4.0-unity.20261112", registry = "unity", package = "gpui-ce", default-features = false }
+gpui = { path = "../gpui", version = "=0.4.0-unity.20261125", registry = "unity", package = "gpui-ce", default-features = false }
 gpui_render = { workspace = true, features = ["swash"] }
 wgsl-rs.workspace = true
 
@@ -50,6 +50,7 @@ log.workspace = true
 parking_lot.workspace = true
 rand.workspace = true
 raw-window-handle.workspace = true
+scheduler.workspace = true
 smallvec.workspace = true
 uuid.workspace = true
 # `Win32_UI_Accessibility` for `HIGHCONTRASTW`; accesskit_windows already enables it.
@@ -58,5 +59,8 @@ windows-core.workspace = true
 windows-numerics.workspace = true
 windows-registry.workspace = true
 
+# `cfg(test)` here does not reach gpui's own cfg-gated platform APIs, so the
+# dev-dependency enables them for test builds, as on macOS and Linux.
 [target.'cfg(target_os = "windows")'.dev-dependencies]
+gpui = { workspace = true, features = ["test-support"], default-features = false }
 gpui_fonts = { path = "../gpui_ce_fonts", package = "gpui-ce-fonts" }

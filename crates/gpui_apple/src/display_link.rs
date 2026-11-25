@@ -5,17 +5,19 @@
 //! compositor to release one, which on macOS 26 base M-series Macs blocks
 //! about 33 ms and caps animation at 30 fps.
 
-use foreign_types::ForeignTypeRef;
-use metal::{CAMetalDrawable as MetalCAMetalDrawable, MetalDrawable, MetalLayerRef};
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
     rc::Retained,
-    runtime::{AnyClass, AnyObject, ProtocolObject},
+    runtime::{AnyClass, ProtocolObject},
 };
 use objc2_foundation::{NSObject, NSObjectProtocol, NSRunLoop, NSRunLoopCommonModes};
 use objc2_quartz_core::{
-    CAMetalDisplayLink, CAMetalDisplayLinkDelegate, CAMetalDisplayLinkUpdate, CAMetalLayer,
+    CAMetalDisplayLink, CAMetalDisplayLinkDelegate, CAMetalDisplayLinkUpdate, CAMetalDrawable,
+    CAMetalLayer,
 };
+
+/// A drawable a `CAMetalLayer` or `CAMetalDisplayLink` handed out.
+pub type MetalDrawable = Retained<ProtocolObject<dyn CAMetalDrawable>>;
 
 struct MetalDisplayLinkDelegateIvars {
     callback: Box<dyn Fn(MetalDrawable)>,
@@ -33,17 +35,7 @@ define_class!(
     unsafe impl CAMetalDisplayLinkDelegate for MetalDisplayLinkDelegate {
         #[unsafe(method(metalDisplayLink:needsUpdate:))]
         fn needs_update(&self, _link: &CAMetalDisplayLink, update: &CAMetalDisplayLinkUpdate) {
-            // SAFETY: `drawable` is a non-null `id<CAMetalDrawable>` property.
-            let drawable: Option<Retained<AnyObject>> = unsafe { msg_send![update, drawable] };
-            let Some(drawable) = drawable else {
-                return;
-            };
-            // SAFETY: `into_raw` hands over the +1 retain that `MetalDrawable` releases on drop.
-            let drawable = unsafe {
-                <MetalDrawable as foreign_types::ForeignType>::from_ptr(
-                    Retained::into_raw(drawable).cast::<MetalCAMetalDrawable>(),
-                )
-            };
+            let drawable = update.drawable();
             // The callback may destroy its frame source, releasing our owner's retain.
             let delegate = self.retain();
             (delegate.ivars().callback)(drawable);
@@ -85,15 +77,13 @@ impl MetalFrameSource {
     /// Starts delivering one drawable per display update for `layer`, or
     /// returns `None` where `CAMetalDisplayLink` is unavailable.
     pub fn new(
-        layer: &MetalLayerRef,
+        layer: &CAMetalLayer,
         main_thread: MainThreadMarker,
         callback: impl Fn(MetalDrawable) + 'static,
     ) -> Option<Self> {
         if !Self::is_available() {
             return None;
         }
-        // SAFETY: metal-rs and objc2 both wrap the same `CAMetalLayer` object.
-        let layer = unsafe { &*(layer.as_ptr() as *const CAMetalLayer) };
         let delegate = MetalDisplayLinkDelegate::new(main_thread, callback);
         let link = CAMetalDisplayLink::initWithMetalLayer(CAMetalDisplayLink::alloc(), layer);
         link.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
@@ -112,6 +102,10 @@ impl MetalFrameSource {
     /// A paused link delivers no updates and acquires no drawables.
     pub fn set_paused(&self, paused: bool) {
         self.link.setPaused(paused);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.link.isPaused()
     }
 }
 

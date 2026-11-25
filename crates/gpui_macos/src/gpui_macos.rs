@@ -38,3 +38,27 @@ pub(crate) use text_system::*;
 pub(crate) use window::*;
 
 pub use platform::MacPlatform;
+
+/// Returns the main-thread marker, checking the current thread once per thread.
+fn main_thread_marker() -> Option<objc2::MainThreadMarker> {
+    thread_local! {
+        static MAIN_THREAD_MARKER: Option<objc2::MainThreadMarker> =
+            objc2::MainThreadMarker::new();
+    }
+    MAIN_THREAD_MARKER.with(|marker| *marker)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::main_thread_marker;
+
+    #[test]
+    fn main_thread_marker_rejects_background_threads() {
+        std::thread::spawn(|| {
+            assert_eq!(main_thread_marker(), None);
+            assert_eq!(main_thread_marker(), None);
+        })
+        .join()
+        .expect("background thread panicked");
+    }
+}

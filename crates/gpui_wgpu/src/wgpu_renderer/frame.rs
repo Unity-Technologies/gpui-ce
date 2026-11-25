@@ -1,12 +1,12 @@
 use super::{
-    WgpuRenderer, begin_color_render_pass,
+    WgpuRenderer,
     buffers::{InstanceTransport, InstanceUpload},
     filters::{FILTER_UNIFORMS_PER_COMPOSITE, FrameUniformRequirements},
-    path_types,
 };
 use gpui::{
-    FilterRenderTarget, MonochromeSprite, PolychromeSprite, PrimitiveBatch, Quad, RenderCommand,
-    Scene, ScenePlanRequirements, Shadow, SubpixelSprite, Underline,
+    FilterRenderTarget, MonochromeSprite, PathCurve, PathPaint, PathTile, PolychromeSprite,
+    PrimitiveBatch, Quad, RenderCommand, Scene, ScenePlanRequirements, Shadow, SubpixelSprite,
+    Underline,
 };
 use gpui_render::TargetStack;
 use gpui_render::blur::{FilterCompositeClip, FilterCompositeParameters};
@@ -35,10 +35,6 @@ pub(super) fn render_to_view(
             log::error!("frame storage exceeded its precomputed capacity");
             None
         }
-        Err(DrawError::MissingIntermediateTarget) => {
-            log::error!("frame preparation did not create a required intermediate target");
-            None
-        }
     }
 }
 
@@ -54,6 +50,7 @@ struct PreparedTargets {
     active: wgpu::TextureView,
     presentation: wgpu::TextureView,
     offscreen: Option<wgpu::TextureView>,
+    depth: wgpu::TextureView,
     instances: InstanceUpload,
 }
 
@@ -80,7 +77,7 @@ impl PreparedTargets {
         ) {
             return None;
         }
-        let instances = {
+        let mut instances = {
             let resources = renderer.resources();
             resources.instances.begin_upload(
                 &resources.queue,
@@ -88,17 +85,19 @@ impl PreparedTargets {
                 requirements.instance_batches,
             )?
         };
+        // Reserved first by `FrameRequirements::for_scene`, so the planned padding holds.
+        if requirements.planned.path_tile_count > 0 {
+            instances.write_path_frame_data(&scene.path_curves, &scene.path_paints)?;
+        }
         if !renderer.ensure_uniform_capacity(requirements.uniforms) {
             return None;
         }
 
-        if requirements.planned.uses_path_target {
-            renderer.ensure_path_textures();
-        }
         if requirements.planned.uses_offscreen_target {
             renderer.ensure_filter_textures(&requirements.planned);
         }
         write_shader_globals(renderer);
+        let depth = renderer.ensure_depth_texture();
 
         if requirements.planned.uses_offscreen_target {
             let resources = renderer.resources();
@@ -111,6 +110,7 @@ impl PreparedTargets {
                 active: offscreen.clone(),
                 presentation: frame_view.clone(),
                 offscreen: Some(offscreen),
+                depth,
                 instances,
             })
         } else {
@@ -118,6 +118,7 @@ impl PreparedTargets {
                 active: frame_view.clone(),
                 presentation: frame_view.clone(),
                 offscreen: None,
+                depth,
                 instances,
             })
         }
@@ -156,7 +157,6 @@ fn begin_frame(renderer: &mut WgpuRenderer) -> bool {
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct GlobalUniformState {
     globals: GlobalUniforms,
-    path_globals: GlobalUniforms,
     font_rasterization: FontRasterizationUniforms,
 }
 
@@ -186,13 +186,8 @@ fn write_shader_globals(renderer: &mut WgpuRenderer) {
         ),
         padding: 0,
     };
-    let path_globals = GlobalUniforms {
-        premultiplied_alpha: ShaderBool::Disabled,
-        ..globals
-    };
     let state = GlobalUniformState {
         globals,
-        path_globals,
         font_rasterization,
     };
     if renderer.uploaded_globals == Some(state) {
@@ -217,12 +212,6 @@ fn write_shader_globals(renderer: &mut WgpuRenderer) {
         .copy_from_slice(shader_interface::bytes_of(&globals));
     upload
         .slice(
-            renderer.globals.path_offset as usize
-                ..renderer.globals.path_offset as usize + globals_size,
-        )
-        .copy_from_slice(shader_interface::bytes_of(&path_globals));
-    upload
-        .slice(
             renderer.globals.font_offset as usize
                 ..renderer.globals.font_offset as usize + font_size,
         )
@@ -245,6 +234,18 @@ impl FrameRequirements {
         let planned = scene.render_plan().requirements();
         let mut storage_bytes = 0_u64;
         let mut instance_batches = 0_u64;
+        // Path tiles index the frame's curves and paints by absolute element, so each array
+        // starts on a multiple of its own stride and takes no batch slot.
+        if planned.path_tile_count > 0 {
+            for (stride, count) in [
+                (std::mem::size_of::<PathCurve>(), scene.path_curves.len()),
+                (std::mem::size_of::<PathPaint>(), scene.path_paints.len()),
+            ] {
+                let stride = stride as u64;
+                storage_bytes = storage_bytes.next_multiple_of(stride);
+                storage_bytes = storage_bytes.saturating_add(stride.saturating_mul(count as u64));
+            }
+        }
         let mut reserve = |element_size: usize, count: usize| {
             if count > 0 {
                 let stride = element_size as u64;
@@ -262,19 +263,11 @@ impl FrameRequirements {
                 PrimitiveBatch::Shadows { range, .. } => {
                     reserve(std::mem::size_of::<Shadow>(), range.len())
                 }
-                PrimitiveBatch::Quads { range, .. } => {
+                PrimitiveBatch::Quads { range, .. } | PrimitiveBatch::NativeViews(range) => {
                     reserve(std::mem::size_of::<Quad>(), range.len())
                 }
-                PrimitiveBatch::Paths {
-                    rasterization_vertex_count,
-                    sprite_count,
-                    ..
-                } if *rasterization_vertex_count > 0 => {
-                    reserve(
-                        std::mem::size_of::<path_types::PathRasterizationVertex>(),
-                        *rasterization_vertex_count,
-                    );
-                    reserve(std::mem::size_of::<path_types::PathSprite>(), *sprite_count);
+                PrimitiveBatch::Paths { tiles, .. } => {
+                    reserve(std::mem::size_of::<PathTile>(), tiles.len())
                 }
                 PrimitiveBatch::Underlines(range) => {
                     reserve(std::mem::size_of::<Underline>(), range.len())
@@ -288,13 +281,22 @@ impl FrameRequirements {
                 PrimitiveBatch::PolychromeSprites { range, .. } => {
                     reserve(std::mem::size_of::<PolychromeSprite>(), range.len())
                 }
-                PrimitiveBatch::Paths { .. }
-                | PrimitiveBatch::Surfaces(_)
+                PrimitiveBatch::Surfaces(_)
                 | PrimitiveBatch::BackdropFilters(_)
                 | PrimitiveBatch::FilterBoundary(_) => {}
             }
         }
-        debug_assert_eq!(instance_batches as usize, planned.instance_batch_count);
+        let plan = scene.render_plan();
+        for scene_pass in 0..plan.scene_pass_count() {
+            reserve(
+                std::mem::size_of::<Quad>(),
+                plan.opaque_quads(scene_pass).len(),
+            );
+        }
+        debug_assert_eq!(
+            instance_batches as usize,
+            planned.instance_batch_count + planned.opaque_quad_pass_count
+        );
 
         Self {
             storage_bytes,
@@ -322,7 +324,39 @@ struct FrameEncoder<'a> {
     targets: TargetStack<wgpu::TextureView>,
     offscreen: Option<wgpu::TextureView>,
     presentation: wgpu::TextureView,
+    depth_view: wgpu::TextureView,
+    depth: SceneDepth,
     instances: InstanceUpload,
+}
+
+/// Depth bookkeeping across a frame's scene passes: the shared [`gpui_render::SceneDepth`]
+/// plus the render pass's current viewport depth range.
+pub(super) struct SceneDepth {
+    pub(super) shared: gpui_render::SceneDepth,
+    viewport: Option<f32>,
+    width: f32,
+    height: f32,
+}
+
+impl SceneDepth {
+    fn new(renderer: &WgpuRenderer, scene: &Scene) -> Self {
+        Self {
+            shared: gpui_render::SceneDepth::new(scene),
+            viewport: None,
+            width: renderer.target.width() as f32,
+            height: renderer.target.height() as f32,
+        }
+    }
+
+    /// Sets the viewport's depth range: `None` lets quads place themselves, `Some(depth)`
+    /// pins every fragment of the next batches to `depth`.
+    fn set_viewport(&mut self, pass: &mut wgpu::RenderPass<'_>, depth: Option<f32>) {
+        if self.viewport != depth {
+            let (minimum, maximum) = depth.map_or((0.0, 1.0), |depth| (depth, depth));
+            pass.set_viewport(0.0, 0.0, self.width, self.height, minimum, maximum);
+            self.viewport = depth;
+        }
+    }
 }
 
 impl<'a> FrameEncoder<'a> {
@@ -341,6 +375,8 @@ impl<'a> FrameEncoder<'a> {
             targets: TargetStack::new(targets.active),
             offscreen: targets.offscreen,
             presentation: targets.presentation,
+            depth_view: targets.depth,
+            depth: SceneDepth::new(renderer, scene),
             instances: targets.instances,
         }
     }
@@ -387,39 +423,18 @@ impl<'a> FrameEncoder<'a> {
             "main_pass",
             self.targets.current(),
             wgpu::LoadOp::Clear(self.renderer.target.clear_color()),
+            &self.depth_view,
         );
+        draw_opaque_fills(
+            self.renderer,
+            self.scene,
+            &mut self.depth,
+            &mut self.instances,
+            &mut pass,
+        )?;
 
         for command in self.scene.render_commands() {
             match command {
-                RenderCommand::Batch(PrimitiveBatch::Paths {
-                    range,
-                    rasterization_vertex_count,
-                    ..
-                }) => {
-                    if *rasterization_vertex_count == 0 {
-                        continue;
-                    }
-                    let paths = &self.scene.paths[range.clone()];
-                    drop(pass);
-                    let rasterized = self.renderer.draw_paths_to_intermediate(
-                        &mut self.encoder,
-                        paths,
-                        &mut self.instances,
-                    );
-                    pass = begin_scene_render_pass(
-                        self.renderer,
-                        &mut self.encoder,
-                        "after_paths",
-                        self.targets.current(),
-                        wgpu::LoadOp::Load,
-                    );
-                    rasterized?;
-                    self.renderer.draw_paths_from_intermediate(
-                        paths,
-                        &mut self.instances,
-                        &mut pass,
-                    )?;
-                }
                 RenderCommand::Batch(PrimitiveBatch::BackdropFilters(range)) => {
                     drop(pass);
                     for filter in &self.scene.backdrop_filters[range.clone()] {
@@ -445,13 +460,22 @@ impl<'a> FrameEncoder<'a> {
                             },
                         );
                     }
+                    self.depth.begin_scene_pass();
                     pass = begin_scene_render_pass(
                         self.renderer,
                         &mut self.encoder,
                         "after_backdrop_filter",
                         self.targets.current(),
                         wgpu::LoadOp::Load,
+                        &self.depth_view,
                     );
+                    draw_opaque_fills(
+                        self.renderer,
+                        self.scene,
+                        &mut self.depth,
+                        &mut self.instances,
+                        &mut pass,
+                    )?;
                 }
                 RenderCommand::Batch(PrimitiveBatch::FilterBoundary(_)) => {
                     unreachable!("filter boundaries must be compiled into render commands")
@@ -460,6 +484,7 @@ impl<'a> FrameEncoder<'a> {
                     self.renderer,
                     self.scene,
                     batch,
+                    &mut self.depth,
                     &mut self.instances,
                     &mut pass,
                 )?,
@@ -476,13 +501,22 @@ impl<'a> FrameEncoder<'a> {
                             .filters
                             .is_empty(),
                     );
+                    self.depth.begin_scene_pass();
                     pass = begin_scene_render_pass(
                         self.renderer,
                         &mut self.encoder,
                         "filter_group",
                         self.targets.current(),
                         wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        &self.depth_view,
                     );
+                    draw_opaque_fills(
+                        self.renderer,
+                        self.scene,
+                        &mut self.depth,
+                        &mut self.instances,
+                        &mut pass,
+                    )?;
                 }
                 RenderCommand::EndFilter {
                     boundary_index,
@@ -506,13 +540,22 @@ impl<'a> FrameEncoder<'a> {
                             clip: FilterCompositeClip::ContentShape,
                         },
                     );
+                    self.depth.begin_scene_pass();
                     pass = begin_scene_render_pass(
                         self.renderer,
                         &mut self.encoder,
                         "after_content_filter",
                         self.targets.current(),
                         wgpu::LoadOp::Load,
+                        &self.depth_view,
                     );
+                    draw_opaque_fills(
+                        self.renderer,
+                        self.scene,
+                        &mut self.depth,
+                        &mut self.instances,
+                        &mut pass,
+                    )?;
                 }
                 RenderCommand::BeginFilter {
                     target: FilterRenderTarget::Inline,
@@ -526,8 +569,44 @@ impl<'a> FrameEncoder<'a> {
         }
         drop(pass);
         self.targets.assert_balanced();
+        debug_assert_eq!(
+            self.depth.shared.scene_pass() + 1,
+            self.scene.render_plan().scene_pass_count()
+        );
         Ok(())
     }
+}
+
+impl SceneDepth {
+    fn begin_scene_pass(&mut self) {
+        self.shared.begin_scene_pass();
+        // A new pass starts with the default viewport.
+        self.viewport = None;
+    }
+}
+
+/// Draws the opaque fill regions of the current scene pass, front to back, writing depth.
+fn draw_opaque_fills(
+    renderer: &WgpuRenderer,
+    scene: &Scene,
+    depth: &mut SceneDepth,
+    instances: &mut InstanceUpload,
+    pass: &mut wgpu::RenderPass<'_>,
+) -> DrawResult {
+    if scene
+        .render_plan()
+        .opaque_quads(depth.shared.scene_pass())
+        .is_empty()
+    {
+        return Ok(());
+    }
+    depth.set_viewport(pass, None);
+    let fills = depth.shared.opaque_fills(scene);
+    let Some(slice) = instances.write_iter(fills.len(), fills) else {
+        return Err(DrawError::CapacityPlanningInvariant);
+    };
+    renderer.draw_opaque_fills(&slice, pass);
+    Ok(())
 }
 
 fn begin_scene_render_pass<'a>(
@@ -536,8 +615,29 @@ fn begin_scene_render_pass<'a>(
     label: &'a str,
     target: &'a wgpu::TextureView,
     load: wgpu::LoadOp<wgpu::Color>,
+    depth: &'a wgpu::TextureView,
 ) -> wgpu::RenderPass<'a> {
-    let mut pass = begin_color_render_pass(encoder, label, target, load);
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: target,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load,
+                store: wgpu::StoreOp::Store,
+            },
+            depth_slice: None,
+        })],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: depth,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Clear(0.0),
+                store: wgpu::StoreOp::Discard,
+            }),
+            stencil_ops: None,
+        }),
+        ..Default::default()
+    });
     pass.set_bind_group(
         shader_interface::GLOBAL_BIND_GROUP,
         &renderer.resources().globals_bind_group,
@@ -550,7 +650,6 @@ fn begin_scene_render_pass<'a>(
 pub(super) enum DrawError {
     CapacityPlanningInvariant,
     ExternalSurface,
-    MissingIntermediateTarget,
 }
 
 pub(super) type DrawResult = Result<(), DrawError>;
@@ -559,13 +658,21 @@ fn encode_inline_batch(
     renderer: &WgpuRenderer,
     scene: &Scene,
     batch: &PrimitiveBatch,
+    depth: &mut SceneDepth,
     instances: &mut InstanceUpload,
     pass: &mut wgpu::RenderPass<'_>,
 ) -> DrawResult {
+    let batch_depth = depth.shared.enter_batch(batch);
+    depth.set_viewport(pass, batch_depth);
     match batch {
-        PrimitiveBatch::Quads { range, smoothed } => {
-            renderer.draw_quads(&scene.quads[range.clone()], *smoothed, instances, pass)
-        }
+        PrimitiveBatch::Quads { range, smoothed } => renderer.draw_quads(
+            &scene.quads[range.clone()],
+            range.start,
+            *smoothed,
+            depth,
+            instances,
+            pass,
+        ),
         PrimitiveBatch::Shadows { range, smoothed } => {
             renderer.draw_shadows(&scene.shadows[range.clone()], *smoothed, instances, pass)
         }
@@ -599,9 +706,13 @@ fn encode_inline_batch(
         PrimitiveBatch::Surfaces(range) => {
             renderer.draw_surfaces(&scene.surfaces[range.clone()], pass)
         }
-        PrimitiveBatch::Paths { .. }
-        | PrimitiveBatch::BackdropFilters(_)
-        | PrimitiveBatch::FilterBoundary(_) => {
+        PrimitiveBatch::NativeViews(range) => {
+            renderer.draw_native_views(&scene.native_views[range.clone()], instances, pass)
+        }
+        PrimitiveBatch::Paths { tiles, .. } => {
+            renderer.draw_path_tiles(&scene.path_tiles[tiles.clone()], instances, pass)
+        }
+        PrimitiveBatch::BackdropFilters(_) | PrimitiveBatch::FilterBoundary(_) => {
             unreachable!("pass-interrupting batches are handled by FrameEncoder")
         }
     }

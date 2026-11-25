@@ -1,13 +1,14 @@
 use crate::{
     Action, AnyView, AnyWindowHandle, App, AppCell, AppContext, AssetRegistry, AssetSource,
     AsyncApp, AvailableSpace, BackgroundExecutor, BorrowAppContext, Bounds, Capslock,
-    ClipboardItem, ContrastPreference, DEFAULT_TEST_SCALE_FACTOR, DrawPhase, Drawable, Element,
-    Empty, EntityId, EventEmitter, ForegroundExecutor, Global, InputEvent, Keystroke, Modifiers,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Platform, PlatformHeadlessRenderer, PlatformTextSystem, Point, Render, Result, SharedString,
-    Size, SystemColors, SystemNotification, SystemNotificationResponse, Task, TestDispatcher,
-    TestPlatform, TestScreenCaptureSource, TestTextSystem, TestWindow, TextSystem, VisualContext,
-    Window, WindowBounds, WindowHandle, WindowOptions, app::GpuiMode, window::ElementArenaScope,
+    ClipboardItem, ContrastPreference, DEFAULT_TEST_SCALE_FACTOR, Decorations, DisplayId,
+    DrawPhase, Drawable, Element, Empty, EntityId, EventEmitter, ForegroundExecutor, Global,
+    InputEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Platform, PlatformHeadlessRenderer, PlatformTextSystem,
+    Point, Render, Result, SharedString, Size, SystemColors, SystemNotification,
+    SystemNotificationResponse, Task, TestDispatcher, TestPlatform, TestScreenCaptureSource,
+    TestTextSystem, TestWindow, TextSystem, VisualContext, Window, WindowBounds, WindowHandle,
+    WindowOptions, WindowVisibility, app::GpuiMode, window::ElementArenaScope,
 };
 use anyhow::{anyhow, bail};
 use futures::{Stream, StreamExt, channel::oneshot};
@@ -15,6 +16,19 @@ use futures::{Stream, StreamExt, channel::oneshot};
 use std::{
     cell::RefCell, future::Future, ops::Deref, path::PathBuf, rc::Rc, sync::Arc, time::Duration,
 };
+
+pub(crate) fn test_window(app: &AppCell, window: AnyWindowHandle) -> TestWindow {
+    app.borrow_mut()
+        .windows
+        .get_mut(window.id)
+        .expect("window not found")
+        .as_deref_mut()
+        .expect("window is being updated")
+        .platform_window
+        .as_test()
+        .expect("window is not a TestWindow")
+        .clone()
+}
 
 /// The test version of [`App`], passed to `#[gpui::test]` functions.
 ///
@@ -162,6 +176,11 @@ impl AppContext for TestAppContext {
 }
 
 impl TestAppContext {
+    /// Sets the runtime identity used by this test's application.
+    pub fn set_platform_info(&mut self, platform_info: crate::PlatformInfo) {
+        self.test_platform.platform_info.set(platform_info);
+    }
+
     /// Creates a context that runs on `dispatcher`.
     ///
     /// `#[gpui::test]` calls this for you.
@@ -259,6 +278,11 @@ impl TestAppContext {
         }
     }
 
+    /// Disables accessibility for subsequently created test windows.
+    pub fn disable_accessibility(&mut self) {
+        self.update(|cx| cx.accessibility_force_disabled = true);
+    }
+
     /// Turns off drawing for this app for the rest of the test.
     pub fn skip_drawing(&mut self) {
         self.app.borrow_mut().mode = GpuiMode::Test { skip_drawing: true };
@@ -280,6 +304,21 @@ impl TestAppContext {
     /// Returns whether a new-path prompt is waiting for [`TestAppContext::simulate_new_path_selection`].
     pub fn did_prompt_for_new_path(&self) -> bool {
         self.test_platform.did_prompt_for_new_path()
+    }
+
+    /// Returns the number of active idle sleep prevention tokens.
+    pub fn active_idle_sleep_preventions(&self) -> usize {
+        self.test_platform.active_idle_sleep_preventions()
+    }
+
+    /// Sets the delay for subsequent idle sleep prevention acquisitions.
+    pub fn set_idle_sleep_prevention_delay(&self, delay: Duration) {
+        self.test_platform.set_idle_sleep_prevention_delay(delay);
+    }
+
+    /// Makes subsequent idle sleep prevention acquisitions fail or succeed.
+    pub fn set_idle_sleep_prevention_fails(&self, fails: bool) {
+        self.test_platform.set_idle_sleep_prevention_fails(fails);
     }
 
     /// Creates another app that shares this context's scheduler, so tasks from both apps interleave deterministically.
@@ -577,6 +616,12 @@ impl TestAppContext {
             .simulate_contrast_preference(contrast, None);
     }
 
+    /// Changes the power mode the test platform reports, as if the user
+    /// toggled Low Power Mode in the OS settings.
+    pub fn simulate_power_mode(&self, power_mode: crate::PowerMode) {
+        self.test_platform.simulate_power_mode(power_mode);
+    }
+
     /// Turns on [`ContrastPreference::Forced`] with `colors` as the palette, as
     /// if the user picked a Windows contrast theme.
     pub fn simulate_forced_colors(&self, colors: SystemColors) {
@@ -587,6 +632,66 @@ impl TestAppContext {
     /// Resizes `window_handle` to `size`. See [`VisualTestContext::simulate_resize`].
     pub fn simulate_window_resize(&self, window_handle: AnyWindowHandle, size: Size<Pixels>) {
         self.test_window(window_handle).simulate_resize(size);
+    }
+
+    /// Simulates a change in whether the platform is presenting the window.
+    pub fn simulate_window_visibility_change(
+        &self,
+        window_handle: AnyWindowHandle,
+        visibility: WindowVisibility,
+    ) {
+        self.test_window(window_handle)
+            .simulate_visibility_change(visibility);
+    }
+
+    /// Simulates the platform changing how the window is decorated.
+    pub fn simulate_window_decorations_change(
+        &self,
+        window_handle: AnyWindowHandle,
+        decorations: Decorations,
+    ) {
+        self.test_window(window_handle)
+            .simulate_decorations_change(decorations);
+    }
+
+    /// Simulates connecting a display.
+    pub fn simulate_display_added(
+        &self,
+        display_id: DisplayId,
+        refresh_interval: Option<std::time::Duration>,
+    ) {
+        self.test_platform
+            .simulate_display_added(display_id, refresh_interval);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_platform(&self) -> &TestPlatform {
+        &self.test_platform
+    }
+
+    /// Simulates disconnecting a display.
+    pub fn simulate_display_removed(&self, display_id: DisplayId) {
+        self.test_platform.simulate_display_removed(display_id);
+    }
+
+    /// Simulates a connected display changing its refresh interval.
+    pub fn simulate_display_refresh_interval_change(
+        &self,
+        display_id: DisplayId,
+        refresh_interval: Option<std::time::Duration>,
+    ) {
+        self.test_platform
+            .simulate_display_refresh_interval_change(display_id, refresh_interval);
+    }
+
+    /// Simulates visible viewport changes without resizing the window's layout area.
+    pub fn simulate_window_visual_viewport_change(
+        &self,
+        window_handle: AnyWindowHandle,
+        bounds: Bounds<Pixels>,
+    ) {
+        self.test_window(window_handle)
+            .simulate_visual_viewport_change(bounds);
     }
 
     /// Changes `window_handle`'s scale factor to `scale_factor`, as if it moved to a display
@@ -718,9 +823,10 @@ impl TestAppContext {
     ///
     /// Panics if any part isn't a valid keystroke.
     pub fn simulate_keystrokes(&mut self, window: AnyWindowHandle, keystrokes: &str) {
+        let os = self.read(|cx| cx.platform_info().os);
         for keystroke in keystrokes
             .split(' ')
-            .map(Keystroke::parse)
+            .map(|source| Keystroke::parse_with_os(source, os))
             .map(Result::unwrap)
         {
             self.dispatch_keystroke(window, keystroke);
@@ -737,7 +843,12 @@ impl TestAppContext {
     /// Splitting on an empty string also sends an empty keystroke before the first
     /// character and after the last. Don't rely on those.
     pub fn simulate_input(&mut self, window: AnyWindowHandle, input: &str) {
-        for keystroke in input.split("").map(Keystroke::parse).map(Result::unwrap) {
+        let os = self.read(|cx| cx.platform_info().os);
+        for keystroke in input
+            .split("")
+            .map(|source| Keystroke::parse_with_os(source, os))
+            .map(Result::unwrap)
+        {
             self.dispatch_keystroke(window, keystroke);
         }
 
@@ -756,17 +867,7 @@ impl TestAppContext {
 
     /// Returns the `TestWindow` backing the given handle.
     pub(crate) fn test_window(&self, window: AnyWindowHandle) -> TestWindow {
-        self.app
-            .borrow_mut()
-            .windows
-            .get_mut(window.id)
-            .unwrap()
-            .as_deref_mut()
-            .unwrap()
-            .platform_window
-            .as_test()
-            .unwrap()
-            .clone()
+        test_window(&self.app, window)
     }
 
     /// Returns a stream that yields `()` each time `entity` notifies.
@@ -867,7 +968,7 @@ impl<T: 'static> Entity<T> {
         Event: Send + Clone + 'static,
         T: EventEmitter<Event>,
     {
-        let (tx, mut rx) = oneshot::channel();
+        let (tx, rx) = oneshot::channel();
         let mut tx = Some(tx);
         let subscription = self.update(cx, |_, cx| {
             cx.subscribe(self, move |_, _, event, _| {
@@ -1150,6 +1251,11 @@ impl VisualTestContext {
         self.simulate_window_resize(self.window, size)
     }
 
+    /// Simulates a change in whether the platform is presenting this window.
+    pub fn simulate_visibility_change(&self, visibility: WindowVisibility) {
+        self.simulate_window_visibility_change(self.window, visibility);
+    }
+
     /// Changes the window's scale factor, as if it moved to a display with another density.
     /// `Window::scale_factor` and the device-pixel size follow; the logical size is unchanged.
     ///
@@ -1162,6 +1268,9 @@ impl VisualTestContext {
     ///
     /// Draw the view first, so that the frame contains the element. Use this to click
     /// an element without guessing its position.
+    ///
+    /// Returns `None` in builds without `debug_assertions`, which don't record
+    /// selectors; see [`crate::InteractiveElement::debug_selector`].
     pub fn debug_bounds(&mut self, selector: &'static str) -> Option<Bounds<Pixels>> {
         self.update(|window, _| window.rendered_frame.debug_bounds.get(selector).copied())
     }
@@ -1459,11 +1568,11 @@ impl AnyWindowHandle {
 #[cfg(test)]
 mod tests {
     use crate::{
-        AssetSource, Context, ContrastPreference, DevicePixels, IntoElement, ParentElement as _,
-        PathPromptOptions, PlatformAtlas, PlatformHeadlessRenderer, Render, Scene, SharedString,
-        Size, Styled as _, SystemColors, SystemNotification, SystemNotificationAction,
-        SystemNotificationResponse, TestAppContext, TestAtlas, TestDispatcher, TestTextSystem,
-        VisualTestContext, Window, div, px, size,
+        AssetSource, Context, ContrastPreference, DevicePixels, HeadlessAtlas, IntoElement,
+        ParentElement as _, PathPromptOptions, PlatformAtlas, PlatformHeadlessRenderer, Render,
+        Scene, SharedString, Size, Styled as _, SystemColors, SystemNotification,
+        SystemNotificationAction, SystemNotificationResponse, TestAppContext, TestDispatcher,
+        TestTextSystem, VisualTestContext, Window, div, px, size,
     };
     use image::RgbaImage;
     use std::borrow::Cow;
@@ -1483,7 +1592,7 @@ mod tests {
     /// Records the device size of every frame and reads back a blank image of that size.
     struct RecordingRenderer {
         frame_sizes: Rc<RefCell<Vec<Size<DevicePixels>>>>,
-        sprite_atlas: Arc<TestAtlas>,
+        sprite_atlas: Arc<HeadlessAtlas>,
     }
 
     impl PlatformHeadlessRenderer for RecordingRenderer {
@@ -1557,7 +1666,7 @@ mod tests {
                 move || {
                     Some(Box::new(RecordingRenderer {
                         frame_sizes: frame_sizes.clone(),
-                        sprite_atlas: Arc::new(TestAtlas::new()),
+                        sprite_atlas: Arc::new(HeadlessAtlas::default()),
                     }) as Box<dyn PlatformHeadlessRenderer>)
                 }
             },
@@ -1686,7 +1795,7 @@ mod tests {
             }]
         );
 
-        cx.update(|cx| cx.dismiss_system_notification("thread-1"));
+        cx.update(|cx| cx.dismiss_system_notification("thread-1").detach());
         assert!(cx.delivered_system_notifications().is_empty());
         assert_eq!(cx.dismissed_system_notifications(), ["thread-1"]);
     }
@@ -1845,7 +1954,7 @@ mod tests {
                 actions: Vec::new(),
             });
             cx.on_system_notification_response(|response, cx| {
-                cx.dismiss_system_notification(&response.tag);
+                cx.dismiss_system_notification(&response.tag).detach();
             });
         });
 

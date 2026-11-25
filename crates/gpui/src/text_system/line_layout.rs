@@ -657,7 +657,6 @@ pub struct ShapedTextLayout {
 
 impl ShapedTextLayout {
     /// The length of the underlying text, in utf8 bytes.
-    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.layout.platform_layout.len()
     }
@@ -974,6 +973,11 @@ impl<Key, Value> FrameLayouts<Key, Value>
 where
     Key: Eq + Hash,
 {
+    #[cfg(test)]
+    fn keys(&self) -> impl Iterator<Item = &Arc<Key>> {
+        self.entries.keys()
+    }
+
     fn get<Query>(&self, key: &Query) -> Option<&Arc<Value>>
     where
         Arc<Key>: Borrow<Query>,
@@ -1191,6 +1195,17 @@ impl LineLayoutCache {
 
             layout
         }
+    }
+
+    /// The text of every line layout cached for the current frame.
+    #[cfg(test)]
+    pub(crate) fn current_frame_line_texts(&self) -> Vec<SharedString> {
+        self.current_frame
+            .read()
+            .lines
+            .keys()
+            .map(|key| key.text.clone())
+            .collect()
     }
 
     pub fn layout_line<Text>(

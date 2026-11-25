@@ -193,9 +193,9 @@ impl Hash for RenderGlyphParams {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.font_id.0.hash(state);
         self.glyph_id.0.hash(state);
-        self.font_size.0.to_bits().hash(state);
+        self.font_size.hash(state);
         self.subpixel_variant.hash(state);
-        self.scale_factor.to_bits().hash(state);
+        gpui_util::canonical_float_bits(self.scale_factor).hash(state);
         self.raster_style.hash(state);
     }
 }

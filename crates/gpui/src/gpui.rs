@@ -35,6 +35,7 @@ mod keymap;
 mod lerp;
 mod motion;
 mod path_builder;
+mod path_winding;
 mod platform;
 pub mod prelude;
 /// Profiling utilities for task, frame, and thread performance tracking.
@@ -47,7 +48,6 @@ pub mod profiler;
     feature = "test-support",
     feature = "bench-support"
 ))]
-#[expect(missing_docs)]
 pub mod queue;
 /// A seeded, mutable element tree for benchmarks and tests of GPUI rendering.
 #[cfg(any(test, feature = "bench-support"))]
@@ -162,6 +162,7 @@ pub use keymap::*;
 pub use lerp::*;
 pub use motion::*;
 pub use path_builder::*;
+pub(crate) use path_winding::*;
 pub use platform::*;
 pub use profiler::*;
 #[cfg(any(target_os = "windows", target_os = "linux", target_family = "wasm"))]
@@ -242,6 +243,7 @@ pub trait AppContext {
         EventType: 'static;
 
     /// Update a window for the given handle.
+    #[track_caller]
     fn update_window<T, F>(&mut self, window: AnyWindowHandle, f: F) -> Result<T>
     where
         F: FnOnce(AnyView, &mut Window, &mut App) -> T;

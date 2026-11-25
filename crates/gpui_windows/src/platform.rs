@@ -23,7 +23,15 @@ use windows::{
         Foundation::*,
         Graphics::Gdi::*,
         Security::Credentials::*,
-        System::{Com::*, LibraryLoader::*, Ole::*, Power::*, SystemInformation::*},
+        System::{
+            Com::*,
+            LibraryLoader::*,
+            Ole::*,
+            Power::*,
+            SystemInformation::*,
+            SystemServices::{GUID_POWER_SAVING_STATUS, POWER_REQUEST_CONTEXT_VERSION},
+            Threading::{POWER_REQUEST_CONTEXT_SIMPLE_STRING, REASON_CONTEXT, REASON_CONTEXT_0},
+        },
         UI::{Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
     },
     core::*,
@@ -32,9 +40,23 @@ use windows::{
 use crate::*;
 use gpui::*;
 
+struct TrackedWindow {
+    handle: SafeHwnd,
+    frame_signal: Arc<PlatformFrameSignal>,
+    /// Whether the window was presentable at the last vsync. Only the vsync
+    /// thread uses it.
+    presentable: AtomicBool,
+}
+
+impl TrackedWindow {
+    fn as_raw(&self) -> HWND {
+        self.handle.as_raw()
+    }
+}
+
 pub struct WindowsPlatform {
     inner: Rc<WindowsPlatformInner>,
-    raw_window_handles: Arc<RwLock<SmallVec<[SafeHwnd; 4]>>>,
+    raw_window_handles: Arc<RwLock<SmallVec<[TrackedWindow; 4]>>>,
     // The below members will never change throughout the entire lifecycle of the app.
     headless: bool,
     icon: HICON,
@@ -47,6 +69,7 @@ pub struct WindowsPlatform {
     invalidate_devices: Arc<AtomicBool>,
     handle: HWND,
     suspend_resume_notification: RefCell<Option<HPOWERNOTIFY>>,
+    power_saving_notification: RefCell<Option<HPOWERNOTIFY>>,
     disable_direct_composition: bool,
     has_package_identity: bool,
     app_identity: RefCell<Option<(String, String)>>,
@@ -55,7 +78,7 @@ pub struct WindowsPlatform {
 
 struct WindowsPlatformInner {
     state: WindowsPlatformState,
-    raw_window_handles: std::sync::Weak<RwLock<SmallVec<[SafeHwnd; 4]>>>,
+    raw_window_handles: std::sync::Weak<RwLock<SmallVec<[TrackedWindow; 4]>>>,
     // The below members will never change throughout the entire lifecycle of the app.
     validation_number: usize,
     main_receiver: PriorityQueueReceiver<RunnableVariant>,
@@ -74,6 +97,7 @@ pub(crate) struct WindowsPlatformState {
     /// thread; see [`DrawCoordinator`].
     pub(crate) draw_coordinator: Rc<DrawCoordinator>,
     directx_devices: RefCell<Option<DirectXDevices>>,
+    low_power_mode_enabled: Cell<bool>,
     /// The WGPU renderer context shared by every window when the `wgpu`
     /// feature draws windows with the WGPU renderer.
     #[cfg(feature = "wgpu")]
@@ -90,7 +114,9 @@ struct PlatformCallbacks {
     validate_app_menu_command: Cell<Option<Box<dyn FnMut(&dyn Action) -> bool>>>,
     keyboard_layout_change: Cell<Option<Box<dyn FnMut()>>>,
     contrast_preference_change: Cell<Option<Box<dyn FnMut()>>>,
+    system_sleep: Cell<Option<Box<dyn FnMut()>>>,
     system_wake: Cell<Option<Box<dyn FnMut()>>>,
+    low_power_mode_change: Cell<Option<Box<dyn FnMut()>>>,
     gpu_device_lost: Cell<Option<Box<dyn FnMut(GpuDeviceLostError)>>>,
 }
 
@@ -107,10 +133,50 @@ impl WindowsPlatformState {
             cursor_visible: Arc::new(AtomicBool::new(true)),
             draw_coordinator: Rc::new(DrawCoordinator::new()),
             directx_devices: RefCell::new(directx_devices),
+            low_power_mode_enabled: Cell::new(false),
             #[cfg(feature = "wgpu")]
             renderer_context: RendererContext::default(),
             menus: RefCell::new(Vec::new()),
         }
+    }
+}
+
+struct PowerRequest {
+    handle: HANDLE,
+}
+
+unsafe impl Send for PowerRequest {}
+
+impl PowerRequest {
+    fn prevent_idle_sleep(reason: &str) -> Result<Self> {
+        let mut reason = reason.encode_utf16().chain([0]).collect::<Vec<_>>();
+        let context = REASON_CONTEXT {
+            Version: POWER_REQUEST_CONTEXT_VERSION,
+            Flags: POWER_REQUEST_CONTEXT_SIMPLE_STRING,
+            Reason: REASON_CONTEXT_0 {
+                SimpleReasonString: PWSTR(reason.as_mut_ptr()),
+            },
+        };
+        let handle = unsafe { PowerCreateRequest(&context) }
+            .context("Failed to create a Windows power request")?;
+        if let Err(error) = unsafe { PowerSetRequest(handle, PowerRequestSystemRequired) } {
+            unsafe { CloseHandle(handle) }
+                .context("Failed to close the Windows power request")
+                .log_err();
+            return Err(error).context("Failed to set the Windows power request");
+        }
+        Ok(Self { handle })
+    }
+}
+
+impl Drop for PowerRequest {
+    fn drop(&mut self) {
+        unsafe { PowerClearRequest(self.handle, PowerRequestSystemRequired) }
+            .context("Failed to clear the Windows power request")
+            .log_err();
+        unsafe { CloseHandle(self.handle) }
+            .context("Failed to close the Windows power request")
+            .log_err();
     }
 }
 
@@ -174,6 +240,14 @@ impl WindowsPlatform {
             .inner
             .take()
             .context("CreateWindowExW did not run correctly")??;
+        let mut power_status = SYSTEM_POWER_STATUS::default();
+        match unsafe { GetSystemPowerStatus(&mut power_status) } {
+            Ok(()) => inner
+                .state
+                .low_power_mode_enabled
+                .set(power_status.SystemStatusFlag == 1),
+            Err(error) => log::warn!("Failed to query Windows battery saver status: {error}"),
+        }
         let dispatcher = context
             .dispatcher
             .take()
@@ -209,6 +283,7 @@ impl WindowsPlatform {
             foreground_executor,
             text_system,
             suspend_resume_notification: RefCell::new(None),
+            power_saving_notification: RefCell::new(None),
             disable_direct_composition,
             has_package_identity: has_package_identity(),
             drop_target_helper,
@@ -219,11 +294,7 @@ impl WindowsPlatform {
     }
 
     pub(crate) fn window_from_hwnd(&self, hwnd: HWND) -> Option<Rc<WindowsWindowInner>> {
-        self.raw_window_handles
-            .read()
-            .iter()
-            .find(|entry| entry.as_raw() == hwnd)
-            .and_then(|hwnd| window_from_hwnd(hwnd.as_raw()))
+        self.inner.window_from_hwnd(hwnd)
     }
 
     #[inline]
@@ -329,7 +400,8 @@ impl WindowsPlatform {
             .spawn(move || {
                 let vsync_provider = VSyncProvider::new();
                 loop {
-                    vsync_provider.wait_for_vsync();
+                    let signal_source = vsync_provider.wait_for_vsync();
+                    let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
                     if let Some(directx_device) = directx_devices.as_mut()
                         && (check_device_lost(&directx_device.device)
                             || invalidate_devices.fetch_and(false, Ordering::Acquire))
@@ -360,30 +432,37 @@ impl WindowsPlatform {
                         break;
                     };
                     for hwnd in all_windows.read().iter() {
+                        let presentable = is_window_presentable(hwnd.as_raw());
+                        if hwnd.presentable.swap(presentable, Ordering::Relaxed) != presentable {
+                            unsafe {
+                                PostMessageW(
+                                    Some(hwnd.as_raw()),
+                                    WM_GPUI_PRESENTABILITY_CHANGED,
+                                    WPARAM(validation_number),
+                                    LPARAM(0),
+                                )
+                            }
+                            .log_err();
+                        }
+                        if let Some(signal_at) = signal_at {
+                            if presentable {
+                                hwnd.frame_signal.record(signal_at, signal_source);
+                            } else {
+                                // Hidden, minimized or cloaked windows may not
+                                // paint until shown, so don't latch a signal.
+                                hwnd.frame_signal.take();
+                            }
+                        }
                         unsafe {
-                            let _ = RedrawWindow(Some(hwnd.as_raw()), None, None, RDW_INVALIDATE);
+                            RedrawWindow(Some(hwnd.as_raw()), None, None, RDW_INVALIDATE)
+                                .ok()
+                                .log_err();
                         }
                     }
                 }
             })
             .unwrap();
     }
-}
-
-fn translate_accelerator(msg: &MSG) -> Option<()> {
-    if msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN {
-        return None;
-    }
-
-    let result = unsafe {
-        SendMessageW(
-            msg.hwnd,
-            WM_GPUI_KEYDOWN,
-            Some(msg.wParam),
-            Some(msg.lParam),
-        )
-    };
-    (result.0 == 0).then_some(())
 }
 
 fn encode_restart_arguments(arguments: &[OsString]) -> OsString {
@@ -420,6 +499,13 @@ fn encode_restart_arguments(arguments: &[OsString]) -> OsString {
 }
 
 impl Platform for WindowsPlatform {
+    fn platform_info(&self) -> gpui::PlatformInfo {
+        gpui::PlatformInfo {
+            os: gpui::OperatingSystem::Windows,
+            target: gpui::PlatformTarget::Native,
+        }
+    }
+
     fn background_executor(&self) -> BackgroundExecutor {
         self.background_executor.clone()
     }
@@ -482,6 +568,13 @@ impl Platform for WindowsPlatform {
         ThermalState::Nominal
     }
 
+    fn prevent_idle_sleep(&self, reason: &str) -> Task<Result<ActivityGuard>> {
+        Task::ready(
+            PowerRequest::prevent_idle_sleep(reason)
+                .map(|request| ActivityGuard::new(move || drop(request))),
+        )
+    }
+
     fn run(&self, on_finish_launching: Box<dyn 'static + FnOnce()>) {
         on_finish_launching();
         if !self.headless {
@@ -491,7 +584,7 @@ impl Platform for WindowsPlatform {
         let mut msg = MSG::default();
         unsafe {
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-                if translate_accelerator(&msg).is_none() {
+                if !self.inner.translate_accelerator(&msg) {
                     _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
@@ -620,7 +713,11 @@ impl Platform for WindowsPlatform {
     ) -> Result<Box<dyn PlatformWindow>> {
         let window = WindowsWindow::new(handle, options, self.generate_creation_info())?;
         let handle = window.get_raw_handle();
-        self.raw_window_handles.write().push(handle.into());
+        self.raw_window_handles.write().push(TrackedWindow {
+            handle: handle.into(),
+            frame_signal: window.state.frame_signal.clone(),
+            presentable: AtomicBool::new(false),
+        });
 
         Ok(Box::new(window))
     }
@@ -724,6 +821,10 @@ impl Platform for WindowsPlatform {
         self.inner.state.callbacks.reopen.set(Some(callback));
     }
 
+    fn on_system_sleep(&self, callback: Box<dyn FnMut()>) {
+        self.inner.state.callbacks.system_sleep.set(Some(callback));
+    }
+
     fn on_system_wake(&self, callback: Box<dyn FnMut()>) {
         self.inner.state.callbacks.system_wake.set(Some(callback));
         let mut notification = self.suspend_resume_notification.borrow_mut();
@@ -732,6 +833,34 @@ impl Platform for WindowsPlatform {
                 // SAFETY: self.handle is the platform window receiving WM_POWERBROADCAST.
                 RegisterSuspendResumeNotification(
                     HANDLE(self.handle.0),
+                    DEVICE_NOTIFY_WINDOW_HANDLE,
+                )
+                .log_err()
+            };
+        }
+    }
+
+    fn power_mode(&self) -> PowerMode {
+        if self.inner.state.low_power_mode_enabled.get() {
+            PowerMode::LowPower
+        } else {
+            PowerMode::HighPower
+        }
+    }
+
+    fn on_power_mode_change(&self, callback: Box<dyn FnMut()>) {
+        self.inner
+            .state
+            .callbacks
+            .low_power_mode_change
+            .set(Some(callback));
+        let mut notification = self.power_saving_notification.borrow_mut();
+        if notification.is_none() {
+            *notification = unsafe {
+                // SAFETY: self.handle is the platform window receiving WM_POWERBROADCAST.
+                RegisterPowerSettingNotification(
+                    HANDLE(self.handle.0),
+                    &GUID_POWER_SAVING_STATUS,
                     DEVICE_NOTIFY_WINDOW_HANDLE,
                 )
                 .log_err()
@@ -771,8 +900,9 @@ impl Platform for WindowsPlatform {
             .log_err();
     }
 
-    fn dismiss_system_notification(&self, tag: &str) {
+    fn dismiss_system_notification(&self, tag: &str) -> Task<()> {
         self.system_notifications.borrow_mut().dismiss(tag);
+        Task::ready(())
     }
 
     fn on_system_notification_response(
@@ -944,19 +1074,13 @@ impl Platform for WindowsPlatform {
             }
 
             if credentials.is_null() {
-                Ok(None)
-            } else {
-                let username: String = unsafe { (*credentials).UserName.to_string()? };
-                let credential_blob = unsafe {
-                    std::slice::from_raw_parts(
-                        (*credentials).CredentialBlob,
-                        (*credentials).CredentialBlobSize as usize,
-                    )
-                };
-                let password = credential_blob.to_vec();
-                unsafe { CredFree(credentials as *const _ as _) };
-                Ok(Some((username, password)))
+                return Ok(None);
             }
+
+            // SAFETY: `CredReadW` succeeded, so this points to a valid `CREDENTIALW` until `CredFree` below.
+            let result = unsafe { username_and_password(&*credentials) };
+            unsafe { CredFree(credentials as *const _ as _) };
+            result.map(Some)
         })
     }
 
@@ -1050,7 +1174,7 @@ impl WindowsPlatformInner {
             | WM_GPUI_GPU_DEVICE_LOST
             | WM_GPUI_GPU_DEVICE_UNRECOVERABLE
             | WM_GPUI_END_SESSION => self.handle_gpui_events(msg, wparam, lparam),
-            WM_POWERBROADCAST => self.handle_power_broadcast(wparam),
+            WM_POWERBROADCAST => self.handle_power_broadcast(wparam, lparam),
             WM_TIMER if wparam.0 == DEFERRED_FOREGROUND_TASKS_TIMER_ID => {
                 self.handle_deferred_foreground_tasks_timer()
             }
@@ -1107,6 +1231,26 @@ impl WindowsPlatformInner {
         Some(0)
     }
 
+    fn window_from_hwnd(&self, hwnd: HWND) -> Option<Rc<WindowsWindowInner>> {
+        self.raw_window_handles
+            .upgrade()?
+            .read()
+            .iter()
+            .find(|window| window.as_raw() == hwnd)
+            .and_then(|window| window_from_hwnd(window.as_raw()))
+    }
+
+    /// Runs GPUI's keydown handling directly rather than through a private
+    /// `WM_USER` message, which foreign software could also send.
+    fn translate_accelerator(&self, msg: &MSG) -> bool {
+        if msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN {
+            return false;
+        }
+
+        self.window_from_hwnd(msg.hwnd)
+            .is_some_and(|window| window.handle_keydown_msg(msg.wParam, msg.lParam) == Some(0))
+    }
+
     fn close_one_window(&self, target_window: HWND) -> bool {
         let Some(all_windows) = self.raw_window_handles.upgrade() else {
             log::error!("Failed to upgrade raw window handles");
@@ -1146,7 +1290,7 @@ impl WindowsPlatformInner {
                     // if we don't we might not for example process window quit events
                     let mut msg = MSG::default();
                     let process_message = |msg: &_| {
-                        if translate_accelerator(msg).is_none() {
+                        if !self.translate_accelerator(msg) {
                             _ = unsafe { TranslateMessage(msg) };
                             unsafe { DispatchMessageW(msg) };
                         }
@@ -1260,9 +1404,27 @@ impl WindowsPlatformInner {
         Some(0)
     }
 
-    fn handle_power_broadcast(&self, wparam: WPARAM) -> Option<isize> {
-        if wparam.0 as u32 == PBT_APMRESUMEAUTOMATIC {
-            self.with_callback(|callbacks| &callbacks.system_wake, |callback| callback());
+    fn handle_power_broadcast(&self, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
+        match wparam.0 as u32 {
+            PBT_APMSUSPEND => {
+                self.with_callback(|callbacks| &callbacks.system_sleep, |callback| callback());
+            }
+            PBT_APMRESUMEAUTOMATIC => {
+                self.with_callback(|callbacks| &callbacks.system_wake, |callback| callback());
+            }
+            PBT_POWERSETTINGCHANGE => {
+                // SAFETY: for PBT_POWERSETTINGCHANGE, lparam points to a
+                // POWERBROADCAST_SETTING that lives for this message.
+                if let Some(enabled) = unsafe { power_saving_status(lparam) }
+                    && self.state.low_power_mode_enabled.replace(enabled) != enabled
+                {
+                    self.with_callback(
+                        |callbacks| &callbacks.low_power_mode_change,
+                        |callback| callback(),
+                    );
+                }
+            }
+            _ => {}
         }
         Some(1)
     }
@@ -1293,12 +1455,37 @@ impl WindowsPlatformInner {
     }
 }
 
+/// Reads the battery saver flag from a `PBT_POWERSETTINGCHANGE` payload.
+///
+/// # Safety
+/// `lparam` must be null or point to a valid `POWERBROADCAST_SETTING`.
+unsafe fn power_saving_status(lparam: LPARAM) -> Option<bool> {
+    let setting = unsafe { (lparam.0 as *const POWERBROADCAST_SETTING).as_ref()? };
+    if setting.PowerSetting != GUID_POWER_SAVING_STATUS || setting.DataLength != 4 {
+        return None;
+    }
+    let data = unsafe {
+        std::ptr::addr_of!(setting.Data)
+            .cast::<u32>()
+            .read_unaligned()
+    };
+    match data {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
+}
+
 impl Drop for WindowsPlatform {
     fn drop(&mut self) {
         unsafe {
             if let Some(notification) = self.suspend_resume_notification.borrow_mut().take() {
                 // SAFETY: notification was returned by RegisterSuspendResumeNotification.
                 UnregisterSuspendResumeNotification(notification).log_err();
+            }
+            if let Some(notification) = self.power_saving_notification.borrow_mut().take() {
+                // SAFETY: notification was returned by RegisterPowerSettingNotification.
+                UnregisterPowerSettingNotification(notification).log_err();
             }
             DestroyWindow(self.handle)
                 .context("Destroying platform window")
@@ -1330,7 +1517,7 @@ pub(crate) struct WindowCreationInfo {
 
 struct PlatformWindowCreateContext {
     inner: Option<Result<Rc<WindowsPlatformInner>>>,
-    raw_window_handles: std::sync::Weak<RwLock<SmallVec<[SafeHwnd; 4]>>>,
+    raw_window_handles: std::sync::Weak<RwLock<SmallVec<[TrackedWindow; 4]>>>,
     validation_number: usize,
     main_sender: Option<PriorityQueueSender<RunnableVariant>>,
     main_receiver: Option<PriorityQueueReceiver<RunnableVariant>>,
@@ -1639,7 +1826,7 @@ fn handle_gpu_device_lost(
     directx_devices: &mut DirectXDevices,
     platform_window: HWND,
     validation_number: usize,
-    all_windows: &std::sync::Weak<RwLock<SmallVec<[SafeHwnd; 4]>>>,
+    all_windows: &std::sync::Weak<RwLock<SmallVec<[TrackedWindow; 4]>>>,
     text_system: &std::sync::Weak<DirectWriteTextSystem>,
 ) -> Result<()> {
     // Here we wait a bit to ensure the system has time to recover from the device lost state.
@@ -1764,14 +1951,105 @@ unsafe extern "system" fn window_procedure(
     result
 }
 
+/// Copies the username and secret out of a credential returned by `CredReadW`.
+///
+/// Both `UserName` and `CredentialBlob` are optional in Credential Manager and
+/// come back as null pointers when absent, so they are treated as empty here.
+///
+/// # Safety
+///
+/// A non-null `UserName` must point to a NUL-terminated wide string and a
+/// non-null `CredentialBlob` must be readable for `CredentialBlobSize` bytes,
+/// as is the case for credentials returned by `CredReadW`.
+unsafe fn username_and_password(credential: &CREDENTIALW) -> Result<(String, Vec<u8>)> {
+    let username = if credential.UserName.is_null() {
+        String::new()
+    } else {
+        // SAFETY: guaranteed by the caller.
+        unsafe { credential.UserName.to_string()? }
+    };
+    let password = if credential.CredentialBlob.is_null() {
+        Vec::new()
+    } else {
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            std::slice::from_raw_parts(
+                credential.CredentialBlob,
+                credential.CredentialBlobSize as usize,
+            )
+        }
+        .to_vec()
+    };
+    Ok((username, password))
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::{OsStr, OsString};
 
+    use crate::clipboard::read_raw_clipboard_text;
     use crate::{read_from_clipboard, write_to_clipboard};
     use gpui::ClipboardItem;
+    use windows::Win32::Security::Credentials::{
+        CRED_PERSIST_SESSION, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree, CredReadW,
+        CredWriteW,
+    };
+    use windows::core::{PCWSTR, PWSTR};
 
-    use super::encode_restart_arguments;
+    use super::{encode_restart_arguments, username_and_password};
+
+    #[test]
+    fn test_read_credential_with_username() {
+        assert_eq!(
+            round_trip_credential(Some("alice"), b"secret"),
+            ("alice".to_string(), b"secret".to_vec())
+        );
+    }
+
+    #[test]
+    fn test_read_credential_without_username() {
+        assert_eq!(
+            round_trip_credential(None, b"secret"),
+            (String::new(), b"secret".to_vec())
+        );
+    }
+
+    fn round_trip_credential(username: Option<&str>, secret: &[u8]) -> (String, Vec<u8>) {
+        let mut target_name: Vec<u16> = format!(
+            "zed-test-{}-{}",
+            std::process::id(),
+            username.unwrap_or_default()
+        )
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+        let mut username: Vec<u16> = username
+            .map(|username| username.encode_utf16().chain(Some(0)).collect())
+            .unwrap_or_default();
+        let mut secret = secret.to_vec();
+        let credential = CREDENTIALW {
+            Type: CRED_TYPE_GENERIC,
+            TargetName: PWSTR::from_raw(target_name.as_mut_ptr()),
+            CredentialBlobSize: secret.len() as u32,
+            CredentialBlob: secret.as_mut_ptr(),
+            Persist: CRED_PERSIST_SESSION,
+            UserName: if username.is_empty() {
+                PWSTR::null()
+            } else {
+                PWSTR::from_raw(username.as_mut_ptr())
+            },
+            ..CREDENTIALW::default()
+        };
+        let target_name = PCWSTR::from_raw(target_name.as_ptr());
+        unsafe { CredWriteW(&credential, 0) }.unwrap();
+
+        let mut credentials: *mut CREDENTIALW = std::ptr::null_mut();
+        unsafe { CredReadW(target_name, CRED_TYPE_GENERIC, None, &mut credentials) }.unwrap();
+        let result = unsafe { username_and_password(&*credentials) };
+        unsafe { CredFree(credentials as *const _ as _) };
+        unsafe { CredDeleteW(target_name, CRED_TYPE_GENERIC, None) }.unwrap();
+        result.unwrap()
+    }
 
     #[test]
     fn test_encode_restart_arguments() {
@@ -2061,6 +2339,34 @@ mod tests {
         let item = ClipboardItem::new_string_with_json_metadata("abcdef".to_string(), vec![3, 4]);
         write_to_clipboard(item.clone());
         assert_eq!(read_from_clipboard(), Some(item));
+
+        let item =
+            ClipboardItem::new_string_with_json_metadata("before\0after".to_string(), vec![12]);
+        write_to_clipboard(item);
+        assert_eq!(
+            read_from_clipboard(),
+            Some(ClipboardItem::new_string_with_json_metadata(
+                "before after".to_string(),
+                vec![12],
+            )),
+        );
+
+        let item = ClipboardItem::new_string_with_json_metadata("a\nb\nc".to_string(), vec![5]);
+        write_to_clipboard(item.clone());
+        assert_eq!(read_raw_clipboard_text().as_deref(), Some("a\r\nb\r\nc"));
+        assert_eq!(read_from_clipboard(), Some(item));
+
+        let item =
+            ClipboardItem::new_string_with_json_metadata("a\r\nb\nc\rd".to_string(), vec![6]);
+        write_to_clipboard(item);
+        assert_eq!(read_raw_clipboard_text().as_deref(), Some("a\r\nb\r\nc\rd"));
+        assert_eq!(
+            read_from_clipboard(),
+            Some(ClipboardItem::new_string_with_json_metadata(
+                "a\nb\nc\rd".to_string(),
+                vec![6],
+            )),
+        );
     }
 
     #[test]

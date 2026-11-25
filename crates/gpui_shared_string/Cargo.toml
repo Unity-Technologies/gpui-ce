@@ -1,6 +1,6 @@
 [package]
 name = "gpui_ce_shared_string"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 description = "Shared immutable string types for GPUI CE"
 publish.workspace = true
 edition.workspace = true
@@ -12,7 +12,7 @@ path = "gpui_shared_string.rs"
 [dependencies]
 schemars.workspace = true
 serde.workspace = true
-smol_str.workspace = true
+smol_str = { workspace = true, features = ["serde"] }
 
 [lints]
 workspace = true

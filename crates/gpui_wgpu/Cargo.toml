@@ -1,6 +1,6 @@
 [package]
 name = "gpui_ce_wgpu"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 description.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -22,7 +22,7 @@ custom-gpu = ["gpui/custom-gpu"]
 wgpu-surfaces = ["gpui/wgpu-surfaces"]
 
 [dependencies]
-gpui = { path = "../gpui", version = "=0.4.0-unity.20261112", registry = "unity", package = "gpui-ce", default-features = false }
+gpui = { path = "../gpui", version = "=0.4.0-unity.20261125", registry = "unity", package = "gpui-ce", default-features = false }
 gpui_render.workspace = true
 anyhow.workspace = true
 collections.workspace = true
@@ -30,7 +30,6 @@ etagere.workspace = true
 image = { workspace = true, optional = true }
 log.workspace = true
 parking_lot.workspace = true
-profiling.workspace = true
 raw-window-handle.workspace = true
 smallvec.workspace = true
 gpui_util.workspace = true
@@ -41,11 +40,20 @@ wgsl-rs.workspace = true
 pollster.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-core-foundation.workspace = true
-core-video.workspace = true
-metal.workspace = true
 objc2.workspace = true
+objc2-core-foundation.workspace = true
+objc2-core-video = { workspace = true, features = [
+  "objc2",
+  "CVMetalTexture",
+  "CVMetalTextureCache",
+  "CVPixelBufferIOSurface",
+  "CVReturn",
+  "objc2-io-surface",
+  "objc2-metal",
+] }
+objc2-io-surface.workspace = true
 objc2-metal.workspace = true
+objc2-quartz-core = { workspace = true, features = ["objc2-metal"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true, features = [

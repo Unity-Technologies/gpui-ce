@@ -4,14 +4,14 @@
 
 use std::sync::Arc;
 
-use foreign_types::ForeignType as _;
 use gpui::{DevicePixels, GpuSpecs, Scene, Size};
-use gpui_apple::metal_renderer::new_window_layer;
+use gpui_apple::metal_renderer::{MetalDrawable, new_window_layer};
 use gpui_wgpu::{
     GpuContext, WgpuAtlas, WgpuContextHandle, WgpuDeviceRequirements, WgpuRenderer,
     WgpuSurfaceConfig, wgpu,
 };
-use metal::{CAMetalLayer, MetalLayer, MetalLayerRef};
+use objc2::rc::Retained;
+use objc2_quartz_core::CAMetalLayer;
 
 /// The device every window shares, and what the application requires of it.
 #[derive(Clone, Default)]
@@ -32,13 +32,19 @@ pub fn new_renderer(
     context: Context,
     bounds: gpui::Size<f32>,
     transparent: bool,
+    // wgpu chooses the surface color space itself; Display P3 is Metal-renderer only.
+    _use_display_p3: bool,
 ) -> anyhow::Result<Renderer> {
     MacWgpuRenderer::new(context, bounds, transparent)
 }
 
 pub struct MacWgpuRenderer {
     renderer: WgpuRenderer,
-    layer: MetalLayer,
+    layer: Retained<CAMetalLayer>,
+    transparent: bool,
+    /// Whether the last scene let native views show through the layer, which
+    /// then needs a transparent surface even in an opaque window.
+    shows_native_views: bool,
 }
 
 impl MacWgpuRenderer {
@@ -55,7 +61,12 @@ impl MacWgpuRenderer {
         };
         let renderer =
             WgpuRenderer::new_for_metal_layer(context.gpu, &layer, config, context.requirements)?;
-        Ok(Self { renderer, layer })
+        Ok(Self {
+            renderer,
+            layer,
+            transparent,
+            shows_native_views: false,
+        })
     }
 
     /// wgpu acquires its own surface textures, so windows keep the
@@ -64,19 +75,24 @@ impl MacWgpuRenderer {
 
     pub fn set_display_link_attached(&mut self, _attached: bool) {}
 
-    pub fn set_frame_drawable(
-        &mut self,
-        drawable: Option<metal::MetalDrawable>,
-    ) -> Option<metal::MetalDrawable> {
+    pub fn is_display_link_attached(&self) -> bool {
+        false
+    }
+
+    pub fn presents_with_transaction(&self) -> bool {
+        self.layer.presentsWithTransaction()
+    }
+
+    pub fn set_frame_drawable(&mut self, drawable: Option<MetalDrawable>) -> Option<MetalDrawable> {
         drawable
     }
 
-    pub fn layer(&self) -> Option<&MetalLayerRef> {
+    pub fn layer(&self) -> Option<&CAMetalLayer> {
         Some(&self.layer)
     }
 
     pub fn layer_ptr(&self) -> *mut CAMetalLayer {
-        self.layer.as_ptr()
+        Retained::as_ptr(&self.layer).cast_mut()
     }
 
     pub fn sprite_atlas(&self) -> &Arc<WgpuAtlas> {
@@ -85,7 +101,7 @@ impl MacWgpuRenderer {
 
     pub fn set_presents_with_transaction(&mut self, presents_with_transaction: bool) {
         self.layer
-            .set_presents_with_transaction(presents_with_transaction);
+            .setPresentsWithTransaction(presents_with_transaction);
     }
 
     pub fn update_drawable_size(&mut self, size: Size<DevicePixels>) {
@@ -95,7 +111,9 @@ impl MacWgpuRenderer {
     /// The surface's alpha mode sets the layer's opacity whenever WGPU
     /// configures it, so it must not be set on the layer directly.
     pub fn update_transparency(&mut self, transparent: bool) {
-        self.renderer.update_transparency(transparent);
+        self.transparent = transparent;
+        self.renderer
+            .update_transparency(transparent || self.shows_native_views);
     }
 
     pub fn destroy(&mut self) {
@@ -110,6 +128,14 @@ impl MacWgpuRenderer {
                 log::warn!("GPU recovery failed, will retry on next frame: {error}");
             }
             return true;
+        }
+        // Reconfiguring the surface rebuilds its pipelines, so this happens only
+        // when native views appear or all of them go.
+        let shows_native_views = !scene.native_views.is_empty();
+        if shows_native_views != self.shows_native_views {
+            self.shows_native_views = shows_native_views;
+            self.renderer
+                .update_transparency(self.transparent || shows_native_views);
         }
         self.renderer.draw(scene);
         self.renderer.needs_redraw()
@@ -154,16 +180,16 @@ mod tests {
     fn transparency_survives_resizing() {
         let mut renderer =
             MacWgpuRenderer::new(Context::default(), gpui::size(64.0, 64.0), false).unwrap();
-        assert!(renderer.layer.is_opaque());
+        assert!(renderer.layer.isOpaque());
 
         renderer.update_transparency(true);
-        assert!(!renderer.layer.is_opaque());
+        assert!(!renderer.layer.isOpaque());
         renderer.update_drawable_size(gpui::size(DevicePixels(128), DevicePixels(96)));
-        assert!(!renderer.layer.is_opaque());
+        assert!(!renderer.layer.isOpaque());
 
         renderer.update_transparency(false);
         renderer.update_drawable_size(gpui::size(DevicePixels(64), DevicePixels(64)));
-        assert!(renderer.layer.is_opaque());
+        assert!(renderer.layer.isOpaque());
     }
 
     #[cfg(feature = "test-support")]

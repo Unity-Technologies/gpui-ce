@@ -1,10 +1,10 @@
 use scheduler::Instant;
-use std::{cell::Cell, rc::Rc, time::Duration};
+use std::time::Duration;
 
 use crate::{
     AnyElement, App, AppContext, Element, ElementId, GlobalElementId, InspectorElementId,
     IntoElement, Motion, ParentElement, SpringAnimation, SpringConfig, SpringDescription,
-    SpringPlayback, SpringState, SpringTarget, Window,
+    SpringPlayback, SpringState, SpringTarget, Task, Window,
 };
 
 pub use easing::*;
@@ -184,14 +184,6 @@ impl<E> SpringAnimationElement<E> {
     }
 }
 
-impl<E: IntoElement + 'static> IntoElement for SpringAnimationElement<E> {
-    type Element = SpringAnimationElement<E>;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl<E: ParentElement> ParentElement for AnimationElement<E> {
     fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
         let Some(element) = &mut self.element else {
@@ -211,20 +203,38 @@ impl<E> AnimationElement<E> {
     }
 }
 
-impl<E: IntoElement + 'static> IntoElement for AnimationElement<E> {
-    type Element = AnimationElement<E>;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 struct AnimationState {
     start: Instant,
     animation_ix: usize,
-    /// Whether a throttled re-render (see [`Animation::with_max_fps`]) is
-    /// already scheduled, so overlapping renders don't stack extra timers.
-    delayed_frame_pending: Rc<Cell<bool>>,
+    /// The capped re-render (see [`Animation::with_max_fps`]) and when it is due.
+    wake: Option<(Instant, Task<()>)>,
+}
+
+impl AnimationState {
+    /// Re-renders the current view at `instant`, unless a re-render is already due by then.
+    fn render_at(&mut self, instant: Instant, window: &Window, cx: &App) {
+        let now = cx.background_executor().now();
+        if let Some((due, _)) = &self.wake
+            && now < *due
+            && *due <= instant
+        {
+            return;
+        }
+        let view = window.current_view();
+        let wake = window.spawn(cx, async move |cx| {
+            // A timer can fire early, and a render before `instant` would repeat the last one.
+            loop {
+                let delay = instant.saturating_duration_since(cx.background_executor().now());
+                if delay.is_zero() {
+                    break;
+                }
+                cx.background_executor().timer(delay).await;
+            }
+            cx.update(move |_, cx| cx.notify(view)).ok();
+        });
+        // Replacing a wake that was due later drops it, which cancels its timer.
+        self.wake = Some((instant, wake));
+    }
 }
 
 struct SpringElementState {
@@ -394,7 +404,7 @@ impl<E: IntoElement + 'static> Element for AnimationElement<E> {
             let mut state = state.unwrap_or_else(|| AnimationState {
                 start: now,
                 animation_ix: 0,
-                delayed_frame_pending: Rc::new(Cell::new(false)),
+                wake: None,
             });
             let (animation_ix, delta, done) = if cx.reduce_motion() {
                 let animation_ix = self.animations.len() - 1;
@@ -404,6 +414,8 @@ impl<E: IntoElement + 'static> Element for AnimationElement<E> {
                     .get();
                 (animation_ix, delta, true)
             } else {
+                // The chain can be shorter than on the render that handed off to this index.
+                state.animation_ix = state.animation_ix.min(self.animations.len() - 1);
                 let animation_ix = state.animation_ix;
                 let animation = &self.animations[animation_ix];
                 let elapsed = if animation.synced {
@@ -416,6 +428,7 @@ impl<E: IntoElement + 'static> Element for AnimationElement<E> {
                 if done && animation_ix < self.animations.len() - 1 {
                     state.start = now;
                     state.animation_ix += 1;
+                    state.wake = None;
                     done = false;
                 }
                 (animation_ix, sample.progress.get(), done)
@@ -427,21 +440,12 @@ impl<E: IntoElement + 'static> Element for AnimationElement<E> {
             let mut element = (self.animator)(element, animation_ix, delta).into_any_element();
 
             if !done {
+                // A hand-off requests the next frame, so the next animation's cap counts from its
+                // first render, as it does after mounting.
+                let handed_off = state.animation_ix != animation_ix;
                 match self.animations[animation_ix].max_fps {
-                    Some(max_fps) if max_fps.is_finite() && max_fps > 0.0 => {
-                        if !state.delayed_frame_pending.get() {
-                            state.delayed_frame_pending.set(true);
-                            let delayed_frame_pending = state.delayed_frame_pending.clone();
-                            let view = window.current_view();
-                            let interval = Duration::from_secs_f32(1.0 / max_fps);
-                            window
-                                .spawn(cx, async move |cx| {
-                                    cx.background_executor().timer(interval).await;
-                                    delayed_frame_pending.set(false);
-                                    cx.update(move |_, cx| cx.notify(view)).ok();
-                                })
-                                .detach();
-                        }
+                    Some(max_fps) if max_fps.is_finite() && max_fps > 0.0 && !handed_off => {
+                        state.render_at(now + Duration::from_secs_f32(1.0 / max_fps), window, cx)
                     }
                     _ => window.request_animation_frame(),
                 }
@@ -505,6 +509,15 @@ mod easing {
         move |delta| 1.0 - (1.0 - delta).powi(5)
     }
 
+    /// A heartbeat: a strong beat, a weaker one, then a rest. Starts and ends at 0 and peaks at 1.
+    pub fn heartbeat(delta: f32) -> f32 {
+        let beat = |center: f32, width: f32, height: f32| {
+            let x = (delta - center) / width;
+            height * (-x * x).exp()
+        };
+        beat(0.2, 0.06, 1.0) + beat(0.4, 0.05, 0.58)
+    }
+
     /// Apply the given easing function, first in the forward direction and then in the reverse direction
     pub fn bounce(easing: impl Fn(f32) -> f32) -> impl Fn(f32) -> f32 {
         move |delta| {
@@ -551,6 +564,25 @@ mod tests {
 
     struct AnimationSequenceTestView {
         rendered_samples: Rc<RefCell<Vec<(usize, f32)>>>,
+    }
+
+    struct AnimationChainTestView {
+        rendered_deltas: Rc<RefCell<Vec<f32>>>,
+        animations: Vec<Animation>,
+    }
+
+    impl Render for AnimationChainTestView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let rendered_deltas = self.rendered_deltas.clone();
+            div().size_full().child(div().with_animations(
+                "animation-chain",
+                self.animations.clone(),
+                move |this, _, delta| {
+                    rendered_deltas.borrow_mut().push(delta);
+                    this
+                },
+            ))
+        }
     }
 
     struct SyncedAnimationTestView {
@@ -973,6 +1005,83 @@ mod tests {
         cx.executor().advance_clock(Duration::from_millis(105));
         cx.run_until_parked();
         assert_deltas_approx_eq(&[0.0, 0.105, 0.21]);
+    }
+
+    fn open_chain_window(
+        cx: &mut TestAppContext,
+        animations: Vec<Animation>,
+    ) -> (Rc<RefCell<Vec<f32>>>, WindowHandle<AnimationChainTestView>) {
+        let rendered_deltas = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.open_window(size(px(100.), px(100.)), {
+            let rendered_deltas = rendered_deltas.clone();
+            move |_, _| AnimationChainTestView {
+                rendered_deltas,
+                animations,
+            }
+        });
+        cx.run_until_parked();
+        (rendered_deltas, window)
+    }
+
+    #[gpui::test]
+    fn test_capped_animation_hands_off_without_its_cap(cx: &mut TestAppContext) {
+        // One render every two seconds, then two a second.
+        let chain =
+            [0.5, 2.0].map(|max_fps| Animation::new(Duration::from_secs(1)).with_max_fps(max_fps));
+        let (deltas, window) = open_chain_window(cx, chain.to_vec());
+        // The first animation finishes on a render that its cap didn't schedule.
+        cx.executor().advance_clock(Duration::from_millis(1750));
+        window.update(cx, |_, _, cx| cx.notify()).unwrap();
+        // The second starts on the next frame, and its cap counts from there.
+        assert_eq!(simulate_next_frame(&window, cx), 1);
+        cx.executor().advance_clock(Duration::from_millis(500));
+        cx.run_until_parked();
+        assert_eq!(*deltas.borrow(), [0.0, 1.0, 0.0, 0.5]);
+    }
+
+    #[gpui::test]
+    fn test_sooner_cap_replaces_the_pending_one(cx: &mut TestAppContext) {
+        let capped = |max_fps| vec![Animation::new(Duration::from_secs(1)).with_max_fps(max_fps)];
+        let (deltas, window) = open_chain_window(cx, capped(0.1));
+
+        // Four renders a second from 250 ms on must not wait for the ten-second one.
+        cx.executor().advance_clock(Duration::from_millis(250));
+        window
+            .update(cx, |view, _, _| view.animations = capped(4.0))
+            .unwrap();
+        window.update(cx, |_, _, cx| cx.notify()).unwrap();
+        cx.executor().advance_clock(Duration::from_millis(125));
+        // Rendering again before the next capped render neither moves it nor adds another.
+        window.update(cx, |_, _, cx| cx.notify()).unwrap();
+        cx.executor().advance_clock(Duration::from_millis(250));
+        cx.run_until_parked();
+        assert_eq!(*deltas.borrow(), [0.0, 0.25, 0.375, 0.5]);
+    }
+
+    #[gpui::test]
+    fn test_chain_can_get_shorter_after_a_hand_off(cx: &mut TestAppContext) {
+        let one_second = || Animation::new(Duration::from_secs(1));
+        let rendered_deltas = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.open_window(size(px(100.), px(100.)), {
+            let rendered_deltas = rendered_deltas.clone();
+            move |_, _| AnimationChainTestView {
+                rendered_deltas,
+                animations: vec![one_second(), one_second()],
+            }
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(1500));
+        assert_eq!(simulate_next_frame(&window, cx), 1);
+
+        cx.executor().advance_clock(Duration::from_millis(250));
+        window
+            .update(cx, |view, _, cx| {
+                view.animations = vec![one_second()];
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(rendered_deltas.borrow().last(), Some(&0.25));
     }
 
     #[gpui::test]

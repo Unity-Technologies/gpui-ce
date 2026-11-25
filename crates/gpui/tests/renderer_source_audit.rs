@@ -187,8 +187,8 @@ fn native_renderer_fallbacks_and_intermediates_are_lazy() {
         directx_path.display()
     );
     assert!(
-        directx.contains("path: Option<PathResources>"),
-        "{} must make large path targets optional",
+        !directx.contains("PathResources") && directx.contains("draw_path_tiles"),
+        "{} must draw paths from analytic tiles without path render targets",
         directx_path.display()
     );
     assert!(

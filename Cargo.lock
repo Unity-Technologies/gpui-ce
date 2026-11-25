@@ -748,12 +748,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "block"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d8c1fef690941d3e7788d328517591fecc684c084084702d6ff1641e993699a"
-
-[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1265,19 +1259,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "core-graphics2"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b65858d95344d2711161cd92196732f67d6c5fea238cf12f994584828731a5c"
-dependencies = [
- "bitflags",
- "block",
- "cfg-if",
- "core-foundation",
- "libc",
-]
-
-[[package]]
 name = "core-text"
 version = "21.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1287,21 +1268,6 @@ dependencies = [
  "core-graphics",
  "foreign-types",
  "libc",
-]
-
-[[package]]
-name = "core-video"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0f83d7bc2e8fbc517a71dcf3227003db7646e6c7aa5b0b5ab3acc89bc692641"
-dependencies = [
- "block",
- "core-foundation",
- "core-graphics2",
- "libc",
- "metal",
- "objc2-core-foundation",
- "objc2-io-surface",
 ]
 
 [[package]]
@@ -2048,12 +2014,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ce81f49ae8a0482e4c55ea62ebbd7e5a686af544c00b9d090bba3ff9be97b3d"
 
 [[package]]
-name = "float_next_after"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8bf7cc16383c4b8d58b9905a8509f02926ce3058053c056376248d958c9df1e8"
-
-[[package]]
 name = "flume"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2447,7 +2407,7 @@ dependencies = [
 
 [[package]]
 name = "gpui-ce"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 dependencies = [
  "accesskit",
  "accesskit_consumer",
@@ -2458,7 +2418,6 @@ dependencies = [
  "bitflags",
  "chrono",
  "core-text",
- "core-video",
  "criterion",
  "ctor",
  "derive_more",
@@ -2467,7 +2426,6 @@ dependencies = [
  "embed-resource",
  "env_logger",
  "etagere",
- "foreign-types",
  "futures",
  "futures-concurrency",
  "getrandom 0.4.3",
@@ -2487,11 +2445,14 @@ dependencies = [
  "image",
  "inventory",
  "itertools 0.15.0",
+ "libc",
  "linebender_resource_handle",
  "log",
- "lyon",
+ "lyon_path",
  "num_cpus",
  "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-core-video",
  "objc2-metal 0.3.2",
  "palette",
  "parking",
@@ -2521,6 +2482,7 @@ dependencies = [
  "subsecond",
  "taffy",
  "thiserror 2.0.21",
+ "tiny-skia-path",
  "tracing",
  "unicode-bidi",
  "unicode-segmentation",
@@ -2538,28 +2500,26 @@ dependencies = [
 
 [[package]]
 name = "gpui-ce-fonts"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 
 [[package]]
 name = "gpui_ce_apple"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 dependencies = [
  "anyhow",
- "block",
- "core-foundation",
- "core-graphics",
- "core-video",
- "derive_more",
+ "block2 0.6.2",
  "etagere",
- "foreign-types",
  "gpui-ce",
  "gpui_ce_collections",
  "gpui_ce_render",
  "image",
  "log",
- "metal",
  "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-core-video",
  "objc2-foundation 0.3.2",
+ "objc2-metal 0.3.2",
  "objc2-quartz-core 0.3.2",
  "parking_lot 0.13.0",
  "smallvec",
@@ -2568,7 +2528,7 @@ dependencies = [
 
 [[package]]
 name = "gpui_ce_collections"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 dependencies = [
  "gpui_ce_util",
  "indexmap",
@@ -2577,7 +2537,7 @@ dependencies = [
 
 [[package]]
 name = "gpui_ce_derive_refineable"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2586,7 +2546,7 @@ dependencies = [
 
 [[package]]
 name = "gpui_ce_elements"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 dependencies = [
  "derive_setters",
  "gpui-ce",
@@ -2601,14 +2561,13 @@ dependencies = [
 
 [[package]]
 name = "gpui_ce_linux"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 dependencies = [
  "accesskit",
  "accesskit_unix",
  "anyhow",
  "as-raw-xcb-connection",
  "ashpd",
- "bitflags",
  "bytemuck",
  "calloop",
  "calloop-wayland-source",
@@ -2641,7 +2600,6 @@ dependencies = [
  "wayland-protocols",
  "wayland-protocols-plasma",
  "wayland-protocols-wlr",
- "x11-clipboard",
  "x11rb",
  "xkbcommon",
  "zed-xim",
@@ -2649,31 +2607,28 @@ dependencies = [
 
 [[package]]
 name = "gpui_ce_macos"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 dependencies = [
  "accesskit",
  "accesskit_macos",
  "anyhow",
  "async-task",
- "block",
  "block2 0.6.2",
  "core-foundation",
  "core-foundation-sys",
  "core-graphics",
  "core-text",
- "core-video",
  "ctor",
  "dispatch2",
  "etagere",
- "foreign-types",
  "futures",
  "gpui-ce",
  "gpui-ce-fonts",
  "gpui_ce_apple",
  "gpui_ce_collections",
- "gpui_ce_media",
  "gpui_ce_parley",
  "gpui_ce_render",
+ "gpui_ce_scheduler",
  "gpui_ce_util",
  "gpui_ce_wgpu",
  "image",
@@ -2681,19 +2636,21 @@ dependencies = [
  "libc",
  "log",
  "mach2",
- "metal",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-core-media",
+ "objc2-core-video",
  "objc2-foundation 0.3.2",
  "objc2-quartz-core 0.3.2",
  "objc2-screen-capture-kit",
+ "objc2-uniform-type-identifiers",
  "objc2-user-notifications",
  "palette",
  "parking_lot 0.13.0",
  "pathfinder_geometry",
  "raw-window-handle",
  "semver",
+ "serde_json",
  "skrifa 0.44.0",
  "smallvec",
  "strum 0.28.0",
@@ -2704,7 +2661,7 @@ dependencies = [
 
 [[package]]
 name = "gpui_ce_macros"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -2714,20 +2671,19 @@ dependencies = [
 
 [[package]]
 name = "gpui_ce_media"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 dependencies = [
  "anyhow",
  "bindgen",
  "core-foundation",
- "core-video",
- "foreign-types",
- "metal",
  "objc",
+ "objc2-core-foundation",
+ "objc2-core-video",
 ]
 
 [[package]]
 name = "gpui_ce_parley"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 dependencies = [
  "anyhow",
  "criterion",
@@ -2743,7 +2699,7 @@ dependencies = [
 
 [[package]]
 name = "gpui_ce_path"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 dependencies = [
  "anyhow",
  "dunce",
@@ -2754,9 +2710,10 @@ dependencies = [
 
 [[package]]
 name = "gpui_ce_platform"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 dependencies = [
  "console_error_panic_hook",
+ "criterion",
  "gpui-ce",
  "gpui-ce-fonts",
  "gpui_ce_apple",
@@ -2772,14 +2729,14 @@ dependencies = [
 
 [[package]]
 name = "gpui_ce_refineable"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 dependencies = [
  "gpui_ce_derive_refineable",
 ]
 
 [[package]]
 name = "gpui_ce_render"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 dependencies = [
  "anyhow",
  "criterion",
@@ -2799,7 +2756,7 @@ dependencies = [
 
 [[package]]
 name = "gpui_ce_scheduler"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 dependencies = [
  "async-task",
  "backtrace",
@@ -2814,7 +2771,7 @@ dependencies = [
 
 [[package]]
 name = "gpui_ce_shared_string"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 dependencies = [
  "schemars",
  "serde",
@@ -2823,7 +2780,7 @@ dependencies = [
 
 [[package]]
 name = "gpui_ce_sum_tree"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 dependencies = [
  "heapless",
  "log",
@@ -2835,7 +2792,7 @@ dependencies = [
 
 [[package]]
 name = "gpui_ce_tokio"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 dependencies = [
  "anyhow",
  "gpui-ce",
@@ -2845,7 +2802,7 @@ dependencies = [
 
 [[package]]
 name = "gpui_ce_util"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 dependencies = [
  "anyhow",
  "log",
@@ -2854,7 +2811,7 @@ dependencies = [
 
 [[package]]
 name = "gpui_ce_web"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 dependencies = [
  "anyhow",
  "console_error_panic_hook",
@@ -2879,12 +2836,10 @@ dependencies = [
 
 [[package]]
 name = "gpui_ce_wgpu"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 dependencies = [
  "anyhow",
  "bytemuck",
- "core-foundation",
- "core-video",
  "criterion",
  "env_logger",
  "etagere",
@@ -2896,13 +2851,15 @@ dependencies = [
  "image",
  "js-sys",
  "log",
- "metal",
  "naga 30.0.2",
  "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-core-video",
+ "objc2-io-surface",
  "objc2-metal 0.3.2",
+ "objc2-quartz-core 0.3.2",
  "parking_lot 0.13.0",
  "pollster 1.0.3",
- "profiling",
  "raw-window-handle",
  "smallvec",
  "wasm-bindgen",
@@ -2918,7 +2875,7 @@ dependencies = [
 
 [[package]]
 name = "gpui_ce_windows"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 dependencies = [
  "accesskit",
  "accesskit_windows",
@@ -2931,6 +2888,7 @@ dependencies = [
  "gpui_ce_collections",
  "gpui_ce_parley",
  "gpui_ce_render",
+ "gpui_ce_scheduler",
  "gpui_ce_util",
  "gpui_ce_wgpu",
  "image",
@@ -2950,7 +2908,7 @@ dependencies = [
 
 [[package]]
 name = "gpui_ce_zed_util"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 dependencies = [
  "anyhow",
  "async-fs",
@@ -2980,7 +2938,6 @@ dependencies = [
  "serde_json_lenient",
  "shlex",
  "smol",
- "take-until",
  "tempfile",
  "unicase",
  "url",
@@ -3740,37 +3697,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lyon"
-version = "1.0.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd0578bdecb7d6d88987b8b2b1e3a4e2f81df9d0ece1078623324a567904e7b7"
-dependencies = [
- "lyon_algorithms",
- "lyon_extra",
- "lyon_tessellation",
-]
-
-[[package]]
-name = "lyon_algorithms"
-version = "1.0.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3a6b9d4e8b48acd531fbf1241ad9b270df6e60b6b92bdea1469f4f40899d805"
-dependencies = [
- "lyon_path",
- "num-traits",
-]
-
-[[package]]
-name = "lyon_extra"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7755f08423275157ad1680aaecc9ccb7e0cc633da3240fea2d1522935cc15c72"
-dependencies = [
- "lyon_path",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "lyon_geom"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3788,17 +3714,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5c463f9c428b7fc5ec885dcd39ce4aa61e29111d0e33483f6f98c74e89d8621e"
 dependencies = [
  "lyon_geom",
- "num-traits",
-]
-
-[[package]]
-name = "lyon_tessellation"
-version = "1.0.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd4872650e70dc907dd4f7ebc449d7d657a0d2658e423b2e724970870bbbf75b"
-dependencies = [
- "float_next_after",
- "lyon_path",
  "num-traits",
 ]
 
@@ -3882,21 +3797,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
-]
-
-[[package]]
-name = "metal"
-version = "0.33.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7047791b5bc903b8cd963014b355f71dc9864a9a0b727057676c1dcae5cbc15"
-dependencies = [
- "bitflags",
- "block",
- "core-graphics-types",
- "foreign-types",
- "log",
- "objc",
- "paste",
 ]
 
 [[package]]
@@ -4433,6 +4333,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-io-surface",
+ "objc2-metal 0.3.2",
 ]
 
 [[package]]
@@ -4542,6 +4443,16 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-core-media",
+ "objc2-foundation 0.3.2",
+]
+
+[[package]]
+name = "objc2-uniform-type-identifiers"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7902ac02859fc1f7045f8b598c63f1ae0cc7efeaa06a9bc9f3d9a3c955974fa4"
+dependencies = [
+ "objc2 0.6.5",
  "objc2-foundation 0.3.2",
 ]
 
@@ -6342,21 +6253,14 @@ dependencies = [
 
 [[package]]
 name = "taffy"
-version = "0.13.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c034e05f6ee85a12daa63863c2245797715075c70649947aa0da54f3f2ab1d0f"
+checksum = "3c8480887e8803986d96a7173729565520d4bbb721ad6b7ad6941a22897207aa"
 dependencies = [
- "arrayvec",
  "serde",
  "slotmap",
  "smallvec",
 ]
-
-[[package]]
-name = "take-until"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09d117d3ae1fdf9a0f537a6dd72de7d6e4c21560897d415637923268ca7a3196"
 
 [[package]]
 name = "target-features"
@@ -7697,16 +7601,6 @@ name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
-
-[[package]]
-name = "x11-clipboard"
-version = "0.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "662d74b3d77e396b8e5beb00b9cad6a9eccf40b2ef68cc858784b14c41d535a3"
-dependencies = [
- "libc",
- "x11rb",
-]
 
 [[package]]
 name = "x11rb"

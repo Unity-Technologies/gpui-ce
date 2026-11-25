@@ -2,11 +2,11 @@ use crate::RendererTier;
 use gpui_render::{
     artifacts::{
         BASE_DOWNLEVEL_WGSL, BASE_WGSL, BLUR_BINDINGS, DOWNLEVEL_BLUR_BINDINGS,
-        DOWNLEVEL_INSTANCE_BINDINGS, DOWNLEVEL_RANGE_BINDING, DOWNLEVEL_SURFACE_BINDINGS,
-        DOWNLEVEL_TEXTURED_INSTANCE_BINDINGS, GLOBAL_BINDINGS, GeneratedBinding,
-        GeneratedBindingKind, INSTANCE_BINDINGS, MONOCHROME_INSTANCE_BINDINGS,
-        SUBPIXEL_DUAL_SOURCE_WGSL, SUBPIXEL_INSTANCE_BINDINGS, SURFACE_BINDINGS,
-        TEXTURED_INSTANCE_BINDINGS,
+        DOWNLEVEL_INSTANCE_BINDINGS, DOWNLEVEL_PATH_TILE_BINDINGS, DOWNLEVEL_RANGE_BINDING,
+        DOWNLEVEL_SURFACE_BINDINGS, DOWNLEVEL_TEXTURED_INSTANCE_BINDINGS, GLOBAL_BINDINGS,
+        GeneratedBinding, GeneratedBindingKind, INSTANCE_BINDINGS, MONOCHROME_INSTANCE_BINDINGS,
+        PATH_TILE_BINDINGS, SUBPIXEL_DUAL_SOURCE_WGSL, SUBPIXEL_INSTANCE_BINDINGS,
+        SURFACE_BINDINGS, TEXTURED_INSTANCE_BINDINGS,
     },
     shaders::interface as shader,
 };
@@ -48,13 +48,29 @@ fn instance_binding_entries(source: InstanceBindingSource<'_>) -> Vec<wgpu::Bind
     }
 }
 
+/// Depth format of the scene passes. Quads draw at depths that are exact multiples of a power
+/// of two, which a 32-bit float stores without rounding.
+pub(super) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+/// How a pipeline uses the scene pass's depth buffer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DepthMode {
+    /// Drawn outside scene passes, which have no depth attachment.
+    None,
+    /// Hidden behind closer opaque fills; writes no depth.
+    Test,
+    /// Opaque fills, drawn front to back.
+    TestAndWrite,
+}
+
 pub(super) struct WgpuPipelines {
     pub(super) quads: WgpuRenderPipeline,
+    pub(super) opaque_quads: WgpuRenderPipeline,
+    pub(super) native_views: WgpuRenderPipeline,
     pub(super) smoothed_quads: WgpuRenderPipeline,
     pub(super) shadows: WgpuRenderPipeline,
     pub(super) smoothed_shadows: WgpuRenderPipeline,
-    pub(super) path_rasterization: WgpuRenderPipeline,
-    pub(super) paths: WgpuRenderPipeline,
+    pub(super) path_tiles: WgpuRenderPipeline,
     pub(super) underlines: WgpuRenderPipeline,
     pub(super) monochrome_sprites: WgpuRenderPipeline,
     pub(super) subpixel_sprites: Option<WgpuRenderPipeline>,
@@ -108,6 +124,7 @@ impl std::ops::Deref for WgpuRenderPipeline {
 pub(super) struct WgpuBindGroupLayouts {
     pub(super) globals: wgpu::BindGroupLayout,
     pub(super) instances: wgpu::BindGroupLayout,
+    path_tiles: wgpu::BindGroupLayout,
     monochrome_sprites: wgpu::BindGroupLayout,
     subpixel_sprites: wgpu::BindGroupLayout,
     textured_instances: wgpu::BindGroupLayout,
@@ -119,6 +136,7 @@ impl WgpuBindGroupLayouts {
     pub(super) fn new(device: &wgpu::Device, tier: RendererTier) -> Self {
         let (
             instance_table,
+            path_tile_table,
             monochrome_table,
             subpixel_table,
             textured_table,
@@ -128,6 +146,7 @@ impl WgpuBindGroupLayouts {
         ) = match tier {
             RendererTier::Modern => (
                 INSTANCE_BINDINGS,
+                PATH_TILE_BINDINGS,
                 MONOCHROME_INSTANCE_BINDINGS,
                 SUBPIXEL_INSTANCE_BINDINGS,
                 TEXTURED_INSTANCE_BINDINGS,
@@ -137,6 +156,7 @@ impl WgpuBindGroupLayouts {
             ),
             RendererTier::WebGl2 => (
                 DOWNLEVEL_INSTANCE_BINDINGS,
+                DOWNLEVEL_PATH_TILE_BINDINGS,
                 DOWNLEVEL_TEXTURED_INSTANCE_BINDINGS,
                 DOWNLEVEL_TEXTURED_INSTANCE_BINDINGS,
                 DOWNLEVEL_TEXTURED_INSTANCE_BINDINGS,
@@ -150,6 +170,12 @@ impl WgpuBindGroupLayouts {
             device,
             "instances_layout",
             instance_table,
+            instance_dynamic,
+        );
+        let path_tiles = generated_bind_group_layout(
+            device,
+            "path_tiles_layout",
+            path_tile_table,
             instance_dynamic,
         );
         let monochrome_sprites = generated_bind_group_layout(
@@ -185,6 +211,7 @@ impl WgpuBindGroupLayouts {
         Self {
             globals,
             instances,
+            path_tiles,
             monochrome_sprites,
             subpixel_sprites,
             textured_instances,
@@ -226,6 +253,38 @@ impl WgpuBindGroupLayouts {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("instances"),
             layout: &self.instances,
+            entries: &entries,
+        })
+    }
+
+    /// Creates the path-tile bind group. On the storage tier the arena also backs the curve
+    /// and paint arrays, which path tiles index by absolute element.
+    pub(super) fn create_path_tiles(
+        &self,
+        device: &wgpu::Device,
+        source: InstanceBindingSource<'_>,
+    ) -> wgpu::BindGroup {
+        let mut entries = Vec::with_capacity(3);
+        match source {
+            InstanceBindingSource::Buffer(arena) => {
+                for binding in [
+                    shader::DATA_BUFFER_BINDING,
+                    shader::PATH_CURVES_BINDING,
+                    shader::PATH_PAINTS_BINDING,
+                ] {
+                    entries.push(wgpu::BindGroupEntry {
+                        binding,
+                        resource: wgpu::BindingResource::Buffer(arena.clone()),
+                    });
+                }
+            }
+            source @ InstanceBindingSource::DataTexture { .. } => {
+                entries = instance_binding_entries(source);
+            }
+        }
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("path_tiles"),
+            layout: &self.path_tiles,
             entries: &entries,
         })
     }
@@ -332,7 +391,6 @@ impl WgpuPipelines {
         bind_group_layouts: &WgpuBindGroupLayouts,
         surface_format: wgpu::TextureFormat,
         alpha_mode: wgpu::CompositeAlphaMode,
-        path_sample_count: u32,
         dual_source_blending: bool,
         tier: RendererTier,
     ) -> Self {
@@ -358,6 +416,12 @@ impl WgpuPipelines {
             "instance_pipeline_layout",
             bind_group_layouts,
             &bind_group_layouts.instances,
+        );
+        let path_tile_layout = create_pipeline_layout(
+            device,
+            "path_tile_pipeline_layout",
+            bind_group_layouts,
+            &bind_group_layouts.path_tiles,
         );
         let monochrome_layout = create_pipeline_layout(
             device,
@@ -391,17 +455,13 @@ impl WgpuPipelines {
         );
 
         let scene_target = color_target(surface_format, Some(scene_blend_state(alpha_mode)));
-        let path_rasterization_target = color_target(
-            surface_format,
-            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-        );
-        let path_target = color_target(surface_format, Some(path_blend_state()));
         let overwrite_target = color_target(surface_format, None);
         let composite_target =
             color_target(surface_format, Some(premultiplied_composite_blend_state()));
 
         let layout_for = |data_layout| match data_layout {
             shader::DataLayout::Instances => &instance_layout,
+            shader::DataLayout::PathTiles => &path_tile_layout,
             shader::DataLayout::TexturedInstances => &textured_layout,
             shader::DataLayout::MonochromeSprites => &monochrome_layout,
             shader::DataLayout::SubpixelSprites => &subpixel_layout,
@@ -412,34 +472,47 @@ impl WgpuPipelines {
             shader::DataLayout::Blur => &blur_layout,
         };
         let create =
-            |specification: shader::Pipeline, target: &wgpu::ColorTargetState, samples, module| {
+            |specification: shader::Pipeline, target: &wgpu::ColorTargetState, depth, module| {
                 create_render_pipeline(
                     device,
                     specification,
                     layout_for(specification.data_layout),
                     target,
-                    samples,
+                    depth,
                     module,
                 )
             };
+        use DepthMode::{None as NoDepth, Test, TestAndWrite};
 
         Self {
-            quads: create(shader::QUADS, &scene_target, 1, &shader_module),
-            smoothed_quads: create(shader::SMOOTHED_QUADS, &scene_target, 1, &shader_module),
-            shadows: create(shader::SHADOWS, &scene_target, 1, &shader_module),
-            smoothed_shadows: create(shader::SMOOTHED_SHADOWS, &scene_target, 1, &shader_module),
-            path_rasterization: create(
-                shader::PATH_RASTERIZATION,
-                &path_rasterization_target,
-                path_sample_count,
+            quads: create(shader::QUADS, &scene_target, Test, &shader_module),
+            opaque_quads: create(
+                shader::OPAQUE_QUADS,
+                &overwrite_target,
+                TestAndWrite,
                 &shader_module,
             ),
-            paths: create(shader::PATHS, &path_target, 1, &shader_module),
-            underlines: create(shader::UNDERLINES, &scene_target, 1, &shader_module),
+            // Unblended, so the transparent output replaces what was drawn beneath the view.
+            native_views: create(
+                shader::NATIVE_VIEWS,
+                &overwrite_target,
+                Test,
+                &shader_module,
+            ),
+            smoothed_quads: create(shader::SMOOTHED_QUADS, &scene_target, Test, &shader_module),
+            shadows: create(shader::SHADOWS, &scene_target, Test, &shader_module),
+            smoothed_shadows: create(
+                shader::SMOOTHED_SHADOWS,
+                &scene_target,
+                Test,
+                &shader_module,
+            ),
+            path_tiles: create(shader::PATH_TILES, &scene_target, Test, &shader_module),
+            underlines: create(shader::UNDERLINES, &scene_target, Test, &shader_module),
             monochrome_sprites: create(
                 shader::MONOCHROME_SPRITES,
                 &scene_target,
-                1,
+                Test,
                 &shader_module,
             ),
             subpixel_sprites: subpixel_shader_module.as_ref().map(|module| {
@@ -449,35 +522,40 @@ impl WgpuPipelines {
                         write_mask: wgpu::ColorWrites::COLOR,
                         ..color_target(surface_format, Some(subpixel_blend_state()))
                     },
-                    1,
+                    Test,
                     module,
                 )
             }),
             polychrome_sprites: create(
                 shader::POLYCHROME_SPRITES,
                 &scene_target,
-                1,
+                Test,
                 &shader_module,
             ),
             smoothed_polychrome_sprites: create(
                 shader::SMOOTHED_POLYCHROME_SPRITES,
                 &scene_target,
-                1,
+                Test,
                 &shader_module,
             ),
-            surfaces: create(shader::SURFACES, &composite_target, 1, &shader_module),
+            surfaces: create(shader::SURFACES, &composite_target, Test, &shader_module),
             blur_downsample: create(
                 shader::BLUR_DOWNSAMPLE,
                 &overwrite_target,
-                1,
+                NoDepth,
                 &shader_module,
             ),
-            blur: create(shader::BLUR, &overwrite_target, 1, &shader_module),
-            blur_composite: create(shader::BLUR_COMPOSITE, &composite_target, 1, &shader_module),
+            blur: create(shader::BLUR, &overwrite_target, NoDepth, &shader_module),
+            blur_composite: create(
+                shader::BLUR_COMPOSITE,
+                &composite_target,
+                NoDepth,
+                &shader_module,
+            ),
             smoothed_blur_composite: create(
                 shader::SMOOTHED_BLUR_COMPOSITE,
                 &composite_target,
-                1,
+                NoDepth,
                 &shader_module,
             ),
         }
@@ -566,7 +644,7 @@ fn create_render_pipeline(
     specification: shader::Pipeline,
     layout: &wgpu::PipelineLayout,
     color_target: &wgpu::ColorTargetState,
-    sample_count: u32,
+    depth: DepthMode,
     module: &wgpu::ShaderModule,
 ) -> WgpuRenderPipeline {
     let raw = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -591,11 +669,15 @@ fn create_render_pipeline(
             },
             ..Default::default()
         },
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState {
-            count: sample_count,
-            ..Default::default()
-        },
+        depth_stencil: (depth != DepthMode::None).then(|| wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(depth == DepthMode::TestAndWrite),
+            // Depth clears to zero and closer primitives have greater depth.
+            depth_compare: Some(wgpu::CompareFunction::Greater),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
         cache: None,
     });
@@ -655,10 +737,6 @@ fn source_over_blend_state(source_color_factor: wgpu::BlendFactor) -> wgpu::Blen
     }
 }
 
-fn path_blend_state() -> wgpu::BlendState {
-    source_over_blend_state(wgpu::BlendFactor::One)
-}
-
 fn subpixel_blend_state() -> wgpu::BlendState {
     wgpu::BlendState {
         color: wgpu::BlendComponent {
@@ -695,7 +773,6 @@ mod tests {
             &layouts,
             context.color_texture_format(),
             wgpu::CompositeAlphaMode::Opaque,
-            1,
             context.supports_dual_source_blending(),
             tier,
         );
@@ -764,7 +841,6 @@ mod tests {
             &layouts,
             context.color_texture_format(),
             wgpu::CompositeAlphaMode::Opaque,
-            1,
             false,
             tier,
         );

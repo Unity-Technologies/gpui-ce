@@ -51,7 +51,7 @@ impl WindowTextSystem {
             "text argument should not contain newlines"
         );
 
-        let layout = self.layout_line(&text, font_size, runs);
+        let layout = self.layout_line(text.clone(), font_size, runs);
 
         ShapedLine { layout, text }
     }
@@ -111,9 +111,22 @@ impl WindowTextSystem {
     /// Subsets of the line can be styled independently with the `runs` parameter.
     /// Generally, you should prefer to use [`Self::shape_line`] instead, which
     /// can be painted directly.
-    pub fn layout_line(&self, text: &str, font_size: Pixels, runs: &[TextRun]) -> Arc<LineLayout> {
-        self.line_layout_cache
-            .layout_line(&SharedString::new(text), font_size, runs)
+    pub fn layout_line<Text>(
+        &self,
+        text: Text,
+        font_size: Pixels,
+        runs: &[TextRun],
+    ) -> Arc<LineLayout>
+    where
+        Text: AsRef<str>,
+        SharedString: From<Text>,
+    {
+        self.line_layout_cache.layout_line(text, font_size, runs)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn line_layout_cache(&self) -> &LineLayoutCache {
+        &self.line_layout_cache
     }
 
     pub(crate) fn finish_frame(&self) {

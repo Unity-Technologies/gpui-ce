@@ -167,14 +167,6 @@ macro_rules! text {
     }};
 }
 
-impl IntoElement for Text {
-    type Element = Self;
-    #[inline]
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Element for Text {
     type RequestLayoutState = TextLayout;
     type PrepaintState = ();
@@ -271,8 +263,8 @@ impl Element for &'static str {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let mut state = TextLayout::default();
-        let layout_id = state.layout(SharedString::from(*self), None, window, cx);
+        let state = TextLayout::default();
+        let layout_id = state.layout(SharedString::new_static(self), None, window, cx);
         (layout_id, state)
     }
 
@@ -299,14 +291,6 @@ impl Element for &'static str {
         cx: &mut App,
     ) {
         text_layout.paint(self, window, cx)
-    }
-}
-
-impl IntoElement for &'static str {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
     }
 }
 
@@ -345,7 +329,7 @@ impl Element for SharedString {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let mut state = TextLayout::default();
+        let state = TextLayout::default();
         let layout_id = state.layout(self.clone(), None, window, cx);
         (layout_id, state)
     }
@@ -373,14 +357,6 @@ impl Element for SharedString {
         cx: &mut App,
     ) {
         text_layout.paint(self.as_ref(), window, cx)
-    }
-}
-
-impl IntoElement for SharedString {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
     }
 }
 
@@ -417,7 +393,7 @@ impl StyledText {
     /// Set the styling attributes for the given text, as well as
     /// as any ranges of text that have had their style customized.
     pub fn with_default_highlights(
-        mut self,
+        self,
         default_style: &TextStyle,
         highlights: impl IntoIterator<Item = (Range<usize>, HighlightStyle)>,
     ) -> Self {
@@ -606,14 +582,6 @@ impl Element for StyledText {
     }
 }
 
-impl IntoElement for StyledText {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 /// The Layout for TextElement. This can be used to map indices to pixels and vice versa.
 #[derive(Default, Clone)]
 pub struct TextLayout(Rc<TextLayoutState>);
@@ -798,6 +766,13 @@ impl TextLayoutTruncation {
             source,
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum TextPaintPass {
+    All,
+    Background,
+    Foreground,
 }
 
 impl TextLayout {
@@ -1035,43 +1010,69 @@ impl TextLayout {
     }
 
     fn paint(&self, text: &str, window: &mut Window, cx: &mut App) {
+        self.paint_document(TextPaintPass::All, window, cx)
+            .with_context(|| format!("failed to paint {text}"))
+            .unwrap();
+    }
+
+    /// Paints the backgrounds of the text runs without the glyphs, so that callers can paint
+    /// content, such as highlights, between the backgrounds and the text. Follow it with
+    /// [`Self::paint_foreground`] to paint the glyphs.
+    pub fn paint_background(&self, window: &mut Window, cx: &mut App) -> anyhow::Result<()> {
+        self.paint_document(TextPaintPass::Background, window, cx)
+    }
+
+    /// Paints the glyphs and decorations of the text without the run backgrounds.
+    pub fn paint_foreground(&self, window: &mut Window, cx: &mut App) -> anyhow::Result<()> {
+        self.paint_document(TextPaintPass::Foreground, window, cx)
+    }
+
+    fn paint_document(
+        &self,
+        pass: TextPaintPass,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> anyhow::Result<()> {
         if window.current_inline_fragments.is_some() {
-            return;
+            return Ok(());
         }
 
         let element_state = self.0.layout.borrow();
         let element_state = element_state
             .as_ref()
-            .with_context(|| format!("measurement has not been performed on {text}"))
-            .unwrap();
+            .context("measurement has not been performed")?;
         let bounds = element_state
             .bounds
-            .with_context(|| format!("prepaint has not been performed on {text}"))
-            .unwrap();
+            .context("prepaint has not been performed")?;
 
         let line_height = element_state.line_height;
         if let Some(document) = &element_state.document {
-            document
-                .paint_background(
-                    bounds.origin,
-                    line_height,
-                    TextAlign::Left,
-                    None,
-                    window,
-                    cx,
-                )
-                .log_err();
-            document
-                .paint(
-                    bounds.origin,
-                    line_height,
-                    TextAlign::Left,
-                    None,
-                    window,
-                    cx,
-                )
-                .log_err();
+            if matches!(pass, TextPaintPass::All | TextPaintPass::Background) {
+                document
+                    .paint_background(
+                        bounds.origin,
+                        line_height,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    )
+                    .log_err();
+            }
+            if matches!(pass, TextPaintPass::All | TextPaintPass::Foreground) {
+                document
+                    .paint(
+                        bounds.origin,
+                        line_height,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    )
+                    .log_err();
+            }
         }
+        Ok(())
     }
 
     fn measured(&self) -> Ref<'_, TextLayoutInner> {
@@ -1705,6 +1706,7 @@ pub struct InteractiveTextState {
     mouse_down_index: Rc<Cell<Option<usize>>>,
     hovered_index: Rc<Cell<Option<usize>>>,
     active_tooltip: Rc<RefCell<Option<ActiveTooltip>>>,
+    long_press_tooltip_active: Rc<Cell<bool>>,
 }
 
 /// InteractiveTest is a wrapper around StyledText that adds mouse interactions.
@@ -1816,6 +1818,7 @@ impl Element for InteractiveText {
                             set_tooltip_on_window(&interactive_state.active_tooltip, window);
                     } else {
                         // If there is no longer a tooltip builder, remove the active tooltip.
+                        interactive_state.long_press_tooltip_active.set(false);
                         interactive_state.active_tooltip.take();
                     }
                 }
@@ -1843,7 +1846,7 @@ impl Element for InteractiveText {
         window.with_element_state::<InteractiveTextState, _>(
             global_id.unwrap(),
             |interactive_state, window| {
-                let mut interactive_state = interactive_state.unwrap_or_default();
+                let interactive_state = interactive_state.unwrap_or_default();
                 if let Some(click_listener) = self.click_listener.take() {
                     let mouse_position = window.mouse_position();
                     if let Ok(ix) = text_layout.index_for_position(mouse_position)
@@ -1898,7 +1901,7 @@ impl Element for InteractiveText {
                 }
 
                 window.on_mouse_event({
-                    let mut hover_listener = self.hover_listener.take();
+                    let hover_listener = self.hover_listener.take();
                     let hitbox = hitbox.clone();
                     let text_layout = text_layout.clone();
                     let hovered_index = interactive_state.hovered_index.clone();
@@ -1964,6 +1967,7 @@ impl Element for InteractiveText {
                         build_tooltip,
                         check_is_hovered,
                         check_is_hovered_during_prepaint,
+                        interactive_state.long_press_tooltip_active.clone(),
                         None,
                         window,
                     );
@@ -1975,14 +1979,6 @@ impl Element for InteractiveText {
                 ((), interactive_state)
             },
         );
-    }
-}
-
-impl IntoElement for InteractiveText {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
     }
 }
 

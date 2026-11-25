@@ -8,7 +8,7 @@ rustup component add rustfmt clippy
 
 ## macOS
 
-GPUI uses Metal on macOS and needs Xcode's developer tools.
+GPUI uses Metal on macOS and needs Xcode's developer tools. Apps built with GPUI require macOS 12.0 (Monterey) or later.
 
 1. Install [Xcode from the Mac App Store](https://apps.apple.com/us/app/xcode/id497799835?mt=12) or [Apple Developer Downloads](https://developer.apple.com/download/all/). Launch Xcode and install the macOS components.
 2. Install the command line tools:

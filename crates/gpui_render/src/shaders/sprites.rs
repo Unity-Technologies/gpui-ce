@@ -41,8 +41,6 @@ pub mod underline {
         #[location(1)]
         #[interpolate(flat)]
         pub underline_id: u32,
-        #[location(3)]
-        pub clip_distances: Vec4f,
     }
 
     #[vertex]
@@ -51,21 +49,24 @@ pub mod underline {
         #[builtin(instance_index)] instance_id: u32,
     ) -> UnderlineVarying {
         let underline = get!(UNDERLINES)[instance_id as usize];
-        let vertex = rectangle_vertex(vertex_id, underline.bounds);
+        let vertex =
+            clipped_rectangle_vertex(vertex_id, underline.bounds, underline.content_mask.bounds);
+        let simple = !is_enabled(underline.wavy) && !ContentMask::has_fade(underline.content_mask);
         UnderlineVarying {
             position: vertex.clip_position,
             color: hsla_to_rgba(underline.color),
-            underline_id: instance_id,
-            clip_distances: clip_distances(vertex.viewport_position, underline.content_mask.bounds),
+            underline_id: mark_simple_primitive(instance_id, simple),
         }
     }
 
     #[fragment]
     pub fn fragment_underline(input: UnderlineVarying) -> Vec4f {
-        if is_clipped(input.clip_distances) {
-            return transparent();
+        if is_simple_primitive(input.underline_id) {
+            return blend_color(input.color, 1.0);
         }
-        let underline = get!(UNDERLINES)[input.underline_id as usize];
+        // The downlevel transport rewrites only a plain index expression.
+        let index = primitive_index(input.underline_id);
+        let underline = get!(UNDERLINES)[index as usize];
         if !is_enabled(underline.wavy) {
             return blend_color(
                 input.color,
@@ -187,7 +188,6 @@ pub mod polychrome_sprite {
         pub position: Vec4f,
         pub tile_position: Vec2f,
         pub sprite_id: u32,
-        pub clip_distances: Vec4f,
     }
 
     pub fn prepare_polychrome_vertex(
@@ -195,7 +195,7 @@ pub mod polychrome_sprite {
         instance_id: u32,
         sprite: PolychromeSprite,
     ) -> PolychromeVertexData {
-        let vertex = rectangle_vertex(vertex_id, sprite.bounds);
+        let vertex = clipped_rectangle_vertex(vertex_id, sprite.bounds, sprite.content_mask.bounds);
         PolychromeVertexData {
             position: vertex.clip_position,
             tile_position: atlas_texture_coordinates(
@@ -204,7 +204,6 @@ pub mod polychrome_sprite {
                 texture_dimensions(POLYCHROME_TEXTURE),
             ),
             sprite_id: instance_id,
-            clip_distances: clip_distances(vertex.viewport_position, sprite.content_mask.bounds),
         }
     }
 
@@ -228,8 +227,9 @@ pub mod polychrome_sprite {
         #[location(1)]
         #[interpolate(flat)]
         pub sprite_id: u32,
-        #[location(3)]
-        pub clip_distances: Vec4f,
+        #[location(2)]
+        #[interpolate(flat)]
+        pub opacity: f32,
     }
 
     #[vertex]
@@ -239,24 +239,35 @@ pub mod polychrome_sprite {
     ) -> PolychromeSpriteVarying {
         let sprite = get!(POLYCHROME_SPRITES)[instance_id as usize];
         let vertex = prepare_polychrome_vertex(vertex_id, instance_id, sprite);
+        let simple = Corners::is_zero(sprite.corner_radii)
+            && !is_enabled(sprite.grayscale)
+            && !ContentMask::has_fade(sprite.content_mask);
         PolychromeSpriteVarying {
             position: vertex.position,
             tile_position: vertex.tile_position,
-            sprite_id: vertex.sprite_id,
-            clip_distances: vertex.clip_distances,
+            sprite_id: mark_simple_primitive(vertex.sprite_id, simple),
+            opacity: sprite.opacity,
         }
     }
 
     #[fragment]
     pub fn fragment_polychrome_sprite(input: PolychromeSpriteVarying) -> Vec4f {
-        if is_clipped(input.clip_distances) {
-            return transparent();
+        if is_simple_primitive(input.sprite_id) {
+            let sample = texture_sample_level(
+                POLYCHROME_TEXTURE,
+                POLYCHROME_SAMPLER,
+                input.tile_position,
+                0.0,
+            );
+            return blend_color(sample, input.opacity);
         }
-        let sprite = get!(POLYCHROME_SPRITES)[input.sprite_id as usize];
+        // The downlevel transport rewrites only a plain index expression.
+        let index = primitive_index(input.sprite_id);
+        let sprite = get!(POLYCHROME_SPRITES)[index as usize];
         let color = polychrome_color(sprite, input.tile_position);
         blend_color(
             color,
-            sprite.opacity
+            input.opacity
                 * antialiased_coverage(rounded_rectangle_signed_distance(
                     input.position.xy(),
                     sprite.bounds,
@@ -279,14 +290,12 @@ pub mod polychrome_sprite {
         #[interpolate(flat)]
         pub horizontal_corner_reaches: Vec4f,
         #[location(3)]
-        pub clip_distances: Vec4f,
-        #[location(4)]
         #[interpolate(flat)]
         pub vertical_corner_reaches: Vec4f,
-        #[location(5)]
+        #[location(4)]
         #[interpolate(flat)]
         pub smoothing_factors: Vec4f,
-        #[location(6)]
+        #[location(5)]
         #[interpolate(flat)]
         pub superellipse_power: f32,
     }
@@ -310,7 +319,6 @@ pub mod polychrome_sprite {
             tile_position: vertex.tile_position,
             sprite_id: vertex.sprite_id,
             horizontal_corner_reaches: prepared.horizontal_reaches,
-            clip_distances: vertex.clip_distances,
             vertical_corner_reaches: prepared.vertical_reaches,
             smoothing_factors: prepared.smoothing_factors,
             superellipse_power: prepared.superellipse_power,
@@ -319,9 +327,6 @@ pub mod polychrome_sprite {
 
     #[fragment]
     pub fn fragment_smoothed_polychrome_sprite(input: SmoothedPolychromeSpriteVarying) -> Vec4f {
-        if is_clipped(input.clip_distances) {
-            return transparent();
-        }
         let sprite = get!(POLYCHROME_SPRITES)[input.sprite_id as usize];
         let color = polychrome_color(sprite, input.tile_position);
         blend_color(

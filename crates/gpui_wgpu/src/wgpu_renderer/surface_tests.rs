@@ -17,6 +17,15 @@ use super::{
 };
 use crate::{WgpuRenderer, WgpuSurfaceConfig};
 
+const SURFACE_CONFIG: WgpuSurfaceConfig = WgpuSurfaceConfig {
+    size: Size {
+        width: DevicePixels(128),
+        height: DevicePixels(128),
+    },
+    transparent: false,
+    preferred_present_mode: None,
+};
+
 #[derive(Default)]
 struct WindowState {
     configured: bool,
@@ -102,6 +111,7 @@ fn failed_frames_release_surface_images() {
     let context = WgpuContext::new_with_adapter_policy(
         instance,
         &gpu_surface,
+        &SURFACE_CONFIG,
         None,
         SoftwareAdapterPolicy::Allow,
         None,
@@ -111,14 +121,8 @@ fn failed_frames_release_surface_images() {
         None,
         &context,
         Some(gpu_surface),
-        WgpuSurfaceConfig {
-            size: Size {
-                width: DevicePixels(128),
-                height: DevicePixels(128),
-            },
-            transparent: false,
-            preferred_present_mode: None,
-        },
+        SURFACE_CONFIG,
+        true,
         None,
         None,
         Arc::new(WgpuAtlas::from_context(&context)),
@@ -191,6 +195,7 @@ fn unmap_and_remap(backend: NativeBackend) {
     let Ok(context) = WgpuContext::new_with_adapter_policy(
         instance,
         &gpu_surface,
+        &SURFACE_CONFIG,
         None,
         SoftwareAdapterPolicy::Allow,
         None,
@@ -206,14 +211,8 @@ fn unmap_and_remap(backend: NativeBackend) {
             Some(Rc::clone(&gpu_context)),
             context,
             Some(gpu_surface),
-            WgpuSurfaceConfig {
-                size: Size {
-                    width: DevicePixels(128),
-                    height: DevicePixels(128),
-                },
-                transparent: false,
-                preferred_present_mode: None,
-            },
+            SURFACE_CONFIG,
+            true,
             None,
             None,
             Arc::new(WgpuAtlas::from_context(context)),

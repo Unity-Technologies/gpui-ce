@@ -13,7 +13,6 @@ mod source {
     pub const PATTERN_COMPONENT_SCALE: f32 = 255.0;
     pub const PATTERN_PACKING_RADIX: f32 = 65535.0;
     pub const MIN_NORMALIZED_WEIGHT: f32 = 0.00001;
-    pub const MIN_PATH_GRADIENT: f32 = 0.001;
     pub const UNDERLINE_WAVE_FREQUENCY: f32 = 2.0;
     pub const UNDERLINE_WAVE_HEIGHT_RATIO: f32 = 0.8;
     pub const GRADIENT_DITHER_SCALE: f32 = 0.6180339887;
@@ -24,6 +23,10 @@ mod source {
     pub const GRADIENT_DITHER_MULTIPLIER_A: f32 = 43758.5453;
     pub const GRADIENT_DITHER_MULTIPLIER_B: f32 = 24634.6345;
     pub const DIAGONAL_STRIPE_ANGLE: f32 = PI / 4.0;
+    /// Set in a varying instance id when the fragment stage can paint the primitive from its
+    /// interpolated values alone, skipping the instance fetch.
+    pub const SIMPLE_PRIMITIVE_FLAG: u32 = 2147483648u32;
+    pub const PRIMITIVE_INDEX_MASK: u32 = 2147483647u32;
     pub const REC_601_LUMA_WEIGHTS: Vec3f = vec3f(0.30, 0.59, 0.11);
     pub const LINEAR_RGB_LUMA_WEIGHTS: Vec3f = vec3f(0.2126, 0.7152, 0.0722);
     pub const SRGB_DECODE_CUTOFF: f32 = 0.04045;
@@ -36,6 +39,12 @@ mod source {
     pub const ERROR_FUNCTION_QUADRATIC_COEFFICIENT: f32 = 0.230389;
     pub const ERROR_FUNCTION_CUBIC_COEFFICIENT: f32 = 0.000972;
     pub const ERROR_FUNCTION_QUARTIC_COEFFICIENT: f32 = 0.078108;
+    pub const LEVIEN_ERROR_FUNCTION_A: f32 = 0.24295;
+    pub const LEVIEN_ERROR_FUNCTION_B: f32 = 0.03395;
+    pub const LEVIEN_ERROR_FUNCTION_C: f32 = 0.0104;
+    pub const LEVIEN_INNER_RADIUS_SPREAD: f32 = 1.15;
+    pub const LEVIEN_SIZE_CORRECTION: f32 = 1.25;
+    pub const LEVIEN_MIN_BLUR: f32 = 0.000001;
     pub const DARK_TEXT_CONTRAST_SCALE: f32 = 4.0;
     pub const DARK_TEXT_BRIGHTNESS_CUTOFF: f32 = 0.75;
     pub const LINEAR_SRGB_TO_CONE_RESPONSE: Mat3x3f = mat3x3f(
@@ -146,6 +155,10 @@ mod source {
     }
 
     impl ContentMask {
+        pub fn has_fade(content_mask: ContentMask) -> bool {
+            !Edges::is_zero(content_mask.fade_out)
+        }
+
         /// The mask's coverage at the given window-space position: 1 inside,
         /// 0 outside, and a linear ramp to 0 across each edge's fade distance.
         pub fn alpha(content_mask: ContentMask, position: Vec2f) -> f32 {
@@ -276,6 +289,18 @@ mod source {
         pub clip_position: Vec4f,
     }
 
+    pub fn mark_simple_primitive(instance_id: u32, simple: bool) -> u32 {
+        instance_id | select(0u32, SIMPLE_PRIMITIVE_FLAG, simple)
+    }
+
+    pub fn is_simple_primitive(marked_id: u32) -> bool {
+        (marked_id & SIMPLE_PRIMITIVE_FLAG) != 0u32
+    }
+
+    pub fn primitive_index(marked_id: u32) -> u32 {
+        marked_id & PRIMITIVE_INDEX_MASK
+    }
+
     pub fn is_enabled(value: ShaderBool) -> bool {
         value == ShaderBool::Enabled
     }
@@ -383,6 +408,46 @@ mod source {
         }
     }
 
+    /// A rectangle corner pulled inside an axis-aligned mask. `unit_position` stays relative
+    /// to the unclipped `bounds`, so texture and paint coordinates keep their mapping.
+    #[derive(Clone, Copy, Wgsl)]
+    pub struct ClippedCorner {
+        pub position: Vec2f,
+        pub unit_position: Vec2f,
+    }
+
+    pub fn clip_to_mask(unit_position: Vec2f, bounds: Bounds, mask: Bounds) -> ClippedCorner {
+        let origin = max(bounds.origin, mask.origin);
+        let corner = min(bounds.origin + bounds.size, mask.origin + mask.size);
+        let size = max(corner - origin, vec2f(0.0, 0.0));
+        let position = origin + unit_position * size;
+        // An empty primitive has no area to rasterize; the guard only keeps the
+        // interpolated coordinate finite.
+        let safe_size = max(
+            bounds.size,
+            vec2f(MIN_NORMALIZED_WEIGHT, MIN_NORMALIZED_WEIGHT),
+        );
+        ClippedCorner {
+            position,
+            unit_position: (position - bounds.origin) / safe_size,
+        }
+    }
+
+    /// Clips an untransformed rectangle's geometry to its content mask in the vertex stage,
+    /// so the rasterizer never shades a pixel outside the mask.
+    pub fn clipped_rectangle_vertex(
+        vertex_id: u32,
+        bounds: Bounds,
+        mask: Bounds,
+    ) -> RectangleVertex {
+        let clipped = clip_to_mask(rectangle_corner(vertex_id), bounds, mask);
+        RectangleVertex {
+            unit_position: clipped.unit_position,
+            viewport_position: clipped.position,
+            clip_position: viewport_to_clip_position(clipped.position),
+        }
+    }
+
     pub fn transformed_rectangle_vertex(
         vertex_id: u32,
         bounds: Bounds,
@@ -431,9 +496,6 @@ mod source {
         min(min(distances.x, distances.y), min(distances.z, distances.w)) < 0.0
     }
 
-    pub fn unclipped_distances() -> Vec4f {
-        vec4f(1.0, 1.0, 1.0, 1.0)
-    }
     pub fn srgb_to_linear(srgb: Vec3f) -> Vec3f {
         let cutoff = vec3b(
             srgb.x < SRGB_DECODE_CUTOFF,
@@ -535,29 +597,133 @@ mod source {
         let polynomial_squared = polynomial * polynomial;
         signs - signs / (polynomial_squared * polynomial_squared)
     }
-    pub fn integrated_rounded_rectangle_coverage(
-        horizontal_position: f32,
-        vertical_position: f32,
-        standard_deviation: f32,
-        corner_radius: f32,
-        half_size: Vec2f,
-    ) -> f32 {
-        let distance_beyond_corner = min(half_size.y - corner_radius - abs(vertical_position), 0.0);
-        let curved_extent = half_size.x - corner_radius
-            + sqrt(max(
-                0.0,
-                corner_radius * corner_radius - distance_beyond_corner * distance_beyond_corner,
-            ));
-        let integration_bounds = horizontal_position + vec2f(-curved_extent, curved_extent);
-        let normalized_bounds = integration_bounds * (sqrt(0.5) / standard_deviation);
-        let integral = 0.5 + 0.5 * approximate_error_function(normalized_bounds);
-        integral.y - integral.x
-    }
     pub fn pick_corner_radius(center_to_point: Vec2f, radii: Corners) -> f32 {
         let left = select(radii.bottom_left, radii.top_left, center_to_point.y < 0.0);
         let right = select(radii.bottom_right, radii.top_right, center_to_point.y < 0.0);
         select(right, left, center_to_point.x < 0.0)
     }
+    pub fn pick_corner_value(center_to_point: Vec2f, values: Vec4f) -> f32 {
+        pick_corner_radius(
+            center_to_point,
+            Corners {
+                top_left: values.x,
+                top_right: values.y,
+                bottom_right: values.z,
+                bottom_left: values.w,
+            },
+        )
+    }
+
+    /// The error function to about 1e-4, from Raph Levien's blurred rounded rectangle notes.
+    pub fn levien_error_function(input: f32) -> f32 {
+        let x = clamp(input, -10.0, 10.0) * (2.0 / sqrt(PI));
+        let x_squared = x * x;
+        let y = x
+            + (LEVIEN_ERROR_FUNCTION_A
+                + (LEVIEN_ERROR_FUNCTION_B + LEVIEN_ERROR_FUNCTION_C * x_squared) * x_squared)
+                * (x * x_squared);
+        y / sqrt(1.0 + y * y)
+    }
+
+    /// Per-shadow terms of a blurred rounded rectangle, computed once per vertex.
+    #[derive(Clone, Copy, Wgsl)]
+    pub struct PreparedBlurredRectangle {
+        /// Adjusted half size (xy), inverse blur width (z), shorter side (w).
+        pub shape: Vec4f,
+        pub corner_radii: Vec4f,
+        pub exponents: Vec4f,
+        pub scales: Vec4f,
+    }
+
+    /// Fits Raph Levien's superellipse approximation of a Gaussian-blurred rounded rectangle:
+    /// https://raphlinus.github.io/graphics/2020/04/21/blurred-rounded-rects.html
+    /// Its blur width is the standard deviation times sqrt(2).
+    pub fn prepare_blurred_rectangle(
+        size: Vec2f,
+        corner_radii: Corners,
+        standard_deviation: f32,
+    ) -> PreparedBlurredRectangle {
+        let blur = max(standard_deviation * sqrt(2.0), LEVIEN_MIN_BLUR);
+        let inverse_blur = 1.0 / blur;
+        let shorter_side = min(size.x, size.y);
+        let max_radius = 0.5 * shorter_side;
+        let max_radii = vec4f(max_radius, max_radius, max_radius, max_radius);
+        // A radius past half the shorter side has no shape of its own to blur.
+        let radii = min(
+            vec4f(
+                corner_radii.top_left,
+                corner_radii.top_right,
+                corner_radii.bottom_right,
+                corner_radii.bottom_left,
+            ),
+            max_radii,
+        );
+        let inner_spread = LEVIEN_INNER_RADIUS_SPREAD * LEVIEN_INNER_RADIUS_SPREAD * blur * blur;
+        let outer_spread = 4.0 * blur * blur;
+        let inner_radii = min(
+            sqrt(radii * radii + vec4f(inner_spread, inner_spread, inner_spread, inner_spread)),
+            max_radii,
+        );
+        let outer_radii = min(
+            sqrt(radii * radii + vec4f(outer_spread, outer_spread, outer_spread, outer_spread)),
+            max_radii,
+        );
+
+        let half_extent = 0.5 * inverse_blur * size;
+        let delta = LEVIEN_SIZE_CORRECTION
+            * blur
+            * (exp(-half_extent.x * half_extent.x) - exp(-half_extent.y * half_extent.y));
+        let adjusted_size = vec2f(size.x + min(delta, 0.0), size.y - max(delta, 0.0));
+        let longer_side = max(adjusted_size.x, adjusted_size.y);
+        let peaks = (vec4f(longer_side, longer_side, longer_side, longer_side) - 0.5 * radii)
+            * (inverse_blur * 0.5);
+
+        PreparedBlurredRectangle {
+            shape: vec4f(
+                0.5 * adjusted_size.x,
+                0.5 * adjusted_size.y,
+                inverse_blur,
+                shorter_side,
+            ),
+            corner_radii: outer_radii,
+            exponents: 2.0 * outer_radii / inner_radii,
+            scales: 0.5
+                * vec4f(
+                    levien_error_function(peaks.x),
+                    levien_error_function(peaks.y),
+                    levien_error_function(peaks.z),
+                    levien_error_function(peaks.w),
+                ),
+        }
+    }
+
+    /// Coverage of a blurred rounded rectangle at `center_to_point` from its prepared terms.
+    pub fn blurred_rectangle_coverage(
+        center_to_point: Vec2f,
+        prepared: PreparedBlurredRectangle,
+    ) -> f32 {
+        let radius = pick_corner_value(center_to_point, prepared.corner_radii);
+        let exponent = pick_corner_value(center_to_point, prepared.exponents);
+        let scale = pick_corner_value(center_to_point, prepared.scales);
+        let inverse_blur = prepared.shape.z;
+        let shorter_side = prepared.shape.w;
+
+        let corner_to_point = abs(center_to_point) - (prepared.shape.xy() - radius);
+        let outside = max(corner_to_point, vec2f(0.0, 0.0));
+        let mut positive_distance = outside.x + outside.y;
+        if outside.x > 0.0 && outside.y > 0.0 {
+            positive_distance = pow(
+                pow(outside.x, exponent) + pow(outside.y, exponent),
+                1.0 / exponent,
+            );
+        }
+        let negative_distance = min(max(corner_to_point.x, corner_to_point.y), 0.0);
+        let distance = positive_distance + negative_distance - radius;
+        scale
+            * (levien_error_function(inverse_blur * (shorter_side + distance))
+                - levien_error_function(inverse_blur * distance))
+    }
+
     pub fn rounded_rectangle_signed_distance_from_corner(
         corner_center_to_point: Vec2f,
         corner_radius: f32,
@@ -612,25 +778,23 @@ mod source {
         }
     }
 
+    /// Per-primitive paint inputs, computed once per vertex. A solid, pattern or checkerboard
+    /// paint keeps its color in `color0`; a gradient keeps both endpoints, already converted to
+    /// its interpolation space.
     #[derive(Clone, Copy, Wgsl)]
     pub struct PreparedPaint {
-        pub solid: Vec4f,
         pub color0: Vec4f,
         pub color1: Vec4f,
     }
 
     impl PreparedPaint {
-        pub fn new(solid: Vec4f, color0: Vec4f, color1: Vec4f) -> PreparedPaint {
-            PreparedPaint {
-                solid,
-                color0,
-                color1,
-            }
+        pub fn new(color0: Vec4f, color1: Vec4f) -> PreparedPaint {
+            PreparedPaint { color0, color1 }
         }
     }
 
     pub fn prepare_paint(paint: Paint) -> PreparedPaint {
-        let mut prepared = PreparedPaint::new(transparent(), transparent(), transparent());
+        let mut prepared = PreparedPaint::new(transparent(), transparent());
 
         if paint.background.tag == BackgroundTag::LinearGradient {
             prepared.color0 = hsla_to_rgba(paint.background.colors[0usize].color);
@@ -643,7 +807,7 @@ mod source {
                 prepared.color1 = linear_srgb_to_oklab(prepared.color1);
             }
         } else {
-            prepared.solid = hsla_to_rgba(paint.background.solid);
+            prepared.color0 = hsla_to_rgba(paint.background.solid);
         }
 
         prepared
@@ -706,11 +870,9 @@ mod source {
         let pattern_interval = (encoded % PATTERN_PACKING_RADIX) / PATTERN_COMPONENT_SCALE;
         let pattern_height = pattern_width + pattern_interval;
         let period = pattern_height * sin(DIAGONAL_STRIPE_ANGLE);
-        let rotation = mat2x2f(
-            vec2f(cos(DIAGONAL_STRIPE_ANGLE), -sin(DIAGONAL_STRIPE_ANGLE)),
-            vec2f(sin(DIAGONAL_STRIPE_ANGLE), cos(DIAGONAL_STRIPE_ANGLE)),
-        );
-        let pattern = (rotation * (position - paint.bounds.origin)).x % period;
+        // Only the rotated x coordinate is used, which reduces the rotation to one dot product.
+        let stripe_direction = vec2f(cos(DIAGONAL_STRIPE_ANGLE), sin(DIAGONAL_STRIPE_ANGLE));
+        let pattern = dot(position - paint.bounds.origin, stripe_direction) % period;
         let distance =
             min(pattern, period - pattern) - period * (pattern_width / pattern_height) / 2.0;
         let mut color = solid;
@@ -728,20 +890,20 @@ mod source {
     }
 
     pub fn paint_color(paint: Paint, position: Vec2f, prepared: PreparedPaint) -> Vec4f {
-        let mut color = prepared.solid;
+        let mut color = prepared.color0;
         #[wgsl_allow(non_literal_match_statement_patterns)]
         match paint.background.tag {
             BackgroundTag::Solid => {
-                color = prepared.solid;
+                color = prepared.color0;
             }
             BackgroundTag::LinearGradient => {
                 color = linear_gradient_color(paint, position, prepared);
             }
             BackgroundTag::PatternSlash => {
-                color = slash_pattern_color(paint, position, prepared.solid);
+                color = slash_pattern_color(paint, position, prepared.color0);
             }
             BackgroundTag::Checkerboard => {
-                color = checkerboard_color(paint, position, prepared.solid);
+                color = checkerboard_color(paint, position, prepared.color0);
             }
         }
         color

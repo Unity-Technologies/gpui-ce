@@ -12,7 +12,6 @@ use gpui_render::{
         BlurAxis, BlurKernel, BlurUniforms, FilterCompositeClip,
         GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS, downsampled_dimension,
     },
-    path_types::{PathRasterizationVertex, PathSprite},
     shaders::{
         common::{FontRasterizationUniforms, GlobalUniforms, ShaderBool, SurfaceColorFormat},
         interface as shader_interface,
@@ -24,7 +23,7 @@ use smallvec::SmallVec;
 use wgsl_rs::std::{vec2f, vec4f};
 use windows::{
     Win32::{
-        Foundation::{FreeLibrary, HMODULE, HWND},
+        Foundation::HWND,
         Graphics::{
             Direct3D::*,
             Direct3D11::*,
@@ -32,9 +31,8 @@ use windows::{
             DirectWrite::*,
             Dxgi::{Common::*, *},
         },
-        System::LibraryLoader::LoadLibraryA,
     },
-    core::{HSTRING, Interface, PCSTR},
+    core::{HSTRING, Interface},
 };
 
 use crate::directx_renderer::shader_resources::ShaderModule;
@@ -43,12 +41,13 @@ use gpui::*;
 
 pub(crate) const DISABLE_DIRECT_COMPOSITION: &str = "GPUI_DISABLE_DIRECT_COMPOSITION";
 const RENDER_TARGET_FORMAT: DXGI_FORMAT = DXGI_FORMAT_B8G8R8A8_UNORM;
-// This configuration is used for MSAA rendering on paths only, and it's guaranteed to be supported by DirectX 11.
-const PATH_MULTISAMPLE_COUNT: u32 = 4;
 const MAX_INSTANCE_BUFFER_SIZE: usize = 256 * 1024 * 1024;
 // Group 0 occupies registers 0 and 1 in native shaders, so generated group-1 bindings start at 2.
 const GROUP_1_REGISTER_OFFSET: u32 = 2;
 const DATA_REGISTER: u32 = shader_interface::DATA_BUFFER_BINDING + GROUP_1_REGISTER_OFFSET;
+// Path tiles index the frame's curves and paints, bound beside the tiles.
+const PATH_CURVES_REGISTER: u32 = shader_interface::PATH_CURVES_BINDING + GROUP_1_REGISTER_OFFSET;
+const PATH_PAINTS_REGISTER: u32 = shader_interface::PATH_PAINTS_BINDING + GROUP_1_REGISTER_OFFSET;
 const PRIMARY_TEXTURE_REGISTER: u32 =
     shader_interface::PRIMARY_TEXTURE_BINDING + GROUP_1_REGISTER_OFFSET;
 const PRIMARY_SAMPLER_REGISTER: u32 =
@@ -89,11 +88,8 @@ pub(crate) struct DirectXRenderer {
 
     /// The render target currently bound for the main scene this frame (the offscreen
     /// `scene_color` when blur filters are present, a content-filter group texture inside such a
-    /// group, or the swapchain otherwise). `draw_paths_to_intermediate` restores to this after
-    /// its own pass so paths land on the correct target.
+    /// group, or the swapchain otherwise).
     active_render_target: Option<ID3D11RenderTargetView>,
-    path_rasterization_vertices: Vec<PathRasterizationVertex>,
-    path_sprites: Vec<PathSprite>,
 }
 
 /// Direct3D objects
@@ -113,9 +109,6 @@ struct DirectXResources {
     render_target: Option<ID3D11Texture2D>,
     render_target_view: Option<ID3D11RenderTargetView>,
 
-    // Path intermediates are absent until a scene contains a path batch.
-    path: Option<PathResources>,
-
     // Offscreen targets are absent until a scene actually needs a blur/filter pass.
     blur: Option<BlurResources>,
 
@@ -132,27 +125,6 @@ struct CachedSurfaceView {
     #[expect(dead_code)]
     texture: ID3D11Texture2D,
     srv: Option<ID3D11ShaderResourceView>,
-}
-
-struct PathResources {
-    texture: ID3D11Texture2D,
-    srv: Option<ID3D11ShaderResourceView>,
-    msaa_texture: ID3D11Texture2D,
-    msaa_view: Option<ID3D11RenderTargetView>,
-}
-
-impl PathResources {
-    fn new(device: &ID3D11Device, width: u32, height: u32) -> Result<Self> {
-        let (texture, srv) = create_path_intermediate_texture(device, width, height)?;
-        let (msaa_texture, msaa_view) =
-            create_path_intermediate_msaa_texture_and_view(device, width, height)?;
-        Ok(Self {
-            texture,
-            srv,
-            msaa_texture,
-            msaa_view,
-        })
-    }
 }
 
 struct ColorTarget {
@@ -174,8 +146,9 @@ struct BlurResources {
 struct DirectXRenderPipelines {
     shadow_pipeline: PipelineState<Shadow>,
     quad_pipeline: PipelineState<Quad>,
-    path_rasterization_pipeline: PipelineState<PathRasterizationVertex>,
-    path_sprite_pipeline: PipelineState<PathSprite>,
+    path_tile_pipeline: PipelineState<PathTile>,
+    path_curves: FrameBuffer<PathCurve>,
+    path_paints: FrameBuffer<PathPaint>,
     underline_pipeline: PipelineState<Underline>,
     mono_sprites: PipelineState<MonochromeSprite>,
     subpixel_sprites: PipelineState<SubpixelSprite>,
@@ -322,8 +295,6 @@ impl DirectXRenderer {
             resize_pending: false,
             skip_draws: false,
             active_render_target: None,
-            path_rasterization_vertices: Vec::new(),
-            path_sprites: Vec::new(),
         })
     }
 
@@ -506,10 +477,6 @@ impl DirectXRenderer {
         let resources = self.resources.as_mut().context("resources missing")?;
         resources.retain_surface_views(&scene.surfaces);
 
-        if requirements.uses_path_target {
-            resources.ensure_path_resources(device)?;
-        }
-
         if use_offscreen {
             resources.ensure_blur_resources(device, requirements)?;
         }
@@ -554,7 +521,7 @@ impl DirectXRenderer {
                 }
                 ctx.OMSetRenderTargets(Some(slice::from_ref(&scene_rtv)), None);
             }
-            self.active_render_target = scene_rtv.clone();
+            self.active_render_target = scene_rtv;
         } else {
             self.active_render_target = swapchain_rtv.clone();
         }
@@ -580,17 +547,8 @@ impl DirectXRenderer {
                 RenderCommand::Batch(PrimitiveBatch::Quads { range, smoothed }) => {
                     self.draw_quads(instance_range(range)?, *smoothed)
                 }
-                RenderCommand::Batch(PrimitiveBatch::Paths {
-                    range,
-                    rasterization_vertex_count,
-                    sprite_count,
-                }) => {
-                    if *rasterization_vertex_count == 0 {
-                        continue;
-                    }
-                    let paths = &scene.paths[range.clone()];
-                    self.draw_paths_to_intermediate(paths, *rasterization_vertex_count)?;
-                    self.draw_paths_from_intermediate(paths, *sprite_count)
+                RenderCommand::Batch(PrimitiveBatch::Paths { tiles, .. }) => {
+                    self.draw_path_tiles(instance_range(tiles)?)
                 }
                 RenderCommand::Batch(PrimitiveBatch::Underlines(range)) => {
                     self.draw_underlines(instance_range(range)?)
@@ -700,6 +658,8 @@ impl DirectXRenderer {
                     target: FilterRenderTarget::Inline,
                     ..
                 } => Ok(()),
+                // Windows never attaches native views, so no scene has any.
+                RenderCommand::Batch(PrimitiveBatch::NativeViews(_)) => Ok(()),
                 RenderCommand::Batch(PrimitiveBatch::FilterBoundary(_)) => {
                     unreachable!("filter boundaries are resolved by the render plan")
                 }
@@ -889,6 +849,26 @@ impl DirectXRenderer {
             )?;
         }
 
+        if !scene.path_tiles.is_empty() {
+            self.pipelines.path_tile_pipeline.update_buffer(
+                &devices.device,
+                &devices.device_context,
+                &scene.path_tiles,
+            )?;
+            if !scene.path_curves.is_empty() {
+                self.pipelines.path_curves.update(
+                    &devices.device,
+                    &devices.device_context,
+                    &scene.path_curves,
+                )?;
+            }
+            self.pipelines.path_paints.update(
+                &devices.device,
+                &devices.device_context,
+                &scene.path_paints,
+            )?;
+        }
+
         if !scene.underlines.is_empty() {
             self.pipelines.underline_pipeline.update_buffer(
                 &devices.device,
@@ -959,135 +939,19 @@ impl DirectXRenderer {
         )
     }
 
-    fn draw_paths_to_intermediate(
-        &mut self,
-        paths: &[Path<ScaledPixels>],
-        rasterization_vertex_count: usize,
-    ) -> Result<()> {
-        if paths.is_empty() {
-            return Ok(());
-        }
-
-        self.path_rasterization_vertices.clear();
-        self.path_rasterization_vertices
-            .reserve(rasterization_vertex_count);
-        for path in paths {
-            self.path_rasterization_vertices
-                .extend(path.vertices.iter().map(|vertex| PathRasterizationVertex {
-                    xy_position: vertex.xy_position,
-                    curve_position: vertex.st_position,
-                    color: path.color,
-                    bounds: path.clipped_bounds(),
-                }));
-        }
-        debug_assert_eq!(
-            self.path_rasterization_vertices.len(),
-            rasterization_vertex_count
-        );
-
-        let devices = self.devices.as_ref().context("devices missing")?;
-        let resources = self.resources.as_ref().context("resources missing")?;
-        let path = resources
-            .path
-            .as_ref()
-            .context("path resources were not prepared")?;
-        // Clear intermediate MSAA texture
+    fn draw_path_tiles(&mut self, tiles: InstanceRange) -> Result<()> {
+        let frame = self.frame_bindings()?;
+        let curves = slice::from_ref(&self.pipelines.path_curves.view);
+        let paints = slice::from_ref(&self.pipelines.path_paints.view);
         unsafe {
-            devices.device_context.ClearRenderTargetView(
-                path.msaa_view.as_ref().context("path MSAA view missing")?,
-                &[0.0; 4],
-            );
-            // Set intermediate MSAA texture as render target
-            devices
-                .device_context
-                .OMSetRenderTargets(Some(slice::from_ref(&path.msaa_view)), None);
+            let ctx = frame.device_context;
+            ctx.VSSetShaderResources(PATH_PAINTS_REGISTER, Some(paints));
+            ctx.PSSetShaderResources(PATH_CURVES_REGISTER, Some(curves));
+            ctx.PSSetShaderResources(PATH_PAINTS_REGISTER, Some(paints));
         }
-
-        self.pipelines.path_rasterization_pipeline.update_buffer(
-            &devices.device,
-            &devices.device_context,
-            &self.path_rasterization_vertices,
-        )?;
-        self.pipelines.path_rasterization_pipeline.draw_vertices(
-            &self.frame_bindings()?,
-            u32::try_from(rasterization_vertex_count)
-                .context("path rasterization vertex count exceeds the D3D11 draw limit")?,
-        )?;
-
-        // Resolve MSAA to non-MSAA intermediate texture
-        unsafe {
-            devices.device_context.ResolveSubresource(
-                &path.texture,
-                0,
-                &path.msaa_texture,
-                0,
-                RENDER_TARGET_FORMAT,
-            );
-            // Restore the active render target (the offscreen scene/group target when blurring,
-            // otherwise the swapchain) so the path sprites land on the correct surface.
-            let restore_target = if self.active_render_target.is_some() {
-                &self.active_render_target
-            } else {
-                &resources.render_target_view
-            };
-            devices
-                .device_context
-                .OMSetRenderTargets(Some(slice::from_ref(restore_target)), None);
-        }
-
-        Ok(())
-    }
-
-    fn draw_paths_from_intermediate(
-        &mut self,
-        paths: &[Path<ScaledPixels>],
-        sprite_count: usize,
-    ) -> Result<()> {
-        let Some(first_path) = paths.first() else {
-            return Ok(());
-        };
-
-        // When copying paths from the intermediate texture to the drawable,
-        // each pixel must only be copied once, in case of transparent paths.
-        //
-        // If all paths have the same draw order, then their bounds are all
-        // disjoint, so we can copy each path's bounds individually. If this
-        // batch combines different draw orders, we perform a single copy
-        // for a minimal spanning rect.
-        self.path_sprites.clear();
-        self.path_sprites.reserve(sprite_count);
-        if paths.last().unwrap().order == first_path.order {
-            self.path_sprites
-                .extend(paths.iter().map(|path| PathSprite {
-                    bounds: path.clipped_bounds(),
-                }));
-        } else {
-            let mut bounds = first_path.clipped_bounds();
-            for path in paths.iter().skip(1) {
-                bounds = bounds.union(&path.clipped_bounds());
-            }
-            self.path_sprites.push(PathSprite { bounds });
-        }
-        debug_assert_eq!(self.path_sprites.len(), sprite_count);
-
-        let devices = self.devices.as_ref().context("devices missing")?;
-        let resources = self.resources.as_ref().context("resources missing")?;
-        let path = resources
-            .path
-            .as_ref()
-            .context("path resources were not prepared")?;
-        self.pipelines.path_sprite_pipeline.update_buffer(
-            &devices.device,
-            &devices.device_context,
-            &self.path_sprites,
-        )?;
-        let instances = InstanceRange::from_start(sprite_count)
-            .context("path sprite count exceeds the D3D11 instance limit")?;
-        self.pipelines.path_sprite_pipeline.draw_instances(
-            &self.frame_bindings()?,
-            Some(slice::from_ref(&path.srv)),
-            instances,
-        )
+        self.pipelines
+            .path_tile_pipeline
+            .draw_instances(&frame, None, tiles)
     }
 
     fn draw_underlines(&mut self, instances: InstanceRange) -> Result<()> {
@@ -1488,15 +1352,11 @@ impl DirectXRenderer {
             0x8086 => "Intel Corporation".to_string(),
             id => format!("Unknown Vendor (ID: {:#X})", id),
         };
-        let driver_version = match desc.VendorId {
-            0x10DE => nvidia::get_driver_version(),
-            0x1002 => amd::get_driver_version(),
-            // For Intel and other vendors, we use the DXGI API to get the driver version.
-            _ => dxgi::get_driver_version(&devices.adapter),
-        }
-        .context("Failed to get gpu driver info")
-        .log_err()
-        .unwrap_or("Unknown Driver".to_string());
+        // DXGI only: loading NVIDIA's or AMD's DLL for a prettier version costs startup time.
+        let driver_version = dxgi::get_driver_version(&devices.adapter)
+            .context("Failed to get gpu driver info")
+            .log_err()
+            .unwrap_or("Unknown Driver".to_string());
         Ok(GpuSpecs {
             is_software_emulated,
             device_name,
@@ -1551,7 +1411,6 @@ impl DirectXResources {
             swap_chain,
             render_target: Some(render_target),
             render_target_view,
-            path: None,
             blur: None,
             surface_views: FxHashMap::default(),
             viewport,
@@ -1571,7 +1430,6 @@ impl DirectXResources {
         self.render_target_view = render_target_view;
         // Intermediate textures are size-dependent and recreated lazily if a later scene needs
         // them. Ordinary scenes therefore pay neither the allocation nor resize cost.
-        self.path = None;
         self.blur = None;
         self.viewport = viewport;
         Ok(())
@@ -1623,17 +1481,6 @@ impl DirectXResources {
         Ok(())
     }
 
-    fn ensure_path_resources(&mut self, device: &ID3D11Device) -> Result<()> {
-        if self.path.is_none() {
-            self.path = Some(PathResources::new(
-                device,
-                self.viewport.Width as u32,
-                self.viewport.Height as u32,
-            )?);
-        }
-        Ok(())
-    }
-
     fn retain_surface_views(&mut self, surfaces: &[PaintSurface]) {
         let active_keys = surfaces
             .iter()
@@ -1667,20 +1514,15 @@ impl DirectXRenderPipelines {
             create_blend_state(device)?,
         )?
         .with_variant(device, ShaderModule::SmoothedQuad)?;
-        let path_rasterization_pipeline = PipelineState::new(
+        let path_tile_pipeline = PipelineState::new(
             device,
-            "path_rasterization_pipeline",
-            ShaderModule::PathRasterization,
-            32,
-            create_premultiplied_blend_state(device)?,
+            "path_tile_pipeline",
+            ShaderModule::PathTile,
+            64,
+            create_blend_state(device)?,
         )?;
-        let path_sprite_pipeline = PipelineState::new(
-            device,
-            "path_sprite_pipeline",
-            ShaderModule::PathSprite,
-            4,
-            create_premultiplied_blend_state(device)?,
-        )?;
+        let path_curves = FrameBuffer::new(device, "path_curves", 256)?;
+        let path_paints = FrameBuffer::new(device, "path_paints", 8)?;
         let underline_pipeline = PipelineState::new(
             device,
             "underline_pipeline",
@@ -1743,8 +1585,9 @@ impl DirectXRenderPipelines {
         Ok(Self {
             shadow_pipeline,
             quad_pipeline,
-            path_rasterization_pipeline,
-            path_sprite_pipeline,
+            path_tile_pipeline,
+            path_curves,
+            path_paints,
             underline_pipeline,
             mono_sprites,
             subpixel_sprites,
@@ -1844,11 +1687,73 @@ struct PipelineState<T> {
     fragment: ID3D11PixelShader,
     variant: Option<PipelineVariant>,
     draw_constants: Dx11DrawConstantsBinding,
-    buffer: ID3D11Buffer,
-    buffer_size: usize,
-    view: Option<ID3D11ShaderResourceView>,
+    data: FrameBuffer<T>,
     blend_state: ID3D11BlendState,
+}
+
+/// A growable raw shader-resource buffer holding one frame-wide array.
+struct FrameBuffer<T> {
+    label: &'static str,
+    buffer: ID3D11Buffer,
+    capacity: usize,
+    view: Option<ID3D11ShaderResourceView>,
     _marker: std::marker::PhantomData<T>,
+}
+
+impl<T> FrameBuffer<T> {
+    fn new(device: &ID3D11Device, label: &'static str, capacity: usize) -> Result<Self> {
+        let buffer = create_buffer(device, std::mem::size_of::<T>(), capacity)?;
+        let view = create_buffer_view(device, &buffer)?;
+        Ok(Self {
+            label,
+            buffer,
+            capacity,
+            view,
+            _marker: std::marker::PhantomData,
+        })
+    }
+
+    fn update(
+        &mut self,
+        device: &ID3D11Device,
+        device_context: &ID3D11DeviceContext,
+        data: &[T],
+    ) -> Result<()> {
+        if self.capacity < data.len() {
+            let element_size = std::mem::size_of::<T>();
+            anyhow::ensure!(
+                element_size > 0,
+                "{} cannot store zero-sized instances",
+                self.label
+            );
+            let required_size = element_size
+                .checked_mul(data.len())
+                .context("instance-buffer byte size overflow")?;
+            anyhow::ensure!(
+                required_size <= MAX_INSTANCE_BUFFER_SIZE,
+                "{} buffer needs {required_size} bytes, above the {MAX_INSTANCE_BUFFER_SIZE}-byte limit",
+                self.label,
+            );
+            let max_elements = MAX_INSTANCE_BUFFER_SIZE / element_size;
+            let new_capacity = data
+                .len()
+                .checked_next_power_of_two()
+                .unwrap_or(max_elements)
+                .min(max_elements);
+            anyhow::ensure!(
+                new_capacity >= data.len(),
+                "instance-buffer capacity overflow"
+            );
+            log::debug!(
+                "Updating {} buffer size from {} to {}",
+                self.label,
+                self.capacity,
+                new_capacity
+            );
+            *self = Self::new(device, self.label, new_capacity)?;
+        }
+        update_buffer(device_context, &self.buffer, data)
+    }
 }
 
 struct PipelineVariant {
@@ -1872,8 +1777,7 @@ impl<T> PipelineState<T> {
         })?;
         let vertex = create_vertex_shader(device, bytecode.vertex)?;
         let fragment = create_fragment_shader(device, bytecode.fragment)?;
-        let buffer = create_buffer(device, std::mem::size_of::<T>(), buffer_size)?;
-        let view = create_buffer_view(device, &buffer)?;
+        let data = FrameBuffer::new(device, label, buffer_size)?;
 
         Ok(PipelineState {
             label,
@@ -1882,11 +1786,8 @@ impl<T> PipelineState<T> {
             fragment,
             variant: None,
             draw_constants,
-            buffer,
-            buffer_size,
-            view,
+            data,
             blend_state,
-            _marker: std::marker::PhantomData,
         })
     }
 
@@ -1925,44 +1826,7 @@ impl<T> PipelineState<T> {
         device_context: &ID3D11DeviceContext,
         data: &[T],
     ) -> Result<()> {
-        if self.buffer_size < data.len() {
-            let element_size = std::mem::size_of::<T>();
-            anyhow::ensure!(
-                element_size > 0,
-                "{} cannot store zero-sized instances",
-                self.label
-            );
-            let required_size = element_size
-                .checked_mul(data.len())
-                .context("instance-buffer byte size overflow")?;
-            anyhow::ensure!(
-                required_size <= MAX_INSTANCE_BUFFER_SIZE,
-                "{} buffer needs {required_size} bytes, above the {MAX_INSTANCE_BUFFER_SIZE}-byte limit",
-                self.label,
-            );
-            let max_elements = MAX_INSTANCE_BUFFER_SIZE / element_size;
-            let new_buffer_size = data
-                .len()
-                .checked_next_power_of_two()
-                .unwrap_or(max_elements)
-                .min(max_elements);
-            anyhow::ensure!(
-                new_buffer_size >= data.len(),
-                "instance-buffer capacity overflow"
-            );
-            log::debug!(
-                "Updating {} buffer size from {} to {}",
-                self.label,
-                self.buffer_size,
-                new_buffer_size
-            );
-            let buffer = create_buffer(device, std::mem::size_of::<T>(), new_buffer_size)?;
-            let view = create_buffer_view(device, &buffer)?;
-            self.buffer = buffer;
-            self.view = view;
-            self.buffer_size = new_buffer_size;
-        }
-        update_buffer(device_context, &self.buffer, data)
+        self.data.update(device, device_context, data)
     }
 
     /// Draws `instances` of the uploaded frame data as the pipeline's fixed rectangle,
@@ -2003,16 +1867,6 @@ impl<T> PipelineState<T> {
         self.draw_with_variant(frame, texture, vertex_count, instances, variant)
     }
 
-    /// Draws `vertex_count` vertex-pulled vertices as a single instance.
-    fn draw_vertices(&self, frame: &FrameBindings<'_>, vertex_count: u32) -> Result<()> {
-        anyhow::ensure!(
-            self.specification.vertex_count.fixed().is_none(),
-            "{} draws a fixed vertex count per instance",
-            self.label
-        );
-        self.draw(frame, None, vertex_count, InstanceRange::SINGLE)
-    }
-
     fn draw(
         &self,
         frame: &FrameBindings<'_>,
@@ -2035,12 +1889,12 @@ impl<T> PipelineState<T> {
             return Ok(());
         }
         anyhow::ensure!(
-            instances.end() as usize <= self.buffer_size,
+            instances.end() as usize <= self.data.capacity,
             "DirectX instance range {}..{} exceeds the {} buffer of {} elements",
             instances.first(),
             instances.end(),
             self.label,
-            self.buffer_size,
+            self.data.capacity,
         );
         let ctx = frame.device_context;
         update_buffer(
@@ -2061,8 +1915,8 @@ impl<T> PipelineState<T> {
         };
         let draw_constants = [Some(frame.globals.draw_constants_buffer.clone())];
         unsafe {
-            ctx.VSSetShaderResources(DATA_REGISTER, Some(slice::from_ref(&self.view)));
-            ctx.PSSetShaderResources(DATA_REGISTER, Some(slice::from_ref(&self.view)));
+            ctx.VSSetShaderResources(DATA_REGISTER, Some(slice::from_ref(&self.data.view)));
+            ctx.PSSetShaderResources(DATA_REGISTER, Some(slice::from_ref(&self.data.view)));
             ctx.IASetPrimitiveTopology(topology);
             ctx.RSSetViewports(Some(slice::from_ref(frame.viewport)));
             ctx.VSSetShader(
@@ -2196,41 +2050,6 @@ fn create_render_target_and_its_view(
 }
 
 #[inline]
-fn create_path_intermediate_texture(
-    device: &ID3D11Device,
-    width: u32,
-    height: u32,
-) -> Result<(ID3D11Texture2D, Option<ID3D11ShaderResourceView>)> {
-    let texture = unsafe {
-        let mut output = None;
-        let desc = D3D11_TEXTURE2D_DESC {
-            Width: width,
-            Height: height,
-            MipLevels: 1,
-            ArraySize: 1,
-            Format: RENDER_TARGET_FORMAT,
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0,
-            },
-            Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
-            CPUAccessFlags: 0,
-            MiscFlags: 0,
-        };
-        device.CreateTexture2D(&desc, None, Some(&mut output))?;
-        output.unwrap()
-    };
-
-    let mut shader_resource_view = None;
-    unsafe { device.CreateShaderResourceView(&texture, None, Some(&mut shader_resource_view))? };
-
-    Ok((texture, Some(shader_resource_view.unwrap())))
-}
-
-/// Create a color texture usable as both a render target and a shader resource, returning both
-/// views. Used for the blur offscreen targets.
-#[inline]
 fn create_color_target(device: &ID3D11Device, width: u32, height: u32) -> Result<ColorTarget> {
     let texture = unsafe {
         let mut output = None;
@@ -2262,37 +2081,6 @@ fn create_color_target(device: &ID3D11Device, width: u32, height: u32) -> Result
         target: rtv,
         source: srv,
     })
-}
-
-#[inline]
-fn create_path_intermediate_msaa_texture_and_view(
-    device: &ID3D11Device,
-    width: u32,
-    height: u32,
-) -> Result<(ID3D11Texture2D, Option<ID3D11RenderTargetView>)> {
-    let msaa_texture = unsafe {
-        let mut output = None;
-        let desc = D3D11_TEXTURE2D_DESC {
-            Width: width,
-            Height: height,
-            MipLevels: 1,
-            ArraySize: 1,
-            Format: RENDER_TARGET_FORMAT,
-            SampleDesc: DXGI_SAMPLE_DESC {
-                Count: PATH_MULTISAMPLE_COUNT,
-                Quality: D3D11_STANDARD_MULTISAMPLE_PATTERN.0 as u32,
-            },
-            Usage: D3D11_USAGE_DEFAULT,
-            BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
-            CPUAccessFlags: 0,
-            MiscFlags: 0,
-        };
-        device.CreateTexture2D(&desc, None, Some(&mut output))?;
-        output.unwrap()
-    };
-    let mut msaa_view = None;
-    unsafe { device.CreateRenderTargetView(&msaa_texture, None, Some(&mut msaa_view))? };
-    Ok((msaa_texture, Some(msaa_view.unwrap())))
 }
 
 #[inline]
@@ -2552,8 +2340,7 @@ pub(crate) mod shader_resources {
         Shadow,
         SmoothedShadow,
         Underline,
-        PathRasterization,
-        PathSprite,
+        PathTile,
         MonochromeSprite,
         SubpixelSprite,
         PolychromeSprite,
@@ -2573,8 +2360,7 @@ pub(crate) mod shader_resources {
                 Self::Shadow => "shadows",
                 Self::SmoothedShadow => "smoothed_shadows",
                 Self::Underline => "underlines",
-                Self::PathRasterization => "path_rasterization",
-                Self::PathSprite => "paths",
+                Self::PathTile => "path_tiles",
                 Self::MonochromeSprite => "monochrome_sprites",
                 Self::SubpixelSprite => "subpixel_sprites",
                 Self::PolychromeSprite => "polychrome_sprites",
@@ -2628,6 +2414,7 @@ pub(crate) mod shader_resources {
                 let instanced = matches!(
                     shader.pipeline.data_layout,
                     DataLayout::Instances
+                        | DataLayout::PathTiles
                         | DataLayout::TexturedInstances
                         | DataLayout::MonochromeSprites
                         | DataLayout::SubpixelSprites
@@ -2641,184 +2428,6 @@ pub(crate) mod shader_resources {
                 );
             }
         }
-    }
-}
-
-fn with_dll_library<R>(dll_name: PCSTR, f: impl FnOnce(HMODULE) -> Result<R>) -> Result<R> {
-    let library = unsafe {
-        LoadLibraryA(dll_name).with_context(|| format!("Loading DLL: {}", dll_name.display()))?
-    };
-    let result = f(library);
-    unsafe {
-        FreeLibrary(library)
-            .with_context(|| format!("Freeing DLL: {}", dll_name.display()))
-            .log_err();
-    }
-    result
-}
-
-mod nvidia {
-    use std::{
-        ffi::CStr,
-        os::raw::{c_char, c_int, c_uint},
-    };
-
-    use anyhow::Result;
-    use windows::{Win32::System::LibraryLoader::GetProcAddress, core::s};
-
-    use super::with_dll_library;
-
-    // https://github.com/NVIDIA/nvapi/blob/7cb76fce2f52de818b3da497af646af1ec16ce27/nvapi_lite_common.h#L180
-    const NVAPI_SHORT_STRING_MAX: usize = 64;
-
-    // https://github.com/NVIDIA/nvapi/blob/7cb76fce2f52de818b3da497af646af1ec16ce27/nvapi_lite_common.h#L235
-    #[allow(non_camel_case_types)]
-    type NvAPI_ShortString = [c_char; NVAPI_SHORT_STRING_MAX];
-
-    // https://github.com/NVIDIA/nvapi/blob/7cb76fce2f52de818b3da497af646af1ec16ce27/nvapi_lite_common.h#L447
-    #[allow(non_camel_case_types)]
-    type NvAPI_SYS_GetDriverAndBranchVersion_t = unsafe extern "C" fn(
-        driver_version: *mut c_uint,
-        build_branch_string: *mut NvAPI_ShortString,
-    ) -> c_int;
-
-    pub(super) fn get_driver_version() -> Result<String> {
-        #[cfg(target_pointer_width = "64")]
-        let nvidia_dll_name = s!("nvapi64.dll");
-        #[cfg(target_pointer_width = "32")]
-        let nvidia_dll_name = s!("nvapi.dll");
-
-        with_dll_library(nvidia_dll_name, |nvidia_dll| unsafe {
-            let nvapi_query_addr = GetProcAddress(nvidia_dll, s!("nvapi_QueryInterface"))
-                .ok_or_else(|| anyhow::anyhow!("Failed to get nvapi_QueryInterface address"))?;
-            let nvapi_query: extern "C" fn(u32) -> *mut () = std::mem::transmute(nvapi_query_addr);
-
-            // https://github.com/NVIDIA/nvapi/blob/7cb76fce2f52de818b3da497af646af1ec16ce27/nvapi_interface.h#L41
-            let nvapi_get_driver_version_ptr = nvapi_query(0x2926aaad);
-            if nvapi_get_driver_version_ptr.is_null() {
-                anyhow::bail!("Failed to get NVIDIA driver version function pointer");
-            }
-            let nvapi_get_driver_version: NvAPI_SYS_GetDriverAndBranchVersion_t =
-                std::mem::transmute(nvapi_get_driver_version_ptr);
-
-            let mut driver_version: c_uint = 0;
-            let mut build_branch_string: NvAPI_ShortString = [0; NVAPI_SHORT_STRING_MAX];
-            let result = nvapi_get_driver_version(
-                &mut driver_version as *mut c_uint,
-                &mut build_branch_string as *mut NvAPI_ShortString,
-            );
-
-            if result != 0 {
-                anyhow::bail!(
-                    "Failed to get NVIDIA driver version, error code: {}",
-                    result
-                );
-            }
-            let major = driver_version / 100;
-            let minor = driver_version % 100;
-            let branch_string = CStr::from_ptr(build_branch_string.as_ptr());
-            Ok(format!(
-                "{}.{} {}",
-                major,
-                minor,
-                branch_string.to_string_lossy()
-            ))
-        })
-    }
-}
-
-mod amd {
-    use std::os::raw::{c_char, c_int, c_void};
-
-    use anyhow::Result;
-    use windows::{Win32::System::LibraryLoader::GetProcAddress, core::s};
-
-    use super::with_dll_library;
-
-    // https://github.com/GPUOpen-LibrariesAndSDKs/AGS_SDK/blob/5d8812d703d0335741b6f7ffc37838eeb8b967f7/ags_lib/inc/amd_ags.h#L145
-    const AGS_CURRENT_VERSION: i32 = (6 << 22) | (3 << 12);
-
-    // https://github.com/GPUOpen-LibrariesAndSDKs/AGS_SDK/blob/5d8812d703d0335741b6f7ffc37838eeb8b967f7/ags_lib/inc/amd_ags.h#L204
-    // This is an opaque type, using struct to represent it properly for FFI
-    #[repr(C)]
-    struct AGSContext {
-        _private: [u8; 0],
-    }
-
-    #[repr(C)]
-    pub struct AGSGPUInfo {
-        pub driver_version: *const c_char,
-        pub radeon_software_version: *const c_char,
-        pub num_devices: c_int,
-        pub devices: *mut c_void,
-    }
-
-    // https://github.com/GPUOpen-LibrariesAndSDKs/AGS_SDK/blob/5d8812d703d0335741b6f7ffc37838eeb8b967f7/ags_lib/inc/amd_ags.h#L429
-    #[allow(non_camel_case_types)]
-    type agsInitialize_t = unsafe extern "C" fn(
-        version: c_int,
-        config: *const c_void,
-        context: *mut *mut AGSContext,
-        gpu_info: *mut AGSGPUInfo,
-    ) -> c_int;
-
-    // https://github.com/GPUOpen-LibrariesAndSDKs/AGS_SDK/blob/5d8812d703d0335741b6f7ffc37838eeb8b967f7/ags_lib/inc/amd_ags.h#L436
-    #[allow(non_camel_case_types)]
-    type agsDeInitialize_t = unsafe extern "C" fn(context: *mut AGSContext) -> c_int;
-
-    pub(super) fn get_driver_version() -> Result<String> {
-        #[cfg(target_pointer_width = "64")]
-        let amd_dll_name = s!("amd_ags_x64.dll");
-        #[cfg(target_pointer_width = "32")]
-        let amd_dll_name = s!("amd_ags_x86.dll");
-
-        with_dll_library(amd_dll_name, |amd_dll| unsafe {
-            let ags_initialize_addr = GetProcAddress(amd_dll, s!("agsInitialize"))
-                .ok_or_else(|| anyhow::anyhow!("Failed to get agsInitialize address"))?;
-            let ags_deinitialize_addr = GetProcAddress(amd_dll, s!("agsDeInitialize"))
-                .ok_or_else(|| anyhow::anyhow!("Failed to get agsDeInitialize address"))?;
-
-            let ags_initialize: agsInitialize_t = std::mem::transmute(ags_initialize_addr);
-            let ags_deinitialize: agsDeInitialize_t = std::mem::transmute(ags_deinitialize_addr);
-
-            let mut context: *mut AGSContext = std::ptr::null_mut();
-            let mut gpu_info: AGSGPUInfo = AGSGPUInfo {
-                driver_version: std::ptr::null(),
-                radeon_software_version: std::ptr::null(),
-                num_devices: 0,
-                devices: std::ptr::null_mut(),
-            };
-
-            let result = ags_initialize(
-                AGS_CURRENT_VERSION,
-                std::ptr::null(),
-                &mut context,
-                &mut gpu_info,
-            );
-            if result != 0 {
-                anyhow::bail!("Failed to initialize AMD AGS, error code: {}", result);
-            }
-
-            // Vulkan actually returns this as the driver version
-            let software_version = if !gpu_info.radeon_software_version.is_null() {
-                std::ffi::CStr::from_ptr(gpu_info.radeon_software_version)
-                    .to_string_lossy()
-                    .into_owned()
-            } else {
-                "Unknown Radeon Software Version".to_string()
-            };
-
-            let driver_version = if !gpu_info.driver_version.is_null() {
-                std::ffi::CStr::from_ptr(gpu_info.driver_version)
-                    .to_string_lossy()
-                    .into_owned()
-            } else {
-                "Unknown Radeon Driver Version".to_string()
-            };
-
-            ags_deinitialize(context);
-            Ok(format!("{} ({})", software_version, driver_version))
-        })
     }
 }
 
@@ -2953,7 +2562,7 @@ mod tests {
 
     fn tile(atlas: &dyn PlatformAtlas, key: AtlasKey, bytes: Vec<u8>) -> AtlasTile {
         atlas
-            .get_or_insert_with(&key, &mut || {
+            .get_or_insert_with(key, &mut || {
                 Ok(Some((
                     Size {
                         width: DevicePixels(8),

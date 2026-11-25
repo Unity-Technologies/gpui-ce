@@ -1,5 +1,6 @@
 use gpui::{DevicePixels, Size, get_gamma_correction_ratios};
 
+#[derive(Clone, Copy, Debug)]
 pub struct WgpuSurfaceConfig {
     pub size: Size<DevicePixels>,
     pub transparent: bool,
@@ -60,19 +61,12 @@ impl FontRasterizationSettings {
 }
 
 pub(super) struct RenderingParameters {
-    pub(super) path_sample_count: u32,
     pub(super) font_rasterization: FontRasterizationSettings,
 }
 
 impl RenderingParameters {
-    pub(super) fn new(adapter: &wgpu::Adapter, surface_format: wgpu::TextureFormat) -> Self {
-        let format_features = adapter.get_texture_format_features(surface_format);
-        let path_sample_count = [4, 2, 1]
-            .into_iter()
-            .find(|&sample_count| format_features.flags.sample_count_supported(sample_count))
-            .unwrap_or(1);
+    pub(super) fn new() -> Self {
         Self {
-            path_sample_count,
             font_rasterization: FontRasterizationSettings::from_environment(),
         }
     }

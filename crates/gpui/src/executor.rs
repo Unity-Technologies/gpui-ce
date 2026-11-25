@@ -1,4 +1,4 @@
-use crate::{App, PlatformDispatcher, PlatformScheduler};
+use crate::{ActivityGuard, App, PlatformDispatcher, PlatformScheduler};
 #[cfg(not(target_family = "wasm"))]
 use futures::channel::mpsc;
 use futures::prelude::*;
@@ -89,6 +89,13 @@ impl BackgroundExecutor {
     /// This is used by Ex to pass the executor to thread/worktree code.
     pub fn scheduler_executor(&self) -> scheduler::BackgroundExecutor {
         self.inner.clone()
+    }
+
+    /// Prevents App Nap-style throttling while the returned guard is held.
+    ///
+    /// This does not prevent the system from entering idle sleep.
+    pub fn prevent_app_nap(&self, reason: &str) -> ActivityGuard {
+        self.dispatcher.prevent_app_nap(reason)
     }
 
     /// Spawn a closure on a fresh session pinned to its own [`SchedulerLocalExecutor`].
@@ -293,6 +300,15 @@ impl BackgroundExecutor {
     /// Whether we're on the main thread.
     pub fn is_main_thread(&self) -> bool {
         self.dispatcher.is_main_thread()
+    }
+
+    /// Whether this executor runs on the deterministic test scheduler.
+    ///
+    /// Available in every build. Use it, rather than `cfg(feature =
+    /// "test-support")`, for behavior that must differ under tests, so that
+    /// compiling `test-support` into an application doesn't change it.
+    pub fn is_test(&self) -> bool {
+        self.inner.is_test()
     }
 
     #[doc(hidden)]

@@ -1,3 +1,4 @@
+//! The default colors used by GPUI.
 use crate::{App, Global, Window, WindowAppearance, rgb};
 use palette::rgb::Rgba;
 use std::ops::Deref;

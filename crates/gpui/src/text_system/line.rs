@@ -23,7 +23,6 @@ pub struct ShapedLine {
 
 impl ShapedLine {
     /// The length of the line in utf-8 bytes.
-    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.layout.len
     }
@@ -202,7 +201,7 @@ fn paint_inline_layout(
 
     let text_system = cx.text_system().clone();
     let placement = place_inline_layout(origin, inline.alignment_offset, window);
-    window.paint_layer(Bounds::new(placement.origin, inline.size), |window| {
+    window.paint_layer(|window| {
         for (line, visual_line) in inline.lines.iter().zip(&inline.layout.visual_lines) {
             let line_origin = origin + line.origin + placement.delta;
             paint_visual_line(
@@ -349,8 +348,7 @@ fn paint_visual_text(
         return Ok(());
     }
 
-    let line_bounds = visual_text_bounds(origin, line_height, align, align_width, visual_lines);
-    window.paint_layer(line_bounds, |window| {
+    window.paint_layer(|window| {
         let padding_top = (line_height - layout.ascent - layout.descent) / 2.;
         let text_system = cx.text_system().clone();
 
@@ -373,27 +371,6 @@ fn paint_visual_text(
 
         Ok(())
     })
-}
-
-fn visual_text_bounds(
-    origin: Point<Pixels>,
-    line_height: Pixels,
-    align: TextAlign,
-    align_width: Option<Pixels>,
-    visual_lines: &[VisualLine],
-) -> Bounds<Pixels> {
-    let mut left = Pixels::MAX;
-    let mut right = Pixels::MIN;
-
-    for line in visual_lines {
-        let line_left = visual_line_origin_x(origin.x, align, align_width, line);
-        left = left.min(line_left);
-        right = right.max(line_left + line.advance_width);
-    }
-    Bounds::new(
-        point(left, origin.y),
-        size(right - left, line_height * visual_lines.len() as f32),
-    )
 }
 
 fn visual_line_origin_x(

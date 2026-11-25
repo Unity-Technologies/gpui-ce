@@ -50,7 +50,7 @@ impl WgpuRenderer {
     #[cfg(target_os = "macos")]
     pub fn new_for_metal_layer(
         gpu_context: GpuContext,
-        layer: &metal::MetalLayerRef,
+        layer: &objc2_quartz_core::CAMetalLayer,
         config: WgpuSurfaceConfig,
         extra_requirements: Option<WgpuDeviceRequirements>,
     ) -> anyhow::Result<Self> {
@@ -74,6 +74,7 @@ impl WgpuRenderer {
         extra_requirements: Option<WgpuDeviceRequirements>,
     ) -> anyhow::Result<Self> {
         let mut context_slot = gpu_context.borrow_mut();
+        let surface_configured = context_slot.is_none();
         let (context, surface) = match context_slot.as_mut() {
             Some(context) => {
                 let surface = create_surface(&context.instance, surface_target)?;
@@ -84,6 +85,7 @@ impl WgpuRenderer {
                 let (context, surface) = initialize_context_and_surface(
                     display,
                     surface_target,
+                    &config,
                     compositor_gpu,
                     SoftwareAdapterPolicy::Allow,
                     extra_requirements.as_ref(),
@@ -97,6 +99,7 @@ impl WgpuRenderer {
             context,
             Some(surface),
             config,
+            surface_configured,
             compositor_gpu,
             extra_requirements,
             atlas,
@@ -150,6 +153,7 @@ impl WgpuRenderer {
             context,
             Some(surface),
             config,
+            false,
             None,
             None,
             Arc::new(WgpuAtlas::from_context(context)),
@@ -368,7 +372,10 @@ impl WgpuRenderer {
 
     /// Recovers a renderer made by [`Self::new_for_metal_layer`].
     #[cfg(target_os = "macos")]
-    pub fn recover_metal_layer(&mut self, layer: &metal::MetalLayerRef) -> anyhow::Result<()> {
+    pub fn recover_metal_layer(
+        &mut self,
+        layer: &objc2_quartz_core::CAMetalLayer,
+    ) -> anyhow::Result<()> {
         self.recover_target(&|| None, NativeSurfaceTarget::metal_layer(layer))
     }
 
@@ -400,6 +407,7 @@ impl WgpuRenderer {
             self.faults.recovery_not_before = None;
         }
 
+        let config = self.target.recovery_config();
         let surface = if needs_new_context {
             log::warn!("GPU device lost, recreating context...");
             self.resources = None;
@@ -407,6 +415,7 @@ impl WgpuRenderer {
             let (new_context, surface) = match initialize_context_and_surface(
                 display,
                 surface_target,
+                &config,
                 self.compositor_gpu,
                 SoftwareAdapterPolicy::Reject,
                 self.extra_requirements.as_ref(),
@@ -429,7 +438,6 @@ impl WgpuRenderer {
             create_surface(instance, surface_target)?
         };
 
-        let config = self.target.recovery_config();
         let gpu_context = Rc::clone(gpu_context);
         let context_slot = gpu_context.borrow();
         let context = context_slot.as_ref().expect("context should exist");
@@ -443,6 +451,7 @@ impl WgpuRenderer {
             context,
             Some(surface),
             config,
+            needs_new_context,
             self.compositor_gpu,
             self.extra_requirements.clone(),
             Arc::clone(&self.atlas),
@@ -484,9 +493,12 @@ enum NativeSurfaceTarget {
 
 #[cfg(target_os = "macos")]
 impl NativeSurfaceTarget {
-    fn metal_layer(layer: &metal::MetalLayerRef) -> Self {
-        use metal::foreign_types::ForeignTypeRef as _;
-        Self::MetalLayer(layer.as_ptr().cast())
+    fn metal_layer(layer: &objc2_quartz_core::CAMetalLayer) -> Self {
+        Self::MetalLayer(
+            (layer as *const objc2_quartz_core::CAMetalLayer)
+                .cast_mut()
+                .cast(),
+        )
     }
 }
 
@@ -499,6 +511,7 @@ type DisplayHandleSource<'a> = &'a dyn Fn() -> Option<Box<dyn wgpu::wgt::WgpuHas
 fn initialize_context_and_surface(
     display: DisplayHandleSource<'_>,
     surface_target: NativeSurfaceTarget,
+    config: &WgpuSurfaceConfig,
     compositor_gpu: Option<CompositorGpuHint>,
     adapter_policy: SoftwareAdapterPolicy,
     extra_requirements: Option<&WgpuDeviceRequirements>,
@@ -510,6 +523,7 @@ fn initialize_context_and_surface(
         let context = WgpuContext::new_with_adapter_policy(
             instance,
             &surface,
+            config,
             compositor_gpu,
             adapter_policy,
             extra_requirements,
@@ -573,7 +587,7 @@ mod tests {
 
     fn renderer(
         context: &GpuContext,
-        layer: &metal::MetalLayerRef,
+        layer: &objc2_quartz_core::CAMetalLayer,
     ) -> anyhow::Result<WgpuRenderer> {
         WgpuRenderer::new_for_metal_layer(
             Rc::clone(context),
@@ -618,7 +632,10 @@ mod tests {
     #[test]
     fn metal_layer_renderers_recover_onto_one_new_device() -> anyhow::Result<()> {
         let context = GpuContext::default();
-        let (first_layer, second_layer) = (metal::MetalLayer::new(), metal::MetalLayer::new());
+        let (first_layer, second_layer) = (
+            objc2_quartz_core::CAMetalLayer::new(),
+            objc2_quartz_core::CAMetalLayer::new(),
+        );
         let mut first = renderer(&context, &first_layer)?;
         let mut second = renderer(&context, &second_layer)?;
         let (lost_device, _) = first.gpu_context();

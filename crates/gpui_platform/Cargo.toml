@@ -1,6 +1,6 @@
 [package]
 name = "gpui_ce_platform"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 description.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -20,6 +20,7 @@ bench-support = [
   "gpui_macos/bench-support",
 ]
 font-kit = ["gpui_macos/font-kit"]
+inspector = ["gpui/inspector"]
 test-support = [
   "gpui/test-support",
   "gpui_apple/test-support",
@@ -50,6 +51,11 @@ windows-wgpu = ["gpui_windows/wgpu"]
 wayland = ["gpui_linux/wayland"]
 x11 = ["gpui_linux/x11"]
 
+[[bench]]
+name = "inspector_render"
+harness = false
+required-features = ["bench-support"]
+
 [dependencies]
 gpui = { workspace = true, default-features = false }
 
@@ -58,6 +64,7 @@ gpui_fonts = { path = "../gpui_ce_fonts", package = "gpui-ce-fonts" }
 gpui_parley.workspace = true
 gpui_render = { workspace = true, features = ["swash"] }
 image = { workspace = true, features = ["png"] }
+criterion.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui_apple.workspace = true
@@ -84,7 +91,7 @@ gpui = { workspace = true, features = ["windows-manifest"] }
 gpui_linux.workspace = true
 
 [target.'cfg(target_family = "wasm")'.dependencies]
-gpui_web = { path = "../gpui_web", version = "=0.4.0-unity.20261112", registry = "unity", package = "gpui_ce_web", default-features = false }
+gpui_web = { path = "../gpui_web", version = "=0.4.0-unity.20261125", registry = "unity", package = "gpui_ce_web", default-features = false }
 console_error_panic_hook.workspace = true
 
 [[test]]

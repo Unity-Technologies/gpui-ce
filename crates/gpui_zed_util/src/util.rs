@@ -44,8 +44,6 @@ pub use gpui_util::*;
 pub use path::PathExt;
 pub use path::rel_path;
 
-pub use take_until::*;
-
 #[cfg(not(target_family = "wasm"))]
 pub use self::shell::{
     get_default_system_shell, get_default_system_shell_preferring_bash, get_system_shell,
@@ -586,11 +584,6 @@ mod rng {
                 rng,
                 simple_text: std::env::var("SIMPLE_TEXT").is_ok_and(|v| !v.is_empty()),
             }
-        }
-
-        pub fn with_simple_text(mut self) -> Self {
-            self.simple_text = true;
-            self
         }
     }
 

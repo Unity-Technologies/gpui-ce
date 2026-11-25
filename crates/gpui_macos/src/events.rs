@@ -2,7 +2,7 @@ use gpui::{
     Capslock, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, ModifiersChangedEvent, MouseButton,
     MouseDownEvent, MouseExitEvent, MouseMoveEvent, MousePressureEvent, MouseUpEvent,
     NavigationDirection, PinchEvent, Pixels, PlatformInput, PressureStage, ScrollDelta,
-    ScrollWheelEvent, TouchPhase, point, px,
+    ScrollEvent, ScrollSource, TouchPhase, point, px,
 };
 
 use crate::{
@@ -23,10 +23,17 @@ pub(crate) const ESCAPE_KEY: u32 = 0x1b;
 const TAB_KEY: u32 = 0x09;
 const SHIFT_TAB_KEY: u32 = 0x19;
 
-pub fn key_to_native(key: &str) -> Cow<'_, str> {
+// Menu key equivalents use different character values than the ones NSEvent
+// reports for the same physical keys.
+//
+// See https://developer.apple.com/documentation/appkit/nsmenuitem/keyequivalent#Discussion
+const BACKSPACE_KEY_EQUIVALENT: u32 = 0x08;
+const DELETE_KEY_EQUIVALENT: u32 = 0x7f;
+
+pub(crate) fn key_to_menu_equivalent(key: &str) -> Cow<'_, str> {
     let code = match key {
         "space" => SPACE_KEY,
-        "backspace" => BACKSPACE_KEY,
+        "backspace" => BACKSPACE_KEY_EQUIVALENT,
         "escape" => ESCAPE_KEY,
         "up" => NSUpArrowFunctionKey,
         "down" => NSDownArrowFunctionKey,
@@ -36,7 +43,7 @@ pub fn key_to_native(key: &str) -> Cow<'_, str> {
         "pagedown" => NSPageDownFunctionKey,
         "home" => NSHomeFunctionKey,
         "end" => NSEndFunctionKey,
-        "delete" => NSDeleteFunctionKey,
+        "delete" => DELETE_KEY_EQUIVALENT,
         "insert" => NSHelpFunctionKey,
         "f1" => NSF1FunctionKey,
         "f2" => NSF2FunctionKey,
@@ -268,7 +275,7 @@ pub(crate) unsafe fn platform_input_from_native(
                     ScrollDelta::Lines(raw_data)
                 };
 
-                PlatformInput::ScrollWheel(ScrollWheelEvent {
+                PlatformInput::Scroll(ScrollEvent {
                     position: point(
                         px(native_event.locationInWindow().x as f32),
                         window_height - px(native_event.locationInWindow().y as f32),
@@ -276,6 +283,7 @@ pub(crate) unsafe fn platform_input_from_native(
                     delta,
                     touch_phase: phase,
                     modifiers: read_modifiers(native_event),
+                    source: ScrollSource::Pointer,
                 })
             }),
             NSEventType::LeftMouseDragged

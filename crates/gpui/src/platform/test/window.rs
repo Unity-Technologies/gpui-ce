@@ -1,12 +1,11 @@
 use crate::{
-    AnyWindowHandle, AtlasKey, AtlasTextureId, AtlasTile, Bounds, DevicePixels,
-    DispatchEventResult, GlyphAtlasCache, GlyphAtlasEntry, GpuSpecs, Pixels, PlatformAtlas,
-    PlatformDisplay, PlatformHeadlessRenderer, PlatformInput, PlatformInputHandler, PlatformWindow,
-    Point, PromptButton, RenderGlyphParams, RequestFrameOptions, Scene, Size, TestPlatform,
-    TextInputConfiguration, TextInputStateChange, TileId, ValidatedRasterizedGlyph,
-    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowParams,
+    AnyWindowHandle, Bounds, Decorations, DevicePixels, DispatchEventResult, DisplayId, GpuSpecs,
+    HeadlessAtlas, KeyDownEvent, NativeViewId, Pixels, Platform, PlatformAtlas, PlatformDisplay,
+    PlatformHeadlessRenderer, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
+    PromptButton, RequestFrameOptions, Scene, Size, TestDisplay, TestPlatform,
+    TextInputConfiguration, TextInputStateChange, WindowAppearance, WindowBackgroundAppearance,
+    WindowBounds, WindowControlArea, WindowInsets, WindowParams, WindowVisibility,
 };
-use collections::HashMap;
 use gpui_util::ResultExt as _;
 #[cfg(any(test, feature = "test-support"))]
 use image::RgbaImage;
@@ -33,11 +32,25 @@ pub(crate) struct TestWindowState {
     scale_factor: f32,
     pub(crate) should_close_handler: Option<Box<dyn FnMut() -> bool>>,
     hit_test_window_control_callback: Option<Box<dyn FnMut() -> Option<WindowControlArea>>>,
+    attached_native_views: Rc<Cell<usize>>,
+    focused_native_view: Option<NativeViewId>,
+    hit_test_native_view_callback: Option<Box<dyn FnMut(Point<Pixels>) -> Option<NativeViewId>>>,
+    native_view_focused_callback: Option<Box<dyn FnMut(NativeViewId)>>,
+    key_down_before_native_view_callback: Option<Box<dyn FnMut(KeyDownEvent) -> bool>>,
     input_callback: Option<Box<dyn FnMut(PlatformInput) -> DispatchEventResult>>,
     active_status_change_callback: Option<Box<dyn FnMut(bool)>>,
+    visibility: WindowVisibility,
+    visibility_callback: Option<Box<dyn FnMut(WindowVisibility)>>,
     hover_status_change_callback: Option<Box<dyn FnMut(bool)>>,
     resize_callback: Option<Box<dyn FnMut(Size<Pixels>, f32)>>,
+    visual_viewport: Option<Bounds<Pixels>>,
+    visual_viewport_callback: Option<Box<dyn FnMut()>>,
+    insets: WindowInsets,
+    insets_callback: Option<Box<dyn FnMut(WindowInsets)>>,
+    virtual_keyboard_requests: usize,
+    virtual_keyboard_dismissals: usize,
     moved_callback: Option<Box<dyn FnMut()>>,
+    display_changed_callback: Option<Box<dyn FnMut()>>,
     appearance_change_callback: Option<Box<dyn FnMut()>>,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     frame_wake_count: Rc<Cell<usize>>,
@@ -49,6 +62,7 @@ pub(crate) struct TestWindowState {
     visible: bool,
     is_fullscreen: bool,
     appearance: WindowAppearance,
+    decorations: Decorations,
     external_drag_files: Vec<(PathBuf, bool)>,
     start_external_drag_result: bool,
 }
@@ -85,7 +99,7 @@ impl TestWindow {
     ) -> Self {
         let sprite_atlas: Arc<dyn PlatformAtlas> = match &renderer {
             Some(r) => r.sprite_atlas(),
-            None => Arc::new(TestAtlas::new()),
+            None => Arc::new(HeadlessAtlas::default()),
         };
         Self(Rc::new(Mutex::new(TestWindowState {
             bounds: params.bounds,
@@ -102,10 +116,24 @@ impl TestWindow {
             hit_test_window_control_callback: None,
             input_callback: None,
             active_status_change_callback: None,
+            visibility: WindowVisibility::Visible,
+            visibility_callback: None,
             hover_status_change_callback: None,
             resize_callback: None,
+            visual_viewport: None,
+            visual_viewport_callback: None,
+            insets: WindowInsets::default(),
+            insets_callback: None,
+            virtual_keyboard_requests: 0,
+            virtual_keyboard_dismissals: 0,
             moved_callback: None,
+            display_changed_callback: None,
             appearance_change_callback: None,
+            attached_native_views: Rc::new(Cell::new(0)),
+            focused_native_view: None,
+            hit_test_native_view_callback: None,
+            native_view_focused_callback: None,
+            key_down_before_native_view_callback: None,
             request_frame_callback: None,
             frame_wake_count: Rc::new(Cell::new(0)),
             frame_scheduled: false,
@@ -116,6 +144,7 @@ impl TestWindow {
             visible: params.show,
             is_fullscreen: false,
             appearance: WindowAppearance::Light,
+            decorations: Decorations::default(),
             external_drag_files: Vec::new(),
             start_external_drag_result: false,
         })))
@@ -141,6 +170,63 @@ impl TestWindow {
 
     pub fn frame_scheduled(&self) -> bool {
         self.0.lock().frame_scheduled
+    }
+
+    pub fn simulate_visibility_change(&self, visibility: WindowVisibility) {
+        let callback = {
+            let mut state = self.0.lock();
+            state.visibility = visibility;
+            state.visibility_callback.take()
+        };
+        if let Some(mut callback) = callback {
+            callback(visibility);
+            self.0.lock().visibility_callback = Some(callback);
+        }
+    }
+
+    /// Moves the window to the display with the given ID.
+    pub fn simulate_move_to_display(&self, display_id: DisplayId) {
+        let callback = {
+            let mut state = self.0.lock();
+            state.display = Rc::new(TestDisplay::with_id(display_id));
+            state.display_changed_callback.take()
+        };
+        if let Some(mut callback) = callback {
+            callback();
+            self.0.lock().display_changed_callback = Some(callback);
+        }
+    }
+
+    pub fn simulate_visual_viewport_change(&self, bounds: Bounds<Pixels>) {
+        let callback = {
+            let mut state = self.0.lock();
+            state.visual_viewport = Some(bounds);
+            state.visual_viewport_callback.take()
+        };
+        if let Some(mut callback) = callback {
+            callback();
+            self.0.lock().visual_viewport_callback = Some(callback);
+        }
+    }
+
+    pub fn simulate_insets_change(&self, insets: WindowInsets) {
+        let callback = {
+            let mut state = self.0.lock();
+            state.insets = insets.clone();
+            state.insets_callback.take()
+        };
+        if let Some(mut callback) = callback {
+            callback(insets);
+            self.0.lock().insets_callback = Some(callback);
+        }
+    }
+
+    pub fn virtual_keyboard_requests(&self) -> usize {
+        self.0.lock().virtual_keyboard_requests
+    }
+
+    pub fn virtual_keyboard_dismissals(&self) -> usize {
+        self.0.lock().virtual_keyboard_dismissals
     }
 
     /// Returns whether this test window is visible.
@@ -185,6 +271,47 @@ impl TestWindow {
         self.0.lock().resize_callback = Some(callback);
     }
 
+    /// How many native views are attached to the window.
+    pub fn attached_native_view_count(&self) -> usize {
+        self.0.lock().attached_native_views.get()
+    }
+
+    /// The native view the window last gave keyboard input to.
+    pub fn focused_native_view(&self) -> Option<NativeViewId> {
+        self.0.lock().focused_native_view
+    }
+
+    /// Asks the window which native view a mouse event at `position` reaches.
+    pub fn hit_test_native_view(&self, position: Point<Pixels>) -> Option<NativeViewId> {
+        let mut callback = self.0.lock().hit_test_native_view_callback.take()?;
+        let id = callback(position);
+        self.0.lock().hit_test_native_view_callback = Some(callback);
+        id
+    }
+
+    /// Acts as if the user pressed a key while a native view had keyboard input,
+    /// and returns whether the window used the key before the view saw it.
+    pub fn simulate_key_down_before_native_view(&self, event: KeyDownEvent) -> bool {
+        let Some(mut callback) = self.0.lock().key_down_before_native_view_callback.take() else {
+            return false;
+        };
+        let handled = callback(event);
+        self.0.lock().key_down_before_native_view_callback = Some(callback);
+        handled
+    }
+
+    /// Acts as if the user moved keyboard input to a native view through the platform.
+    pub fn simulate_native_view_focused(&self, id: NativeViewId) {
+        let mut lock = self.0.lock();
+        lock.focused_native_view = Some(id);
+        let Some(mut callback) = lock.native_view_focused_callback.take() else {
+            return;
+        };
+        drop(lock);
+        callback(id);
+        self.0.lock().native_view_focused_callback = Some(callback);
+    }
+
     pub(crate) fn simulate_active_status_change(&self, active: bool) {
         let mut lock = self.0.lock();
         let Some(mut callback) = lock.active_status_change_callback.take() else {
@@ -198,6 +325,17 @@ impl TestWindow {
     pub fn simulate_appearance_change(&self, appearance: WindowAppearance) {
         let mut lock = self.0.lock();
         lock.appearance = appearance;
+        let Some(mut callback) = lock.appearance_change_callback.take() else {
+            return;
+        };
+        drop(lock);
+        callback();
+        self.0.lock().appearance_change_callback = Some(callback);
+    }
+
+    pub fn simulate_decorations_change(&self, decorations: Decorations) {
+        let mut lock = self.0.lock();
+        lock.decorations = decorations;
         let Some(mut callback) = lock.appearance_change_callback.take() else {
             return;
         };
@@ -244,6 +382,33 @@ impl TestWindow {
 }
 
 impl PlatformWindow for TestWindow {
+    fn visual_viewport_bounds(&self) -> Bounds<Pixels> {
+        let state = self.0.lock();
+        state
+            .visual_viewport
+            .unwrap_or_else(|| Bounds::new(Point::default(), state.bounds.size))
+    }
+
+    fn on_visual_viewport_changed(&self, callback: Box<dyn FnMut()>) {
+        self.0.lock().visual_viewport_callback = Some(callback);
+    }
+
+    fn insets(&self) -> WindowInsets {
+        self.0.lock().insets.clone()
+    }
+
+    fn on_insets_changed(&self, callback: Box<dyn FnMut(WindowInsets)>) {
+        self.0.lock().insets_callback = Some(callback);
+    }
+
+    fn show_soft_keyboard(&self) {
+        self.0.lock().virtual_keyboard_requests += 1;
+    }
+
+    fn hide_soft_keyboard(&self) {
+        self.0.lock().virtual_keyboard_dismissals += 1;
+    }
+
     fn bounds(&self) -> Bounds<Pixels> {
         self.0.lock().bounds
     }
@@ -339,6 +504,10 @@ impl PlatformWindow for TestWindow {
         false
     }
 
+    fn visibility(&self) -> WindowVisibility {
+        self.0.lock().visibility
+    }
+
     fn is_hovered(&self) -> bool {
         false
     }
@@ -384,8 +553,21 @@ impl PlatformWindow for TestWindow {
     }
 
     fn toggle_fullscreen(&self) {
-        let mut lock = self.0.lock();
-        lock.is_fullscreen = !lock.is_fullscreen;
+        let platform = {
+            let mut lock = self.0.lock();
+            lock.is_fullscreen = !lock.is_fullscreen;
+            lock.platform.upgrade()
+        };
+        if let Some(platform) = platform {
+            let mut window = self.clone();
+            platform
+                .foreground_executor()
+                .spawn(async move {
+                    let size = window.0.lock().bounds.size;
+                    window.simulate_resize(size);
+                })
+                .detach();
+        }
     }
 
     fn is_fullscreen(&self) -> bool {
@@ -425,6 +607,10 @@ impl PlatformWindow for TestWindow {
         self.0.lock().active_status_change_callback = Some(callback)
     }
 
+    fn on_visibility_change(&self, callback: Box<dyn FnMut(WindowVisibility)>) {
+        self.0.lock().visibility_callback = Some(callback);
+    }
+
     fn on_hover_status_change(&self, callback: Box<dyn FnMut(bool)>) {
         self.0.lock().hover_status_change_callback = Some(callback)
     }
@@ -437,6 +623,10 @@ impl PlatformWindow for TestWindow {
         self.0.lock().moved_callback = Some(callback)
     }
 
+    fn on_display_changed(&self, callback: Box<dyn FnMut()>) {
+        self.0.lock().display_changed_callback = Some(callback)
+    }
+
     fn on_should_close(&self, callback: Box<dyn FnMut() -> bool>) {
         self.0.lock().should_close_handler = Some(callback);
     }
@@ -445,6 +635,45 @@ impl PlatformWindow for TestWindow {
 
     fn on_hit_test_window_control(&self, callback: Box<dyn FnMut() -> Option<WindowControlArea>>) {
         self.0.lock().hit_test_window_control_callback = Some(callback);
+    }
+
+    /// Counts the view as attached without ever reading `_view`, so tests may
+    /// pass a dangling pointer.
+    unsafe fn attach_native_view(
+        &self,
+        _id: NativeViewId,
+        _view: std::ptr::NonNull<std::ffi::c_void>,
+    ) -> Option<Box<dyn std::any::Any>> {
+        struct Attachment(Rc<Cell<usize>>);
+
+        impl Drop for Attachment {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() - 1);
+            }
+        }
+
+        let attached_native_views = self.0.lock().attached_native_views.clone();
+        attached_native_views.set(attached_native_views.get() + 1);
+        Some(Box::new(Attachment(attached_native_views)))
+    }
+
+    fn set_focused_native_view(&self, id: Option<NativeViewId>) {
+        self.0.lock().focused_native_view = id;
+    }
+
+    fn on_key_down_before_native_view(&self, callback: Box<dyn FnMut(KeyDownEvent) -> bool>) {
+        self.0.lock().key_down_before_native_view_callback = Some(callback);
+    }
+
+    fn on_hit_test_native_view(
+        &self,
+        callback: Box<dyn FnMut(Point<Pixels>) -> Option<NativeViewId>>,
+    ) {
+        self.0.lock().hit_test_native_view_callback = Some(callback);
+    }
+
+    fn on_native_view_focused(&self, callback: Box<dyn FnMut(NativeViewId)>) {
+        self.0.lock().native_view_focused_callback = Some(callback);
     }
 
     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>) {
@@ -515,118 +744,8 @@ impl PlatformWindow for TestWindow {
     fn gpu_specs(&self) -> Option<GpuSpecs> {
         None
     }
-}
 
-pub(crate) struct TestAtlasState {
-    next_id: u32,
-    tiles: HashMap<AtlasKey, AtlasTile>,
-    glyph_cache: GlyphAtlasCache,
-}
-
-pub(crate) struct TestAtlas(Mutex<TestAtlasState>);
-
-impl TestAtlasState {
-    fn insert_tile(&mut self, key: AtlasKey, size: Size<DevicePixels>) -> AtlasTile {
-        self.next_id += 1;
-        let texture_id = self.next_id;
-        self.next_id += 1;
-        let tile_id = self.next_id;
-        let tile = AtlasTile {
-            texture_id: AtlasTextureId {
-                index: texture_id,
-                kind: key.texture_kind(),
-            },
-            tile_id: TileId(tile_id),
-            padding: 0,
-            bounds: Bounds {
-                origin: Point::default(),
-                size,
-            },
-        };
-
-        self.tiles.insert(key, tile);
-
-        tile
-    }
-}
-
-impl TestAtlas {
-    pub fn new() -> Self {
-        TestAtlas(Mutex::new(TestAtlasState {
-            next_id: 0,
-            tiles: HashMap::default(),
-            glyph_cache: GlyphAtlasCache::default(),
-        }))
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn clear(&self) {
-        let mut state = self.0.lock();
-        state.tiles.clear();
-        state.glyph_cache.clear();
-    }
-}
-
-impl PlatformAtlas for TestAtlas {
-    fn get_or_insert_with<'a>(
-        &self,
-        key: &crate::AtlasKey,
-        build: &mut dyn FnMut() -> anyhow::Result<
-            Option<(Size<crate::DevicePixels>, std::borrow::Cow<'a, [u8]>)>,
-        >,
-    ) -> anyhow::Result<Option<crate::AtlasTile>> {
-        let mut state = self.0.lock();
-        if let Some(&tile) = state.tiles.get(key) {
-            return Ok(Some(tile));
-        }
-        drop(state);
-
-        let Some((size, _)) = build()? else {
-            return Ok(None);
-        };
-
-        let mut state = self.0.lock();
-
-        Ok(Some(state.insert_tile(key.clone(), size)))
-    }
-
-    fn get_or_insert_glyph_with(
-        &self,
-        params: &RenderGlyphParams,
-        build: &mut dyn FnMut() -> anyhow::Result<ValidatedRasterizedGlyph>,
-    ) -> anyhow::Result<GlyphAtlasEntry> {
-        if let Some(entry) = self.0.lock().glyph_cache.get(params) {
-            return Ok(entry);
-        }
-
-        let glyph = build()?;
-
-        let mut state = self.0.lock();
-        let tile = if glyph.size == Size::default() {
-            None
-        } else {
-            let key = (params.clone(), glyph.format).into();
-
-            Some(state.insert_tile(key, glyph.size))
-        };
-
-        Ok(state.glyph_cache.insert(params, &glyph, tile))
-    }
-
-    fn remove(&self, key: &AtlasKey) {
-        let mut state = self.0.lock();
-        state.glyph_cache.remove(key);
-        state.tiles.remove(key);
-    }
-
-    fn contains(&self, key: &AtlasKey) -> bool {
-        let state = self.0.lock();
-        match key {
-            AtlasKey::Glyph { params, format } => state
-                .glyph_cache
-                .get(params)
-                .is_some_and(|entry| entry.format == *format),
-            _ => state.tiles.contains_key(key),
-        }
+    fn window_decorations(&self) -> Decorations {
+        self.0.lock().decorations
     }
 }

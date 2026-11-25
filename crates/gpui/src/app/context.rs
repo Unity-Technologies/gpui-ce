@@ -1,7 +1,7 @@
 use crate::{
     AnyView, AnyWindowHandle, AppContext, AsyncApp, DispatchPhase, EntityId, EventEmitter,
-    FocusHandle, FocusOutEvent, Focusable, Global, KeystrokeObserver, Priority, Reservation,
-    SubscriberSet, Subscription, Task, WeakEntity, WeakFocusHandle, Window, WindowHandle,
+    FocusHandle, FocusOutEvent, Focusable, Global, Priority, Reservation, Subscription, Task,
+    WeakEntity, WeakFocusHandle, Window, WindowHandle, WindowVisibility,
 };
 use anyhow::Result;
 use futures::FutureExt;
@@ -152,14 +152,9 @@ impl<'a, T: 'static> Context<'a, T> {
         T: 'static,
         W: 'static,
     {
-        let this = self.weak_entity();
-        self.app.observe_internal(entity, move |e, cx| {
-            if let Some(this) = this.upgrade() {
-                this.update(cx, |this, cx| on_notify(this, e, cx));
-                true
-            } else {
-                false
-            }
+        let observer = self.weak_entity();
+        self.app.observe_internal(entity, move |entity, cx| {
+            invoke_observer(&observer, entity, cx, &mut on_notify)
         })
     }
 
@@ -238,15 +233,11 @@ impl<'a, T: 'static> Context<'a, T> {
         T2: 'static + EventEmitter<Evt>,
         Evt: 'static,
     {
-        let this = self.weak_entity();
-        self.app.subscribe_internal(entity, move |e, event, cx| {
-            if let Some(this) = this.upgrade() {
-                this.update(cx, |this, cx| on_event(this, e, event, cx));
-                true
-            } else {
-                false
-            }
-        })
+        let subscriber = self.weak_entity();
+        self.app
+            .subscribe_internal(entity, move |entity, event, cx| {
+                invoke_subscriber(&subscriber, entity, event, cx, &mut on_event)
+            })
     }
 
     /// Calls `on_event` whenever this entity emits an event of type `Evt`.
@@ -280,15 +271,13 @@ impl<'a, T: 'static> Context<'a, T> {
     where
         T: 'static,
     {
-        let (subscription, activate) = self.app.release_listeners.insert(
+        self.app.release_listeners.insert(
             self.entity_state.entity_id,
             Box::new(move |this, cx| {
                 let this = this.downcast_mut().expect("invalid entity type");
                 on_release(this, cx);
             }),
-        );
-        activate();
-        subscription
+        )
     }
 
     /// Calls `on_release` when `entity` is released.
@@ -307,7 +296,7 @@ impl<'a, T: 'static> Context<'a, T> {
     {
         let entity_id = entity.entity_id();
         let this = self.weak_entity();
-        let (subscription, activate) = self.app.release_listeners.insert(
+        self.app.release_listeners.insert(
             entity_id,
             Box::new(move |entity, cx| {
                 let entity = entity.downcast_mut().expect("invalid entity type");
@@ -315,9 +304,7 @@ impl<'a, T: 'static> Context<'a, T> {
                     this.update(cx, |this, cx| on_release(this, entity, cx));
                 }
             }),
-        );
-        activate();
-        subscription
+        )
     }
 
     /// Calls `f` whenever the global of type `G` is set or updated.
@@ -333,7 +320,7 @@ impl<'a, T: 'static> Context<'a, T> {
         T: 'static,
     {
         let handle = self.weak_entity();
-        let (subscription, activate) = self.global_observers.insert(
+        let (subscription, activate) = self.global_observers.insert_pending(
             TypeId::of::<G>(),
             Box::new(move |cx| handle.update(cx, |view, cx| f(view, cx)).is_ok()),
         );
@@ -465,6 +452,7 @@ impl<'a, T: 'static> Context<'a, T> {
     ///
     /// See [async work](crate::_documentation::guides::async_work).
     #[track_caller]
+    #[inline(always)]
     pub fn spawn<AsyncFn, R>(&self, f: AsyncFn) -> Task<R>
     where
         T: 'static,
@@ -516,13 +504,16 @@ impl<'a, T: 'static> Context<'a, T> {
     /// ```
     ///
     /// See [ownership and data flow](crate::_documentation::concepts::ownership).
+    #[inline(always)]
     pub fn listener<E: ?Sized>(
         &self,
-        f: impl Fn(&mut T, &E, &mut Window, &mut Context<T>) + 'static,
+        listener: impl Fn(&mut T, &E, &mut Window, &mut Context<T>) + 'static,
     ) -> impl Fn(&E, &mut Window, &mut App) + 'static {
         let view = self.entity().downgrade();
-        move |e: &E, window: &mut Window, cx: &mut App| {
-            view.update(cx, |view, cx| f(view, e, window, cx)).ok();
+        move |event: &E, window: &mut Window, cx: &mut App| {
+            invoke_listener(&view, window, cx, &|view, window, cx| {
+                listener(view, event, window, cx);
+            });
         }
     }
 
@@ -623,17 +614,7 @@ impl<'a, T: 'static> Context<'a, T> {
         self.ensure_window(observer_id, window.handle.id);
         self.new_observer(
             observed_id,
-            Box::new(move |cx| {
-                let Some((observer, observed)) = observer.upgrade().zip(observed.upgrade()) else {
-                    return false;
-                };
-                cx.with_window(observer_id, |window, cx| {
-                    observer.update(cx, |observer, cx| {
-                        on_notify(observer, observed, window, cx);
-                    });
-                });
-                true
-            }),
+            Box::new(move |cx| invoke_observer_in(&observer, &observed, cx, &mut on_notify)),
         )
     }
 
@@ -660,17 +641,7 @@ impl<'a, T: 'static> Context<'a, T> {
             (
                 TypeId::of::<Evt>(),
                 Box::new(move |event, cx| {
-                    let Some((subscriber, emitter)) = subscriber.upgrade().zip(emitter.upgrade())
-                    else {
-                        return false;
-                    };
-                    let event = event.downcast_ref().expect("invalid event type");
-                    cx.with_window(subscriber_id, |window, cx| {
-                        subscriber.update(cx, |subscriber, cx| {
-                            on_event(subscriber, &emitter, event, window, cx);
-                        });
-                    });
-                    true
+                    invoke_subscriber_in(&subscriber, &emitter, event, cx, &mut on_event)
                 }),
             ),
         )
@@ -722,15 +693,10 @@ impl<'a, T: 'static> Context<'a, T> {
         mut callback: impl FnMut(&mut T, &mut Window, &mut Context<T>) + 'static,
     ) -> Subscription {
         let view = self.weak_entity();
-        let (subscription, activate) = window.bounds_observers.insert(
-            (),
-            Box::new(move |window, cx| {
-                view.update(cx, |view, cx| callback(view, window, cx))
-                    .is_ok()
-            }),
-        );
-        activate();
-        subscription
+        window.bounds_observers.insert(Box::new(move |window, cx| {
+            view.update(cx, |view, cx| callback(view, window, cx))
+                .is_ok()
+        }))
     }
 
     /// Calls `callback` when `window` becomes active or inactive.
@@ -743,15 +709,28 @@ impl<'a, T: 'static> Context<'a, T> {
         mut callback: impl FnMut(&mut T, &mut Window, &mut Context<T>) + 'static,
     ) -> Subscription {
         let view = self.weak_entity();
-        let (subscription, activate) = window.activation_observers.insert(
-            (),
-            Box::new(move |window, cx| {
+        window
+            .activation_observers
+            .insert(Box::new(move |window, cx| {
                 view.update(cx, |view, cx| callback(view, window, cx))
                     .is_ok()
-            }),
-        );
-        activate();
-        subscription
+            }))
+    }
+
+    /// Registers a callback to be invoked when the window's visibility changes
+    /// (see [`WindowVisibility`]).
+    pub fn observe_window_visibility(
+        &self,
+        window: &mut Window,
+        mut callback: impl FnMut(&mut T, WindowVisibility, &mut Window, &mut Context<T>) + 'static,
+    ) -> Subscription {
+        let view = self.weak_entity();
+        window
+            .visibility_observers
+            .insert(Box::new(move |visibility, window, cx| {
+                view.update(cx, |view, cx| callback(view, visibility, window, cx))
+                    .is_ok()
+            }))
     }
 
     /// Calls `callback` when the system appearance changes between light and dark.
@@ -764,15 +743,27 @@ impl<'a, T: 'static> Context<'a, T> {
         mut callback: impl FnMut(&mut T, &mut Window, &mut Context<T>) + 'static,
     ) -> Subscription {
         let view = self.weak_entity();
-        let (subscription, activate) = window.appearance_observers.insert(
-            (),
-            Box::new(move |window, cx| {
+        window
+            .appearance_observers
+            .insert(Box::new(move |window, cx| {
                 view.update(cx, |view, cx| callback(view, window, cx))
                     .is_ok()
-            }),
-        );
-        activate();
-        subscription
+            }))
+    }
+
+    /// Registers a callback invoked when the window moves to another display
+    /// or its display's refresh interval changes. See
+    /// [`Window::observe_window_display`].
+    pub fn observe_window_display(
+        &self,
+        window: &mut Window,
+        mut callback: impl FnMut(&mut T, &mut Window, &mut Context<T>) + 'static,
+    ) -> Subscription {
+        let view = self.weak_entity();
+        window.display_observers.insert(Box::new(move |window, cx| {
+            view.update(cx, |view, cx| callback(view, window, cx))
+                .is_ok()
+        }))
     }
 
     /// Calls `callback` when the window's titlebar button layout changes.
@@ -785,15 +776,12 @@ impl<'a, T: 'static> Context<'a, T> {
         mut callback: impl FnMut(&mut T, &mut Window, &mut Context<T>) + 'static,
     ) -> Subscription {
         let view = self.weak_entity();
-        let (subscription, activate) = window.button_layout_observers.insert(
-            (),
-            Box::new(move |window, cx| {
+        window
+            .button_layout_observers
+            .insert(Box::new(move |window, cx| {
                 view.update(cx, |view, cx| callback(view, window, cx))
                     .is_ok()
-            }),
-        );
-        activate();
-        subscription
+            }))
     }
 
     /// Calls `f` for each key-down keystroke in any window that reaches the end of dispatch, or that a
@@ -802,31 +790,21 @@ impl<'a, T: 'static> Context<'a, T> {
     /// The keystroke's `action` is set when a key binding handled it. The callback doesn't run when a
     /// focused element's listener stops propagation. Keep the returned [`Subscription`] alive for as long
     /// as you want the callback to run.
+    /// A standalone modifier keystroke is observed when it is released.
     pub fn observe_keystrokes(
         &mut self,
         mut f: impl FnMut(&mut T, &KeystrokeEvent, &mut Window, &mut Context<T>) + 'static,
     ) -> Subscription {
-        fn inner(
-            keystroke_observers: &SubscriberSet<(), KeystrokeObserver>,
-            handler: KeystrokeObserver,
-        ) -> Subscription {
-            let (subscription, activate) = keystroke_observers.insert((), handler);
-            activate();
-            subscription
-        }
-
         let view = self.weak_entity();
-        inner(
-            &self.keystroke_observers,
-            Box::new(move |event, window, cx| {
+        self.keystroke_observers
+            .insert(Box::new(move |event, window, cx| {
                 if let Some(view) = view.upgrade() {
                     view.update(cx, |view, cx| f(view, event, window, cx));
                     true
                 } else {
                     false
                 }
-            }),
-        )
+            }))
     }
 
     /// Calls `callback` when the pending input of `window` changes.
@@ -840,15 +818,12 @@ impl<'a, T: 'static> Context<'a, T> {
         mut callback: impl FnMut(&mut T, &mut Window, &mut Context<T>) + 'static,
     ) -> Subscription {
         let view = self.weak_entity();
-        let (subscription, activate) = window.pending_input_observers.insert(
-            (),
-            Box::new(move |window, cx| {
+        window
+            .pending_input_observers
+            .insert(Box::new(move |window, cx| {
                 view.update(cx, |view, cx| callback(view, window, cx))
                     .is_ok()
-            }),
-        );
-        activate();
-        subscription
+            }))
     }
 
     /// Calls `listener` when `handle` becomes the focused element.
@@ -943,13 +918,13 @@ impl<'a, T: 'static> Context<'a, T> {
         mut listener: impl FnMut(&mut T, &mut Window, &mut Context<T>) + 'static,
     ) -> Subscription {
         let view = self.weak_entity();
-        let (subscription, activate) = window.focus_lost_listeners.insert(
-            (),
-            Box::new(move |window, cx| {
-                view.update(cx, |view, cx| listener(view, window, cx))
-                    .is_ok()
-            }),
-        );
+        let (subscription, activate) =
+            window
+                .focus_lost_listeners
+                .insert_pending(Box::new(move |window, cx| {
+                    view.update(cx, |view, cx| listener(view, window, cx))
+                        .is_ok()
+                }));
         self.defer(|_| activate());
         subscription
     }
@@ -996,6 +971,7 @@ impl<'a, T: 'static> Context<'a, T> {
     /// The returned [`Task`] cancels the future when it's dropped. Call [`Task::detach`] to let the future
     /// run to completion.
     #[track_caller]
+    #[inline(always)]
     pub fn spawn_in<AsyncFn, R>(&self, window: &Window, f: AsyncFn) -> Task<R>
     where
         R: 'static,
@@ -1010,6 +986,7 @@ impl<'a, T: 'static> Context<'a, T> {
     ///
     /// The returned [`Task`] cancels the future when it is dropped.
     #[track_caller]
+    #[inline(always)]
     pub fn spawn_in_with_priority<AsyncFn, R>(
         &self,
         priority: Priority,
@@ -1036,7 +1013,7 @@ impl<'a, T: 'static> Context<'a, T> {
     ) -> Subscription {
         let window_handle = window.handle;
         let view = self.weak_entity();
-        let (subscription, activate) = self.global_observers.insert(
+        let (subscription, activate) = self.global_observers.insert_pending(
             TypeId::of::<G>(),
             Box::new(move |cx| {
                 // If the entity has been dropped, remove this observer.
@@ -1281,4 +1258,85 @@ impl<T> BorrowMut<App> for Context<'_, T> {
     fn borrow_mut(&mut self) -> &mut App {
         self.app
     }
+}
+
+#[inline(never)]
+fn invoke_observer<T: 'static, W: 'static>(
+    observer: &WeakEntity<T>,
+    observed: Entity<W>,
+    cx: &mut App,
+    on_notify: &mut dyn FnMut(&mut T, Entity<W>, &mut Context<T>),
+) -> bool {
+    if let Some(observer) = observer.upgrade() {
+        observer.update(cx, |observer, cx| on_notify(observer, observed, cx));
+        true
+    } else {
+        false
+    }
+}
+
+#[inline(never)]
+fn invoke_subscriber<T: 'static, Emitter: 'static, Event: 'static>(
+    subscriber: &WeakEntity<T>,
+    emitter: Entity<Emitter>,
+    event: &Event,
+    cx: &mut App,
+    on_event: &mut dyn FnMut(&mut T, Entity<Emitter>, &Event, &mut Context<T>),
+) -> bool {
+    if let Some(subscriber) = subscriber.upgrade() {
+        subscriber.update(cx, |subscriber, cx| {
+            on_event(subscriber, emitter, event, cx)
+        });
+        true
+    } else {
+        false
+    }
+}
+
+#[inline(never)]
+fn invoke_observer_in<T: 'static, W: 'static>(
+    observer: &WeakEntity<T>,
+    observed: &WeakEntity<W>,
+    cx: &mut App,
+    on_notify: &mut dyn FnMut(&mut T, Entity<W>, &mut Window, &mut Context<T>),
+) -> bool {
+    let Some((observer, observed)) = observer.upgrade().zip(observed.upgrade()) else {
+        return false;
+    };
+    cx.with_window(observer.entity_id(), |window, cx| {
+        observer.update(cx, |observer, cx| {
+            on_notify(observer, observed, window, cx);
+        });
+    });
+    true
+}
+
+#[inline(never)]
+fn invoke_subscriber_in<T: 'static, Emitter: 'static, Event: 'static>(
+    subscriber: &WeakEntity<T>,
+    emitter: &WeakEntity<Emitter>,
+    event: &dyn Any,
+    cx: &mut App,
+    on_event: &mut dyn FnMut(&mut T, &Entity<Emitter>, &Event, &mut Window, &mut Context<T>),
+) -> bool {
+    let Some((subscriber, emitter)) = subscriber.upgrade().zip(emitter.upgrade()) else {
+        return false;
+    };
+    let event = event.downcast_ref().expect("invalid event type");
+    cx.with_window(subscriber.entity_id(), |window, cx| {
+        subscriber.update(cx, |subscriber, cx| {
+            on_event(subscriber, &emitter, event, window, cx);
+        });
+    });
+    true
+}
+
+#[inline(never)]
+fn invoke_listener<T: 'static>(
+    view: &WeakEntity<T>,
+    window: &mut Window,
+    cx: &mut App,
+    listener: &dyn Fn(&mut T, &mut Window, &mut Context<T>),
+) {
+    view.update(cx, |view, cx| listener(view, window, cx)).ok();
 }
