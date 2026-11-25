@@ -1,10 +1,10 @@
 use crate::{
     AnyWindowHandle, BackgroundExecutor, ClipboardItem, ContrastPreference, CursorStyle,
-    DevicePixels, DummyKeyboardMapper, ForegroundExecutor, Keymap, Platform, PlatformDisplay,
-    PlatformHeadlessRenderer, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
-    PromptButton, ScreenCaptureFrame, ScreenCaptureSource, ScreenCaptureStream, SharedString,
-    SourceMetadata, SystemColors, SystemNotification, SystemNotificationResponse, Task,
-    TestDisplay, TestWindow, ThermalState, WindowAppearance, WindowParams, size,
+    DevicePixels, DummyKeyboardMapper, ForegroundExecutor, Keymap, OwnedMenu, Platform,
+    PlatformDisplay, PlatformHeadlessRenderer, PlatformKeyboardLayout, PlatformKeyboardMapper,
+    PlatformTextSystem, PromptButton, ScreenCaptureFrame, ScreenCaptureSource, ScreenCaptureStream,
+    SharedString, SourceMetadata, SystemColors, SystemNotification, SystemNotificationResponse,
+    Task, TestDisplay, TestWindow, ThermalState, WindowAppearance, WindowParams, size,
 };
 #[cfg(any(test, feature = "test-support"))]
 use crate::{PathPromptOptions, TestTextSystem};
@@ -47,6 +47,7 @@ pub(crate) struct TestPlatform {
     contrast_preference_change: RefCell<Option<Box<dyn FnMut()>>>,
     forced_colors: Cell<Option<SystemColors>>,
     weak: Weak<Self>,
+    menus: RefCell<Vec<OwnedMenu>>,
 }
 
 /// The scale factor a test window reports unless its platform was given another.
@@ -191,6 +192,7 @@ impl TestPlatform {
             contrast_preference: Cell::new(ContrastPreference::NoPreference),
             contrast_preference_change: RefCell::new(None),
             forced_colors: Cell::new(None),
+            menus: Default::default(),
         })
     }
 
@@ -638,7 +640,14 @@ impl Platform for TestPlatform {
         self.system_notifications.borrow_mut().response_callback = Some(callback);
     }
 
-    fn set_menus(&self, _menus: Vec<crate::Menu>, _keymap: &Keymap) {}
+    fn set_menus(&self, menus: Vec<crate::Menu>, _keymap: &Keymap) {
+        *self.menus.borrow_mut() = menus.into_iter().map(|menu| menu.owned()).collect()
+    }
+
+    fn get_menus(&self) -> Option<Vec<OwnedMenu>> {
+        Some(self.menus.borrow().clone())
+    }
+
     fn set_dock_menu(&self, _menu: Vec<crate::MenuItem>, _keymap: &Keymap) {}
 
     fn add_recent_document(&self, _paths: &Path) {}
