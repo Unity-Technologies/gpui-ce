@@ -60,7 +60,7 @@ pub(super) fn show_character_palette(
     activation_token: Option<String>,
     environment: GraphicalEnvironment,
 ) {
-    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    let desktop = environment.desktop_environment().unwrap_or_default();
     executor
         .spawn(async move {
             let commands = palette_commands(&desktop);
