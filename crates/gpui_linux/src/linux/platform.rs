@@ -28,12 +28,9 @@ use std::{
 #[cfg(any(feature = "wayland", feature = "x11"))]
 use anyhow::ensure;
 #[cfg(any(feature = "wayland", feature = "x11"))]
-use ashpd::{
-    desktop::{
-        Request,
-        inhibit::{InhibitFlags, InhibitOptions, InhibitProxy},
-    },
-    enumflags2::BitFlags,
+use ashpd::desktop::{
+    Request,
+    inhibit::{InhibitFlags, InhibitOptions, InhibitProxy},
 };
 #[cfg(any(feature = "wayland", feature = "x11"))]
 use xkbcommon::xkb::{self, Keycode, Keysym, State};
@@ -1396,7 +1393,7 @@ async fn inhibit_idle_sleep(reason: String, executor: BackgroundExecutor) -> Res
     let request = proxy
         .inhibit(
             None,
-            BitFlags::from(InhibitFlags::Suspend),
+            InhibitFlags::SUSPEND,
             InhibitOptions::default().set_reason(reason.as_str()),
         )
         .await

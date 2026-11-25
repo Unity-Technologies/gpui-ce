@@ -187,6 +187,7 @@ ashpd = { version = "0.14", default-features = false, features = [
   "notification",
   "open_uri",
   "file_chooser",
+  "inhibit",
   "settings",
   "trash",
 ] }
