@@ -497,13 +497,7 @@ impl Scene {
         self.surface_opacities.resize(self.surfaces.len(), 1.0);
         self.native_views
             .sort_by_key(|native_view| native_view.order);
-        // A platform view can only be in one place, which is where it was painted first.
-        let mut shown = Vec::new();
-        self.native_views.retain(|native_view| {
-            let is_first = !shown.contains(&native_view.id);
-            shown.push(native_view.id);
-            is_first
-        });
+        self.keep_first_painted_native_views();
         self.backdrop_filters.sort_by_key(|filter| filter.order);
         // Markers normally get distinct, monotonically-increasing orders (children overlap
         // their group bounds and so sort strictly between the start and end). The `!is_start`
@@ -526,6 +520,34 @@ impl Scene {
         let storage = self.render_plan.take_storage();
         self.render_plan = ScenePlan::build(self, storage);
         self.is_finished = true;
+    }
+
+    /// Drops every occurrence of a native view but the one painted first,
+    /// because a platform view can only be in one place.
+    ///
+    /// That is the occurrence whose hitbox takes the view's mouse input. It
+    /// isn't always the first in the drawing order, which depends on what each
+    /// occurrence overlaps.
+    fn keep_first_painted_native_views(&mut self) {
+        let native_views = &self.native_views;
+        let is_repeated = native_views.iter().enumerate().any(|(index, native_view)| {
+            native_views[..index]
+                .iter()
+                .any(|earlier| earlier.id == native_view.id)
+        });
+        if !is_repeated {
+            return;
+        }
+        let mut first_painted: Vec<(NativeViewId, HitboxId)> = Vec::new();
+        for operation in &self.paint_operations {
+            if let PaintOperation::Primitive(Primitive::NativeView(native_view)) = operation
+                && !first_painted.iter().any(|(id, _)| *id == native_view.id)
+            {
+                first_painted.push((native_view.id, native_view.hitbox_id));
+            }
+        }
+        self.native_views
+            .retain(|native_view| first_painted.contains(&(native_view.id, native_view.hitbox_id)));
     }
 
     #[cfg_attr(
@@ -2617,6 +2639,39 @@ mod tests {
         scene.insert_primitive(square_quad(52.));
         scene.finish();
         assert!(scene.quads[1].order > scene.monochrome_sprites[0].order);
+    }
+
+    #[test]
+    fn a_native_view_painted_twice_is_kept_where_it_was_painted_first() {
+        let native_view = |hitbox_id: HitboxId, x: f32| PaintNativeView {
+            order: 0,
+            id: NativeViewId::for_test(1),
+            hitbox_id,
+            bounds: square(x),
+            content_mask: ContentMask {
+                bounds: square(x),
+                ..Default::default()
+            },
+            background: Hsla::default(),
+        };
+        let first_hitbox = HitboxId::placeholder();
+        let second_hitbox = first_hitbox.next();
+        let mut scene = Scene::default();
+        // The quad can't be drawn with the underline it covers, so the first
+        // occurrence, painted over both, is drawn after the second, which
+        // overlaps nothing.
+        scene.insert_primitive(square_underline(0.));
+        scene.insert_primitive(square_quad(0.));
+        scene.insert_primitive(native_view(first_hitbox, 0.));
+        scene.insert_primitive(native_view(second_hitbox, 20.));
+        scene.finish();
+
+        let shown = scene
+            .native_views
+            .iter()
+            .map(|native_view| native_view.bounds)
+            .collect::<Vec<_>>();
+        assert_eq!(shown, [square(0.)]);
     }
 
     #[test]
