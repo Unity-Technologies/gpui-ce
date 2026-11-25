@@ -1919,8 +1919,6 @@ impl App {
         })
     }
 
-    /// Returns the current thermal state of the system.
-
     /// Returns the system's current [`ThermalState`].
     ///
     /// Check it before heavy work, such as a long animation or a background
