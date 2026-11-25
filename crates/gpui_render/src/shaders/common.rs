@@ -13,7 +13,6 @@ mod source {
     pub const PATTERN_COMPONENT_SCALE: f32 = 255.0;
     pub const PATTERN_PACKING_RADIX: f32 = 65535.0;
     pub const MIN_NORMALIZED_WEIGHT: f32 = 0.00001;
-    pub const MIN_PATH_GRADIENT: f32 = 0.001;
     pub const UNDERLINE_WAVE_FREQUENCY: f32 = 2.0;
     pub const UNDERLINE_WAVE_HEIGHT_RATIO: f32 = 0.8;
     pub const GRADIENT_DITHER_SCALE: f32 = 0.6180339887;

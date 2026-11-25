@@ -4,8 +4,7 @@
 pub mod base {
     use super::super::blur::*;
     use super::super::monochrome_sprite::*;
-    use super::super::path::*;
-    use super::super::path_rasterization::*;
+    use super::super::path_tile::*;
     use super::super::polychrome_sprite::*;
     use super::super::quad::*;
     use super::super::shadow::*;

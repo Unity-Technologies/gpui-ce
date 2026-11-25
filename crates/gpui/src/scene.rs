@@ -5,17 +5,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Pixels, Point,
-    Radians, ScaledFilter, ScaledPixels, Size, TimedTransformation, bounds_tree::BoundsTree, point,
+    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Path, PathTiles,
+    Pixels, Point, Radians, ScaledFilter, ScaledPixels, Size, TimedTransformation,
+    bounds_tree::BoundsTree,
 };
 use smallvec::SmallVec;
-use std::{
-    fmt::Debug,
-    iter::Peekable,
-    ops::{Add, Range, Sub},
-    slice,
-    time::Duration,
-};
+use std::{fmt::Debug, iter::Peekable, ops::Range, slice, sync::Arc, time::Duration};
 
 mod plan;
 pub use plan::*;
@@ -36,10 +31,6 @@ pub fn overlay_modal() -> bool {
 mod abi;
 #[doc(hidden)]
 pub use abi::{SCENE_BUFFER_LAYOUTS, SceneBufferLayout};
-
-#[allow(non_camel_case_types, unused)]
-#[expect(missing_docs)]
-pub type PathVertex_ScaledPixels = PathVertex<ScaledPixels>;
 
 #[expect(missing_docs)]
 pub type DrawOrder = u32;
@@ -81,7 +72,12 @@ pub struct Scene {
     filter_depth: usize,
     pub shadows: Vec<Shadow>,
     pub quads: Vec<Quad>,
-    pub paths: Vec<Path<ScaledPixels>>,
+    pub paths: Vec<PaintedPath>,
+    /// Every path's tiles in draw order, built by [`Scene::finish`]. Tiles index
+    /// [`Self::path_curves`] and [`Self::path_paints`] from the start of those arrays.
+    pub path_tiles: Vec<PathTile>,
+    pub path_curves: Vec<PathCurve>,
+    pub path_paints: Vec<PathPaint>,
     pub underlines: Vec<Underline>,
     pub monochrome_sprites: Vec<MonochromeSprite>,
     pub subpixel_sprites: Vec<SubpixelSprite>,
@@ -106,6 +102,9 @@ impl Scene {
         self.layer_stack.clear();
         self.filter_depth = 0;
         self.paths.clear();
+        self.path_tiles.clear();
+        self.path_curves.clear();
+        self.path_paints.clear();
         self.shadows.clear();
         self.quads.clear();
         self.underlines.clear();
@@ -266,7 +265,6 @@ impl Scene {
             }
             Primitive::Path(path) => {
                 path.order = order;
-                path.id = PathId(self.paths.len());
                 self.paths.push(path.clone());
             }
             Primitive::Underline(underline) => {
@@ -364,6 +362,17 @@ impl Scene {
         sort_in_place(&mut self.shadows, keys, |shadow| (shadow.order, 0));
         sort_in_place(&mut self.quads, keys, |quad| (quad.order, 0));
         self.paths.sort_by_key(|path| path.order);
+        self.path_tiles.clear();
+        self.path_curves.clear();
+        self.path_paints.clear();
+        for path in &mut self.paths {
+            path.tile_start = self.path_tiles.len();
+            path.append_to(
+                &mut self.path_paints,
+                &mut self.path_curves,
+                &mut self.path_tiles,
+            );
+        }
         sort_in_place(&mut self.underlines, keys, |underline| (underline.order, 0));
         sort_in_place(&mut self.monochrome_sprites, keys, |sprite| {
             (sprite.order, sprite.tile.texture_id.index)
@@ -558,7 +567,7 @@ pub(crate) enum PaintOperation {
 pub enum Primitive {
     Shadow(Shadow),
     Quad(Quad),
-    Path(Path<ScaledPixels>),
+    Path(PaintedPath),
     Underline(Underline),
     MonochromeSprite(MonochromeSprite),
     SubpixelSprite(SubpixelSprite),
@@ -589,7 +598,7 @@ impl Primitive {
         match self {
             Primitive::Shadow(shadow) => &shadow.content_mask,
             Primitive::Quad(quad) => &quad.content_mask,
-            Primitive::Path(path) => &path.content_mask,
+            Primitive::Path(path) => &path.paint.content_mask,
             Primitive::Underline(underline) => &underline.content_mask,
             Primitive::MonochromeSprite(sprite) => &sprite.content_mask,
             Primitive::SubpixelSprite(sprite) => &sprite.content_mask,
@@ -614,8 +623,8 @@ struct BatchIterator<'a> {
     quads_start: usize,
     quads_iter: Peekable<slice::Iter<'a, Quad>>,
     paths_start: usize,
-    paths: &'a [Path<ScaledPixels>],
-    paths_iter: Peekable<slice::Iter<'a, Path<ScaledPixels>>>,
+    paths: &'a [PaintedPath],
+    paths_iter: Peekable<slice::Iter<'a, PaintedPath>>,
     underlines_start: usize,
     underlines_iter: Peekable<slice::Iter<'a, Underline>>,
     monochrome_sprites_start: usize,
@@ -795,20 +804,10 @@ impl<'a> Iterator for BatchIterator<'a> {
                 self.paths_start = paths_end;
                 let range = paths_start..paths_end;
                 let paths = &self.paths[range.clone()];
-                let rasterization_vertex_count = paths.iter().map(|path| path.vertices.len()).sum();
-                let sprite_count = if paths
-                    .last()
-                    .is_some_and(|path| path.order == paths[0].order)
-                {
-                    paths.len()
-                } else {
-                    1
-                };
-                Some(PrimitiveBatch::Paths {
-                    range,
-                    rasterization_vertex_count,
-                    sprite_count,
-                })
+                let tiles_start = paths[0].tile_start;
+                let last = &paths[paths.len() - 1];
+                let tiles = tiles_start..last.tile_start + last.tile_count();
+                Some(PrimitiveBatch::Paths { range, tiles })
             }
             PrimitiveKind::Underline => {
                 let underlines_start = self.underlines_start;
@@ -1351,179 +1350,142 @@ impl From<PaintSurface> for Primitive {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-#[expect(missing_docs)]
-pub struct PathId(pub usize);
-
-/// A line made up of a series of vertices and control points.
-#[derive(Clone, Debug)]
-#[expect(missing_docs)]
-pub struct Path<P: Clone + Debug + Default + PartialEq> {
-    pub id: PathId,
-    pub order: DrawOrder,
-    pub bounds: Bounds<P>,
-    pub content_mask: ContentMask<P>,
-    pub vertices: Vec<PathVertex<P>>,
-    pub color: Background,
-    start: Point<P>,
-    current: Point<P>,
-    contour_count: usize,
-}
-
-impl Path<Pixels> {
-    /// Create a new path with the given starting point.
-    pub fn new(start: Point<Pixels>) -> Self {
-        Self {
-            id: PathId(0),
-            order: DrawOrder::default(),
-            vertices: Vec::new(),
-            start,
-            current: start,
-            bounds: Bounds {
-                origin: start,
-                size: Default::default(),
-            },
-            content_mask: Default::default(),
-            color: Default::default(),
-            contour_count: 0,
-        }
-    }
-
-    /// Scale this path by the given factor.
-    pub fn scale(&self, factor: f32) -> Path<ScaledPixels> {
-        Path {
-            id: self.id,
-            order: self.order,
-            bounds: self.bounds.scale(factor),
-            content_mask: self.content_mask.scale(factor),
-            vertices: self
-                .vertices
-                .iter()
-                .map(|vertex| vertex.scale(factor))
-                .collect(),
-            start: self.start.map(|start| start.scale(factor)),
-            current: self.current.scale(factor),
-            contour_count: self.contour_count,
-            color: self.color,
-        }
-    }
-
-    /// Move the start, current point to the given point.
-    pub fn move_to(&mut self, to: Point<Pixels>) {
-        self.contour_count += 1;
-        self.start = to;
-        self.current = to;
-    }
-
-    /// Draw a straight line from the current point to the given point.
-    pub fn line_to(&mut self, to: Point<Pixels>) {
-        self.contour_count += 1;
-        if self.contour_count > 1 {
-            self.push_triangle(
-                (self.start, self.current, to),
-                (point(0., 1.), point(0., 1.), point(0., 1.)),
-            );
-        }
-        self.current = to;
-    }
-
-    /// Draw a curve from the current point to the given point, using the given control point.
-    pub fn curve_to(&mut self, to: Point<Pixels>, ctrl: Point<Pixels>) {
-        self.contour_count += 1;
-        if self.contour_count > 1 {
-            self.push_triangle(
-                (self.start, self.current, to),
-                (point(0., 1.), point(0., 1.), point(0., 1.)),
-            );
-        }
-
-        self.push_triangle(
-            (self.current, ctrl, to),
-            (point(0., 0.), point(0.5, 0.), point(1., 1.)),
-        );
-        self.current = to;
-    }
-
-    /// Push a triangle to the Path.
-    pub fn push_triangle(
-        &mut self,
-        xy: (Point<Pixels>, Point<Pixels>, Point<Pixels>),
-        st: (Point<f32>, Point<f32>, Point<f32>),
-    ) {
-        self.bounds = self
-            .bounds
-            .union(&Bounds {
-                origin: xy.0,
-                size: Default::default(),
-            })
-            .union(&Bounds {
-                origin: xy.1,
-                size: Default::default(),
-            })
-            .union(&Bounds {
-                origin: xy.2,
-                size: Default::default(),
-            });
-
-        self.vertices.push(PathVertex {
-            xy_position: xy.0,
-            st_position: st.0,
-            content_mask: Default::default(),
-        });
-        self.vertices.push(PathVertex {
-            xy_position: xy.1,
-            st_position: st.1,
-            content_mask: Default::default(),
-        });
-        self.vertices.push(PathVertex {
-            xy_position: xy.2,
-            st_position: st.2,
-            content_mask: Default::default(),
-        });
-    }
-}
-
-impl<T> Path<T>
-where
-    T: Clone + Debug + Default + PartialEq + PartialOrd + Add<T, Output = T> + Sub<Output = T>,
-{
-    #[allow(unused)]
-    #[expect(missing_docs)]
-    pub fn clipped_bounds(&self) -> Bounds<T> {
-        self.bounds.intersect(&self.content_mask.bounds)
-    }
-}
-
-impl From<Path<ScaledPixels>> for Primitive {
-    fn from(path: Path<ScaledPixels>) -> Self {
-        Primitive::Path(path)
-    }
-}
-
-#[derive(Clone, Debug)]
+/// A monotone quadratic curve of a path, in device pixels: `p(t) = a*t^2 + b*t + p0`, from
+/// `p0` to `p1`, with `sign` the winding it adds (zed #66809).
+#[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 #[expect(missing_docs)]
-pub struct PathVertex<P: Clone + Debug + Default + PartialEq> {
-    pub xy_position: Point<P>,
-    pub st_position: Point<f32>,
-    pub content_mask: ContentMask<P>,
+pub struct PathCurve {
+    pub p0: Point<f32>,
+    pub p1: Point<f32>,
+    pub a: Point<f32>,
+    pub b: Point<f32>,
+    pub sign: f32,
+    /// Aligns the struct to 8 bytes.
+    pub pad: u32,
 }
 
+/// How one painted path fills its tiles.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
 #[expect(missing_docs)]
-impl PathVertex<Pixels> {
-    pub fn scale(&self, factor: f32) -> PathVertex<ScaledPixels> {
-        PathVertex {
-            xy_position: self.xy_position.scale(factor),
-            st_position: self.st_position,
-            content_mask: self.content_mask.scale(factor),
+pub struct PathPaint {
+    /// The path's bounds, in device pixels.
+    pub bounds: Bounds<ScaledPixels>,
+    pub content_mask: ContentMask<ScaledPixels>,
+    pub color: Background,
+    pub even_odd: ShaderBool,
+    /// Aligns the struct to 8 bytes.
+    pub pad: u32,
+}
+
+/// A rectangle of a path that shares one curve list and backdrop winding.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+#[expect(missing_docs)]
+pub struct PathTile {
+    pub paint: u32,
+    pub curve_start: u32,
+    pub curve_count: u32,
+    pub backdrop: i32,
+    pub top_left: Point<f32>,
+    pub bottom_right: Point<f32>,
+    pub reference: Point<f32>,
+    pub curves_top_left: Point<f32>,
+    pub curves_bottom_right: Point<f32>,
+}
+
+/// A [`Path`] binned into tiles for one display scale, ready to draw.
+#[derive(Clone, Debug)]
+pub struct PaintedPath {
+    pub(crate) order: DrawOrder,
+    pub(crate) bounds: Bounds<ScaledPixels>,
+    // Shared so replaying a cached frame does not copy the tiles.
+    tiles: Arc<PathTiles>,
+    pub(crate) paint: PathPaint,
+    /// Index of this path's first tile in [`Scene::path_tiles`], set by [`Scene::finish`].
+    pub(crate) tile_start: usize,
+}
+
+impl PaintedPath {
+    /// Bins `path` into tiles, to be filled with `color` within `content_mask`.
+    pub fn new(
+        path: Path,
+        scale_factor: f32,
+        content_mask: ContentMask<Pixels>,
+        color: Background,
+    ) -> Self {
+        let content_mask = content_mask.scale(scale_factor);
+        let mut tiles = path.bin(scale_factor);
+        tiles.retain_visible(content_mask.bounds);
+        let paint = PathPaint {
+            bounds: tiles.bounds(),
+            content_mask,
+            color,
+            even_odd: path.even_odd().into(),
+            pad: 0,
+        };
+        Self {
+            order: 0,
+            bounds: tiles.painted_bounds(),
+            tiles: Arc::new(tiles),
+            paint,
+            tile_start: 0,
         }
+    }
+
+    /// The draw order the scene assigned this path.
+    pub fn order(&self) -> DrawOrder {
+        self.order
+    }
+
+    /// The device-pixel bounds this path may paint, including its antialiasing margin.
+    pub fn bounds(&self) -> Bounds<ScaledPixels> {
+        self.bounds
+    }
+
+    /// How this path fills its tiles.
+    pub fn paint(&self) -> &PathPaint {
+        &self.paint
+    }
+
+    /// The number of tiles this path draws.
+    pub fn tile_count(&self) -> usize {
+        self.tiles.tiles().len()
+    }
+
+    /// Appends this path's paint, curves and tiles, pointing the tiles at the appended paint
+    /// and curves.
+    pub fn append_to(
+        &self,
+        paints: &mut Vec<PathPaint>,
+        curves: &mut Vec<PathCurve>,
+        tiles: &mut Vec<PathTile>,
+    ) {
+        let paint_index = paints.len() as u32;
+        let curve_start = curves.len() as u32;
+        paints.push(self.paint);
+        curves.extend_from_slice(self.tiles.curves());
+        tiles.extend(self.tiles.tiles().iter().map(|tile| PathTile {
+            paint: paint_index,
+            curve_start: curve_start + tile.curve_start,
+            ..*tile
+        }));
+    }
+}
+
+impl From<PaintedPath> for Primitive {
+    fn from(path: PaintedPath) -> Self {
+        Primitive::Path(path)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AtlasTextureKind, DevicePixels, Point, ShaderBool, Size, SurfaceSource, TileId};
+    use crate::{
+        AtlasTextureKind, DevicePixels, Point, ShaderBool, Size, SurfaceSource, TileId, point,
+    };
 
     fn scaled(value: f32) -> ScaledPixels {
         ScaledPixels(value)
@@ -1609,6 +1571,96 @@ mod tests {
     fn batches(scene: &mut Scene) -> Vec<PrimitiveBatch> {
         scene.finish();
         scene.batches().collect()
+    }
+
+    /// A filled triangle whose top-left corner is at (`x`, `y`), 40 logical pixels wide.
+    fn triangle(x: f32, y: f32) -> PaintedPath {
+        let mut builder = crate::PathBuilder::fill();
+        builder.move_to(point(crate::px(x), crate::px(y)));
+        builder.line_to(point(crate::px(x + 40.0), crate::px(y)));
+        builder.line_to(point(crate::px(x + 20.0), crate::px(y + 40.0)));
+        builder.close();
+        let content_mask = ContentMask {
+            bounds: Bounds::new(
+                Point::default(),
+                Size::new(crate::px(400.0), crate::px(400.0)),
+            ),
+            ..Default::default()
+        };
+        PaintedPath::new(
+            builder.build().unwrap(),
+            1.0,
+            content_mask,
+            crate::black().into(),
+        )
+    }
+
+    /// Each path batch's tile range is exactly its paths' tiles, and every tile points at its
+    /// own path's paint and at curves inside the frame's curve array.
+    #[test]
+    fn path_batches_cover_their_paths_tiles() {
+        let mut scene = Scene::default();
+        scene.insert_primitive(triangle(10.0, 10.0));
+        scene.insert_primitive(triangle(200.0, 10.0));
+        let batches = batches(&mut scene);
+
+        let [PrimitiveBatch::Paths { range, tiles }] = batches.as_slice() else {
+            panic!("disjoint paths share one batch: {batches:?}");
+        };
+        assert_eq!(*range, 0..2);
+        assert_eq!(*tiles, 0..scene.path_tiles.len());
+        assert_eq!(scene.path_paints.len(), 2);
+
+        let first_tiles = scene.paths[0].tile_count();
+        assert!(first_tiles > 0 && first_tiles < scene.path_tiles.len());
+        for (index, tile) in scene.path_tiles.iter().enumerate() {
+            let expected_paint = u32::from(index >= first_tiles);
+            assert_eq!(tile.paint, expected_paint, "tile {index}");
+            let curves_end = tile.curve_start + tile.curve_count;
+            assert!(
+                curves_end as usize <= scene.path_curves.len(),
+                "tile {index}"
+            );
+        }
+    }
+
+    /// A quad painted between two overlapping paths draws between them: the paths split into
+    /// two batches around it, in paint order, with consecutive tile ranges.
+    #[test]
+    fn overlapping_paths_and_quads_draw_in_paint_order() {
+        let mut scene = Scene::default();
+        scene.insert_primitive(triangle(10.0, 10.0));
+        scene.insert_primitive(Quad {
+            bounds: full_bounds(),
+            content_mask: mask(),
+            ..Default::default()
+        });
+        scene.insert_primitive(triangle(20.0, 20.0));
+        let batches = batches(&mut scene);
+
+        let [
+            PrimitiveBatch::Paths {
+                range: first,
+                tiles: first_tiles,
+            },
+            PrimitiveBatch::Quads { range: quads, .. },
+            PrimitiveBatch::Paths {
+                range: second,
+                tiles: second_tiles,
+            },
+        ] = batches.as_slice()
+        else {
+            panic!("expected path, quad, path: {batches:?}");
+        };
+        assert_eq!(
+            (first.clone(), quads.clone(), second.clone()),
+            (0..1, 0..1, 1..2)
+        );
+        assert_eq!(first_tiles.start, 0);
+        assert_eq!(first_tiles.end, second_tiles.start);
+        assert_eq!(second_tiles.end, scene.path_tiles.len());
+        assert!(scene.paths[0].order() < scene.quads[0].order);
+        assert!(scene.quads[0].order < scene.paths[1].order());
     }
 
     #[test]

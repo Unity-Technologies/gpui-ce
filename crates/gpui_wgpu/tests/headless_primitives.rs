@@ -33,9 +33,11 @@ fn filled_path_resolves_without_invalidating_the_frame() {
     builder.line_to(gpui::point(gpui::px(80.0), gpui::px(20.0)));
     builder.line_to(gpui::point(gpui::px(50.0), gpui::px(80.0)));
     builder.close();
-    let mut path = builder.build().expect("triangle").scale(1.0);
-    path.content_mask = full_mask();
-    path.color = solid_background(gpui::white());
+    let path = painted(
+        builder.build().expect("triangle"),
+        full_mask(),
+        solid_background(gpui::white()),
+    );
     scene.insert_primitive(path);
     scene.finish();
 
@@ -100,9 +102,11 @@ fn triangle_scene() -> Scene {
     builder.line_to(gpui::point(gpui::px(80.0), gpui::px(20.0)));
     builder.line_to(gpui::point(gpui::px(50.0), gpui::px(80.0)));
     builder.close();
-    let mut path = builder.build().expect("triangle").scale(1.0);
-    path.content_mask = full_mask();
-    path.color = solid_background(gpui::white());
+    let path = painted(
+        builder.build().expect("triangle"),
+        full_mask(),
+        solid_background(gpui::white()),
+    );
     scene.insert_primitive(path);
     scene.finish();
     scene
@@ -641,4 +645,17 @@ fn content_mask_fades_quad_edges() {
     close(60, 2, 64);
     // The unfaded right edge still clips hard at the mask boundary.
     assert_eq!(pixel(101, 50)[0], 0);
+}
+
+/// A path filled with `color` inside `mask`, painted at scale factor 1.
+fn painted(
+    path: gpui::Path,
+    mask: ContentMask<ScaledPixels>,
+    color: gpui::Background,
+) -> gpui::PaintedPath {
+    let mask = ContentMask {
+        bounds: mask.bounds.map(|value| gpui::px(value.0)),
+        ..Default::default()
+    };
+    gpui::PaintedPath::new(path, 1.0, mask, color)
 }

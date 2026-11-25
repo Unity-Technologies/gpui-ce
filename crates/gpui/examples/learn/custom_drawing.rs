@@ -71,7 +71,7 @@ fn basic_shapes_canvas(colors: &Colors) -> impl IntoElement {
 // - curve_to: Draw a bezier curve
 // - close: Close the current subpath
 
-fn create_star(center: Point<Pixels>, outer_radius: f32, inner_radius: f32) -> Path<Pixels> {
+fn create_star(center: Point<Pixels>, outer_radius: f32, inner_radius: f32) -> Path {
     let mut builder = PathBuilder::fill();
     let points = 5;
 
@@ -98,7 +98,7 @@ fn create_star(center: Point<Pixels>, outer_radius: f32, inner_radius: f32) -> P
     builder.build().unwrap()
 }
 
-fn create_triangle(p1: Point<Pixels>, p2: Point<Pixels>, p3: Point<Pixels>) -> Path<Pixels> {
+fn create_triangle(p1: Point<Pixels>, p2: Point<Pixels>, p3: Point<Pixels>) -> Path {
     let mut builder = PathBuilder::fill();
     builder.move_to(p1);
     builder.line_to(p2);

@@ -2,11 +2,11 @@ use super::{
     WgpuRenderer, begin_color_render_pass,
     buffers::{InstanceTransport, InstanceUpload},
     filters::{FILTER_UNIFORMS_PER_COMPOSITE, FrameUniformRequirements},
-    path_types,
 };
 use gpui::{
-    FilterRenderTarget, MonochromeSprite, PolychromeSprite, PrimitiveBatch, Quad, RenderCommand,
-    Scene, ScenePlanRequirements, Shadow, SubpixelSprite, Underline,
+    FilterRenderTarget, MonochromeSprite, PathCurve, PathPaint, PathTile, PolychromeSprite,
+    PrimitiveBatch, Quad, RenderCommand, Scene, ScenePlanRequirements, Shadow, SubpixelSprite,
+    Underline,
 };
 use gpui_render::TargetStack;
 use gpui_render::blur::{FilterCompositeClip, FilterCompositeParameters};
@@ -33,10 +33,6 @@ pub(super) fn render_to_view(
         Err(DrawError::ExternalSurface) => None,
         Err(DrawError::CapacityPlanningInvariant) => {
             log::error!("frame storage exceeded its precomputed capacity");
-            None
-        }
-        Err(DrawError::MissingIntermediateTarget) => {
-            log::error!("frame preparation did not create a required intermediate target");
             None
         }
     }
@@ -80,7 +76,7 @@ impl PreparedTargets {
         ) {
             return None;
         }
-        let instances = {
+        let mut instances = {
             let resources = renderer.resources();
             resources.instances.begin_upload(
                 &resources.queue,
@@ -88,13 +84,14 @@ impl PreparedTargets {
                 requirements.instance_batches,
             )?
         };
+        // Reserved first by `FrameRequirements::for_scene`, so the planned padding holds.
+        if requirements.planned.path_tile_count > 0 {
+            instances.write_path_frame_data(&scene.path_curves, &scene.path_paints)?;
+        }
         if !renderer.ensure_uniform_capacity(requirements.uniforms) {
             return None;
         }
 
-        if requirements.planned.uses_path_target {
-            renderer.ensure_path_textures();
-        }
         if requirements.planned.uses_offscreen_target {
             renderer.ensure_filter_textures(&requirements.planned);
         }
@@ -156,7 +153,6 @@ fn begin_frame(renderer: &mut WgpuRenderer) -> bool {
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct GlobalUniformState {
     globals: GlobalUniforms,
-    path_globals: GlobalUniforms,
     font_rasterization: FontRasterizationUniforms,
 }
 
@@ -186,13 +182,8 @@ fn write_shader_globals(renderer: &mut WgpuRenderer) {
         ),
         padding: 0,
     };
-    let path_globals = GlobalUniforms {
-        premultiplied_alpha: ShaderBool::Disabled,
-        ..globals
-    };
     let state = GlobalUniformState {
         globals,
-        path_globals,
         font_rasterization,
     };
     if renderer.uploaded_globals == Some(state) {
@@ -217,12 +208,6 @@ fn write_shader_globals(renderer: &mut WgpuRenderer) {
         .copy_from_slice(shader_interface::bytes_of(&globals));
     upload
         .slice(
-            renderer.globals.path_offset as usize
-                ..renderer.globals.path_offset as usize + globals_size,
-        )
-        .copy_from_slice(shader_interface::bytes_of(&path_globals));
-    upload
-        .slice(
             renderer.globals.font_offset as usize
                 ..renderer.globals.font_offset as usize + font_size,
         )
@@ -245,6 +230,18 @@ impl FrameRequirements {
         let planned = scene.render_plan().requirements();
         let mut storage_bytes = 0_u64;
         let mut instance_batches = 0_u64;
+        // Path tiles index the frame's curves and paints by absolute element, so each array
+        // starts on a multiple of its own stride and takes no batch slot.
+        if planned.path_tile_count > 0 {
+            for (stride, count) in [
+                (std::mem::size_of::<PathCurve>(), scene.path_curves.len()),
+                (std::mem::size_of::<PathPaint>(), scene.path_paints.len()),
+            ] {
+                let stride = stride as u64;
+                storage_bytes = storage_bytes.next_multiple_of(stride);
+                storage_bytes = storage_bytes.saturating_add(stride.saturating_mul(count as u64));
+            }
+        }
         let mut reserve = |element_size: usize, count: usize| {
             if count > 0 {
                 let stride = element_size as u64;
@@ -265,16 +262,8 @@ impl FrameRequirements {
                 PrimitiveBatch::Quads { range, .. } => {
                     reserve(std::mem::size_of::<Quad>(), range.len())
                 }
-                PrimitiveBatch::Paths {
-                    rasterization_vertex_count,
-                    sprite_count,
-                    ..
-                } if *rasterization_vertex_count > 0 => {
-                    reserve(
-                        std::mem::size_of::<path_types::PathRasterizationVertex>(),
-                        *rasterization_vertex_count,
-                    );
-                    reserve(std::mem::size_of::<path_types::PathSprite>(), *sprite_count);
+                PrimitiveBatch::Paths { tiles, .. } => {
+                    reserve(std::mem::size_of::<PathTile>(), tiles.len())
                 }
                 PrimitiveBatch::Underlines(range) => {
                     reserve(std::mem::size_of::<Underline>(), range.len())
@@ -288,8 +277,7 @@ impl FrameRequirements {
                 PrimitiveBatch::PolychromeSprites { range, .. } => {
                     reserve(std::mem::size_of::<PolychromeSprite>(), range.len())
                 }
-                PrimitiveBatch::Paths { .. }
-                | PrimitiveBatch::Surfaces(_)
+                PrimitiveBatch::Surfaces(_)
                 | PrimitiveBatch::BackdropFilters(_)
                 | PrimitiveBatch::FilterBoundary(_) => {}
             }
@@ -391,35 +379,6 @@ impl<'a> FrameEncoder<'a> {
 
         for command in self.scene.render_commands() {
             match command {
-                RenderCommand::Batch(PrimitiveBatch::Paths {
-                    range,
-                    rasterization_vertex_count,
-                    ..
-                }) => {
-                    if *rasterization_vertex_count == 0 {
-                        continue;
-                    }
-                    let paths = &self.scene.paths[range.clone()];
-                    drop(pass);
-                    let rasterized = self.renderer.draw_paths_to_intermediate(
-                        &mut self.encoder,
-                        paths,
-                        &mut self.instances,
-                    );
-                    pass = begin_scene_render_pass(
-                        self.renderer,
-                        &mut self.encoder,
-                        "after_paths",
-                        self.targets.current(),
-                        wgpu::LoadOp::Load,
-                    );
-                    rasterized?;
-                    self.renderer.draw_paths_from_intermediate(
-                        paths,
-                        &mut self.instances,
-                        &mut pass,
-                    )?;
-                }
                 RenderCommand::Batch(PrimitiveBatch::BackdropFilters(range)) => {
                     drop(pass);
                     for filter in &self.scene.backdrop_filters[range.clone()] {
@@ -550,7 +509,6 @@ fn begin_scene_render_pass<'a>(
 pub(super) enum DrawError {
     CapacityPlanningInvariant,
     ExternalSurface,
-    MissingIntermediateTarget,
 }
 
 pub(super) type DrawResult = Result<(), DrawError>;
@@ -599,9 +557,10 @@ fn encode_inline_batch(
         PrimitiveBatch::Surfaces(range) => {
             renderer.draw_surfaces(&scene.surfaces[range.clone()], pass)
         }
-        PrimitiveBatch::Paths { .. }
-        | PrimitiveBatch::BackdropFilters(_)
-        | PrimitiveBatch::FilterBoundary(_) => {
+        PrimitiveBatch::Paths { tiles, .. } => {
+            renderer.draw_path_tiles(&scene.path_tiles[tiles.clone()], instances, pass)
+        }
+        PrimitiveBatch::BackdropFilters(_) | PrimitiveBatch::FilterBoundary(_) => {
             unreachable!("pass-interrupting batches are handled by FrameEncoder")
         }
     }

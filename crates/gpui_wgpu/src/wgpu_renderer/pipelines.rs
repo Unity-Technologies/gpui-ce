@@ -2,11 +2,11 @@ use crate::RendererTier;
 use gpui_render::{
     artifacts::{
         BASE_DOWNLEVEL_WGSL, BASE_WGSL, BLUR_BINDINGS, DOWNLEVEL_BLUR_BINDINGS,
-        DOWNLEVEL_INSTANCE_BINDINGS, DOWNLEVEL_RANGE_BINDING, DOWNLEVEL_SURFACE_BINDINGS,
-        DOWNLEVEL_TEXTURED_INSTANCE_BINDINGS, GLOBAL_BINDINGS, GeneratedBinding,
-        GeneratedBindingKind, INSTANCE_BINDINGS, MONOCHROME_INSTANCE_BINDINGS,
-        SUBPIXEL_DUAL_SOURCE_WGSL, SUBPIXEL_INSTANCE_BINDINGS, SURFACE_BINDINGS,
-        TEXTURED_INSTANCE_BINDINGS,
+        DOWNLEVEL_INSTANCE_BINDINGS, DOWNLEVEL_PATH_TILE_BINDINGS, DOWNLEVEL_RANGE_BINDING,
+        DOWNLEVEL_SURFACE_BINDINGS, DOWNLEVEL_TEXTURED_INSTANCE_BINDINGS, GLOBAL_BINDINGS,
+        GeneratedBinding, GeneratedBindingKind, INSTANCE_BINDINGS, MONOCHROME_INSTANCE_BINDINGS,
+        PATH_TILE_BINDINGS, SUBPIXEL_DUAL_SOURCE_WGSL, SUBPIXEL_INSTANCE_BINDINGS,
+        SURFACE_BINDINGS, TEXTURED_INSTANCE_BINDINGS,
     },
     shaders::interface as shader,
 };
@@ -53,8 +53,7 @@ pub(super) struct WgpuPipelines {
     pub(super) smoothed_quads: WgpuRenderPipeline,
     pub(super) shadows: WgpuRenderPipeline,
     pub(super) smoothed_shadows: WgpuRenderPipeline,
-    pub(super) path_rasterization: WgpuRenderPipeline,
-    pub(super) paths: WgpuRenderPipeline,
+    pub(super) path_tiles: WgpuRenderPipeline,
     pub(super) underlines: WgpuRenderPipeline,
     pub(super) monochrome_sprites: WgpuRenderPipeline,
     pub(super) subpixel_sprites: Option<WgpuRenderPipeline>,
@@ -108,6 +107,7 @@ impl std::ops::Deref for WgpuRenderPipeline {
 pub(super) struct WgpuBindGroupLayouts {
     pub(super) globals: wgpu::BindGroupLayout,
     pub(super) instances: wgpu::BindGroupLayout,
+    path_tiles: wgpu::BindGroupLayout,
     monochrome_sprites: wgpu::BindGroupLayout,
     subpixel_sprites: wgpu::BindGroupLayout,
     textured_instances: wgpu::BindGroupLayout,
@@ -119,6 +119,7 @@ impl WgpuBindGroupLayouts {
     pub(super) fn new(device: &wgpu::Device, tier: RendererTier) -> Self {
         let (
             instance_table,
+            path_tile_table,
             monochrome_table,
             subpixel_table,
             textured_table,
@@ -128,6 +129,7 @@ impl WgpuBindGroupLayouts {
         ) = match tier {
             RendererTier::Modern => (
                 INSTANCE_BINDINGS,
+                PATH_TILE_BINDINGS,
                 MONOCHROME_INSTANCE_BINDINGS,
                 SUBPIXEL_INSTANCE_BINDINGS,
                 TEXTURED_INSTANCE_BINDINGS,
@@ -137,6 +139,7 @@ impl WgpuBindGroupLayouts {
             ),
             RendererTier::WebGl2 => (
                 DOWNLEVEL_INSTANCE_BINDINGS,
+                DOWNLEVEL_PATH_TILE_BINDINGS,
                 DOWNLEVEL_TEXTURED_INSTANCE_BINDINGS,
                 DOWNLEVEL_TEXTURED_INSTANCE_BINDINGS,
                 DOWNLEVEL_TEXTURED_INSTANCE_BINDINGS,
@@ -150,6 +153,12 @@ impl WgpuBindGroupLayouts {
             device,
             "instances_layout",
             instance_table,
+            instance_dynamic,
+        );
+        let path_tiles = generated_bind_group_layout(
+            device,
+            "path_tiles_layout",
+            path_tile_table,
             instance_dynamic,
         );
         let monochrome_sprites = generated_bind_group_layout(
@@ -185,6 +194,7 @@ impl WgpuBindGroupLayouts {
         Self {
             globals,
             instances,
+            path_tiles,
             monochrome_sprites,
             subpixel_sprites,
             textured_instances,
@@ -226,6 +236,38 @@ impl WgpuBindGroupLayouts {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("instances"),
             layout: &self.instances,
+            entries: &entries,
+        })
+    }
+
+    /// Creates the path-tile bind group. On the storage tier the arena also backs the curve
+    /// and paint arrays, which path tiles index by absolute element.
+    pub(super) fn create_path_tiles(
+        &self,
+        device: &wgpu::Device,
+        source: InstanceBindingSource<'_>,
+    ) -> wgpu::BindGroup {
+        let mut entries = Vec::with_capacity(3);
+        match source {
+            InstanceBindingSource::Buffer(arena) => {
+                for binding in [
+                    shader::DATA_BUFFER_BINDING,
+                    shader::PATH_CURVES_BINDING,
+                    shader::PATH_PAINTS_BINDING,
+                ] {
+                    entries.push(wgpu::BindGroupEntry {
+                        binding,
+                        resource: wgpu::BindingResource::Buffer(arena.clone()),
+                    });
+                }
+            }
+            source @ InstanceBindingSource::DataTexture { .. } => {
+                entries = instance_binding_entries(source);
+            }
+        }
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("path_tiles"),
+            layout: &self.path_tiles,
             entries: &entries,
         })
     }
@@ -332,7 +374,6 @@ impl WgpuPipelines {
         bind_group_layouts: &WgpuBindGroupLayouts,
         surface_format: wgpu::TextureFormat,
         alpha_mode: wgpu::CompositeAlphaMode,
-        path_sample_count: u32,
         dual_source_blending: bool,
         tier: RendererTier,
     ) -> Self {
@@ -358,6 +399,12 @@ impl WgpuPipelines {
             "instance_pipeline_layout",
             bind_group_layouts,
             &bind_group_layouts.instances,
+        );
+        let path_tile_layout = create_pipeline_layout(
+            device,
+            "path_tile_pipeline_layout",
+            bind_group_layouts,
+            &bind_group_layouts.path_tiles,
         );
         let monochrome_layout = create_pipeline_layout(
             device,
@@ -391,17 +438,13 @@ impl WgpuPipelines {
         );
 
         let scene_target = color_target(surface_format, Some(scene_blend_state(alpha_mode)));
-        let path_rasterization_target = color_target(
-            surface_format,
-            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-        );
-        let path_target = color_target(surface_format, Some(path_blend_state()));
         let overwrite_target = color_target(surface_format, None);
         let composite_target =
             color_target(surface_format, Some(premultiplied_composite_blend_state()));
 
         let layout_for = |data_layout| match data_layout {
             shader::DataLayout::Instances => &instance_layout,
+            shader::DataLayout::PathTiles => &path_tile_layout,
             shader::DataLayout::TexturedInstances => &textured_layout,
             shader::DataLayout::MonochromeSprites => &monochrome_layout,
             shader::DataLayout::SubpixelSprites => &subpixel_layout,
@@ -428,13 +471,7 @@ impl WgpuPipelines {
             smoothed_quads: create(shader::SMOOTHED_QUADS, &scene_target, 1, &shader_module),
             shadows: create(shader::SHADOWS, &scene_target, 1, &shader_module),
             smoothed_shadows: create(shader::SMOOTHED_SHADOWS, &scene_target, 1, &shader_module),
-            path_rasterization: create(
-                shader::PATH_RASTERIZATION,
-                &path_rasterization_target,
-                path_sample_count,
-                &shader_module,
-            ),
-            paths: create(shader::PATHS, &path_target, 1, &shader_module),
+            path_tiles: create(shader::PATH_TILES, &scene_target, 1, &shader_module),
             underlines: create(shader::UNDERLINES, &scene_target, 1, &shader_module),
             monochrome_sprites: create(
                 shader::MONOCHROME_SPRITES,
@@ -655,10 +692,6 @@ fn source_over_blend_state(source_color_factor: wgpu::BlendFactor) -> wgpu::Blen
     }
 }
 
-fn path_blend_state() -> wgpu::BlendState {
-    source_over_blend_state(wgpu::BlendFactor::One)
-}
-
 fn subpixel_blend_state() -> wgpu::BlendState {
     wgpu::BlendState {
         color: wgpu::BlendComponent {
@@ -695,7 +728,6 @@ mod tests {
             &layouts,
             context.color_texture_format(),
             wgpu::CompositeAlphaMode::Opaque,
-            1,
             context.supports_dual_source_blending(),
             tier,
         );
@@ -764,7 +796,6 @@ mod tests {
             &layouts,
             context.color_texture_format(),
             wgpu::CompositeAlphaMode::Opaque,
-            1,
             false,
             tier,
         );

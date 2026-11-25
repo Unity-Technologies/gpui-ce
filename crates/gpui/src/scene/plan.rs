@@ -37,13 +37,11 @@ impl FilterRenderTarget {
 pub struct ScenePlanRequirements {
     pub command_count: usize,
     pub instance_batch_count: usize,
-    pub path_rasterization_vertex_count: usize,
-    pub path_sprite_count: usize,
+    pub path_tile_count: usize,
     pub surface_count: usize,
     pub backdrop_filter_count: usize,
     pub isolated_filter_count: usize,
     pub isolated_target_count: usize,
-    pub uses_path_target: bool,
     pub uses_offscreen_target: bool,
     pub uses_blur_target: bool,
 }
@@ -171,17 +169,9 @@ impl ScenePlanRequirements {
             | PrimitiveBatch::Underlines(range) => {
                 self.instance_batch_count += usize::from(!range.is_empty());
             }
-            PrimitiveBatch::Paths {
-                rasterization_vertex_count,
-                sprite_count,
-                ..
-            } => {
-                self.path_rasterization_vertex_count += rasterization_vertex_count;
-                if *rasterization_vertex_count > 0 {
-                    self.path_sprite_count += sprite_count;
-                    self.uses_path_target = true;
-                    self.instance_batch_count += 2;
-                }
+            PrimitiveBatch::Paths { tiles, .. } => {
+                self.path_tile_count += tiles.len();
+                self.instance_batch_count += usize::from(!tiles.is_empty());
             }
             PrimitiveBatch::MonochromeSprites { range, .. }
             | PrimitiveBatch::SubpixelSprites { range, .. }
@@ -243,10 +233,10 @@ pub enum PrimitiveBatch {
         range: Range<usize>,
         smoothed: bool,
     },
+    /// `range` indexes [`Scene::paths`] and `tiles` indexes [`Scene::path_tiles`].
     Paths {
         range: Range<usize>,
-        rasterization_vertex_count: usize,
-        sprite_count: usize,
+        tiles: Range<usize>,
     },
     Underlines(Range<usize>),
     MonochromeSprites {

@@ -25,7 +25,6 @@ mod frame;
     not(target_family = "wasm")
 ))]
 mod headless;
-mod path_types;
 mod pipelines;
 mod platform;
 mod resources;
@@ -103,13 +102,12 @@ impl WgpuRenderer {
         }
 
         let dual_source_blending = context.supports_dual_source_blending();
-        let rendering_params = RenderingParameters::new(&context.adapter, target.format());
+        let rendering_params = RenderingParameters::new();
         let adapter_info = context.adapter.get_info();
         let (resources, metadata) = WgpuResources::new(
             context,
             surface,
             target.configuration(),
-            &rendering_params,
             dual_source_blending,
         )?;
         let ResourceMetadata {
@@ -197,7 +195,6 @@ impl WgpuRenderer {
             &resources.bind_group_layouts,
             config.format,
             config.alpha_mode,
-            self.rendering_params.path_sample_count,
             self.dual_source_blending,
             resources.renderer_tier,
         );
@@ -369,10 +366,7 @@ mod tests {
         let (subpixel, subpixel_layout) =
             module_layout(&gpui_render::shaders::subpixel_sprite::WGSL_SOURCE);
 
-        for abi in shader_interface::SCENE_STORAGE_ABI
-            .iter()
-            .chain(path_types::STORAGE_ABI)
-        {
+        for abi in shader_interface::SCENE_STORAGE_ABI {
             let base_handle = base
                 .types
                 .iter()

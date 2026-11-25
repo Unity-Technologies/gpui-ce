@@ -20,7 +20,7 @@ mod sprites;
 pub use emoji::emoji_rasterization;
 pub use filters::{blur, surface};
 pub use linkage::base;
-pub use paths::{path, path_rasterization};
+pub use paths::path_tile;
 pub use quads::quad;
 pub use shadows::shadow;
 pub use sprites::{monochrome_sprite, polychrome_sprite, subpixel_sprite, underline};

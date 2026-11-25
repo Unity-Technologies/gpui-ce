@@ -122,7 +122,8 @@ unicode-segmentation.workspace = true
 unicode-bidi.workspace = true
 hdrhistogram = { workspace = true, optional = true }
 waker-fn.workspace = true
-lyon.workspace = true
+lyon_path.workspace = true
+tiny-skia-path.workspace = true
 pin-project.workspace = true
 spin.workspace = true
 pollster.workspace = true
@@ -177,7 +178,6 @@ gpui_ce_elements = { path = "../gpui_elements" }
 gpui_platform = { path = "../gpui_platform", package = "gpui_ce_platform", features = ["font-kit"] }
 gpui_fonts = { path = "../gpui_ce_fonts", package = "gpui-ce-fonts" }
 gpui_util = { workspace = true }
-lyon = { workspace = true, features = ["extra"] }
 postage.workspace = true
 rand.workspace = true
 scheduler = { workspace = true, features = ["test-support"] }
