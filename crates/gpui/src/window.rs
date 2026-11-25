@@ -8508,6 +8508,12 @@ impl TryInto<SharedString> for ElementId {
     }
 }
 
+impl From<u64> for ElementId {
+    fn from(id: u64) -> Self {
+        ElementId::Integer(id)
+    }
+}
+
 impl From<usize> for ElementId {
     fn from(id: usize) -> Self {
         ElementId::Integer(id as u64)
