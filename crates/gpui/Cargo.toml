@@ -1,6 +1,6 @@
 [package]
 name = "gpui-ce"
-version = "0.4.0-unity.20261112"
+version = "0.4.0-unity.20261125"
 edition.workspace = true
 description = "A community fork of Zed's GPU-accelerated UI framework"
 repository = "https://github.com/gpui-ce/gpui-ce"
