@@ -13,7 +13,7 @@ use crate::{
     Global, Hsla, Pixels, PlatformHeadlessRenderer, PlatformTextSystem, Render, Reservation,
     ScaledPixels, Size, Task, TestDispatcher, TestPlatform, TextSystem, Window, WindowBounds,
     WindowHandle, WindowOptions,
-    app::{GpuiBorrow, GpuiMode},
+    app::{GpuiBorrow, GpuiMode, test_context::test_window},
 };
 use anyhow::Result;
 use image::RgbaImage;
@@ -147,6 +147,15 @@ impl HeadlessAppContext {
     /// Runs pending tasks until none can make progress. This doesn't move the simulated clock.
     pub fn run_until_parked(&self) {
         self.dispatcher.run_until_parked();
+    }
+
+    /// Simulates the window moving to a display with a different scale factor.
+    pub fn simulate_window_scale_factor_change(
+        &mut self,
+        window: AnyWindowHandle,
+        scale_factor: f32,
+    ) {
+        test_window(&self.app, window).simulate_scale_factor_change(scale_factor);
     }
 
     /// Moves the simulated clock forward by `duration`, and runs the tasks that become ready.

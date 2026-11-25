@@ -17,6 +17,19 @@ use std::{
     cell::RefCell, future::Future, ops::Deref, path::PathBuf, rc::Rc, sync::Arc, time::Duration,
 };
 
+pub(crate) fn test_window(app: &AppCell, window: AnyWindowHandle) -> TestWindow {
+    app.borrow_mut()
+        .windows
+        .get_mut(window.id)
+        .expect("window not found")
+        .as_deref_mut()
+        .expect("window is being updated")
+        .platform_window
+        .as_test()
+        .expect("window is not a TestWindow")
+        .clone()
+}
+
 /// The test version of [`App`], passed to `#[gpui::test]` functions.
 ///
 /// `TestAppContext` implements [`AppContext`] and adds helpers for windows, input,
@@ -837,17 +850,7 @@ impl TestAppContext {
 
     /// Returns the `TestWindow` backing the given handle.
     pub(crate) fn test_window(&self, window: AnyWindowHandle) -> TestWindow {
-        self.app
-            .borrow_mut()
-            .windows
-            .get_mut(window.id)
-            .unwrap()
-            .as_deref_mut()
-            .unwrap()
-            .platform_window
-            .as_test()
-            .unwrap()
-            .clone()
+        test_window(&self.app, window)
     }
 
     /// Returns a stream that yields `()` each time `entity` notifies.
