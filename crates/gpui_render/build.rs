@@ -1080,12 +1080,13 @@ fn write_dx11_bytecode(
     source: &str,
     pipeline: &shaders::interface::Pipeline,
 ) -> Option<Dx11BytecodePaths> {
+    use std::ffi::CStr;
     use windows::{
         Win32::Graphics::Direct3D::{Fxc::D3DCompile, ID3DInclude},
         core::PCSTR,
     };
 
-    fn compile(source: &str, label: &str, entry: &str, profile: &[u8]) -> Vec<u8> {
+    fn compile(source: &str, label: &str, entry: &str, profile: &CStr) -> Vec<u8> {
         let entry = CString::new(entry).expect("shader entry point contains NUL");
         let mut blob = None;
         let mut errors = None;
@@ -1093,11 +1094,11 @@ fn write_dx11_bytecode(
             D3DCompile(
                 source.as_ptr().cast(),
                 source.len(),
-                PCSTR::from_raw(b"gpui_shaders.hlsl\0".as_ptr()),
+                PCSTR::from_raw(c"gpui_shaders.hlsl".as_ptr().cast()),
                 None,
                 None::<&ID3DInclude>,
                 PCSTR::from_raw(entry.as_ptr().cast()),
-                PCSTR::from_raw(profile.as_ptr()),
+                PCSTR::from_raw(profile.as_ptr().cast()),
                 0,
                 0,
                 &mut blob,
@@ -1127,12 +1128,12 @@ fn write_dx11_bytecode(
     write_bytes(
         out_dir,
         &vertex_name,
-        &compile(source, label, pipeline.vertex_entry, b"vs_5_0\0"),
+        &compile(source, label, pipeline.vertex_entry, c"vs_5_0"),
     );
     write_bytes(
         out_dir,
         &fragment_name,
-        &compile(source, label, pipeline.fragment_entry, b"ps_5_0\0"),
+        &compile(source, label, pipeline.fragment_entry, c"ps_5_0"),
     );
     Some(Dx11BytecodePaths {
         vertex_path: format!("/{vertex_name}"),
