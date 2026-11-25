@@ -424,3 +424,33 @@ fn levien_error_function_matches_known_values() {
         assert!((common::levien_error_function(-input) + expected).abs() < 0.001);
     }
 }
+
+#[test]
+fn border_compositing_keeps_the_border_color_over_a_transparent_fill() {
+    use common::*;
+    use wgsl_rs::std::*;
+
+    // A transparent black fill under a white border: every partly covered inner-edge pixel
+    // keeps the border's color and only loses alpha, so the edge never darkens.
+    let fill = vec4f(0.0, 0.0, 0.0, 0.0);
+    for step in 0..=8 {
+        let distance = -1.0 + step as f32 * 0.25;
+        let mut border = vec4f(1.0, 1.0, 1.0, 1.0);
+        border.w *= antialiased_coverage(distance);
+        let color = over(fill, border);
+        assert!((color.w - antialiased_coverage(distance)).abs() < 1e-6);
+        if color.w > 0.0 {
+            assert!(
+                (color.x - 1.0).abs() < 1e-5,
+                "border darkened at {distance}: {color:?}"
+            );
+        }
+    }
+
+    // An opaque fill still blends linearly toward the border across the edge.
+    let fill = vec4f(0.0, 0.0, 1.0, 1.0);
+    let mut border = vec4f(1.0, 0.0, 0.0, 1.0);
+    border.w *= 0.25;
+    let color = over(fill, border);
+    assert!((color.x - 0.25).abs() < 1e-6 && (color.z - 0.75).abs() < 1e-6 && color.w == 1.0);
+}

@@ -595,13 +595,10 @@ pub mod quad {
             if quad.border_style == BorderStyle::Dashed {
                 border_color.w *= dashed_border_alpha(quad, geometry);
             }
-            let blended_border = over(fill_color, border_color);
-            let factor = antialiased_coverage(distances.inner);
-            color = mix(
-                fill_color,
-                blended_border,
-                vec4f(factor, factor, factor, factor),
-            );
+            // Fade the border's alpha at the inner edge before compositing, so a transparent
+            // fill's color never bleeds into partly covered border pixels.
+            border_color.w *= antialiased_coverage(distances.inner);
+            color = over(fill_color, border_color);
         }
         blend_color(color, antialiased_coverage(distances.outer) * fade)
     }
@@ -792,14 +789,8 @@ pub mod quad {
                 );
             }
 
-            let blended_border = over(fill_color, border_color);
-            let factor = antialiased_coverage(inner);
-
-            color = mix(
-                fill_color,
-                blended_border,
-                vec4f(factor, factor, factor, factor),
-            );
+            border_color.w *= antialiased_coverage(inner);
+            color = over(fill_color, border_color);
         }
 
         blend_color(color, antialiased_coverage(outer) * fade)
