@@ -1,5 +1,5 @@
 use scheduler::Instant;
-use std::{rc::Rc, time::Duration};
+use std::time::Duration;
 
 use crate::{
     AnyElement, App, AppContext, Element, ElementId, GlobalElementId, InspectorElementId,
