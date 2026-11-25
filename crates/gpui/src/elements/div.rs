@@ -31,7 +31,7 @@ use crate::{
     Action, AnyDrag, AnyElement, AnyTooltip, AnyView, App, AppContext, Bounds, ClickEvent,
     CursorStyle, DispatchPhase, Display, Element, ElementId, Entity, EntityId, ExternalDragPayload,
     FileDropEvent, FocusHandle, Global, GlobalElementId, Hitbox, HitboxBehavior, HitboxId,
-    InspectorElementId, IntoElement, IsZero, KeyContext, KeyDownEvent, KeyUpEvent, KeyboardButton,
+    InspectorElementId, IsZero, KeyContext, KeyDownEvent, KeyUpEvent, KeyboardButton,
     KeyboardClickEvent, LayoutId, LongPressEvent, ModifiersChangedEvent, MouseButton,
     MouseClickEvent, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MousePressureEvent,
     MouseUpEvent, OngoingScroll, Overflow, ParentElement, PinchEvent, Pixels, Point,
@@ -2952,14 +2952,6 @@ impl Element for Div {
     }
 }
 
-impl IntoElement for Div {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 #[derive(Default)]
 pub(crate) struct AriaProperties {
     pub(crate) author_id: Option<SharedString>,
@@ -5374,14 +5366,6 @@ where
     }
 }
 
-impl<E: IntoElement> IntoElement for Stateful<E> {
-    type Element = E::Element;
-
-    fn into_element(self) -> Self::Element {
-        self.element.into_element()
-    }
-}
-
 impl<E> ParentElement for Stateful<E>
 where
     E: ParentElement,
@@ -5643,7 +5627,7 @@ impl ScrollHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Empty, GestureTuning, Modifiers, TouchEvent, TouchId};
+    use crate::{Empty, GestureTuning, IntoElement, Modifiers, TouchEvent, TouchId};
 
     struct DragProbe;
 
@@ -6485,14 +6469,6 @@ mod tests {
     struct TooltipCaptureElement {
         child: AnyElement,
         captured_active_tooltip: CapturedActiveTooltip,
-    }
-
-    impl IntoElement for TooltipCaptureElement {
-        type Element = Self;
-
-        fn into_element(self) -> Self::Element {
-            self
-        }
     }
 
     impl Element for TooltipCaptureElement {

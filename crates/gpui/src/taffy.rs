@@ -1735,14 +1735,6 @@ mod tests {
         }
     }
 
-    impl IntoElement for MeasuredLeaf {
-        type Element = Self;
-
-        fn into_element(self) -> Self::Element {
-            self
-        }
-    }
-
     #[crate::test]
     fn stretched_root_style_is_restored_when_its_node_is_reused(cx: &mut TestAppContext) {
         // Elements without IDs are matched by request order, and children request first,

@@ -94,14 +94,6 @@ use std::{
 ///     log: Log,
 /// }
 ///
-/// impl IntoElement for Probe {
-///     type Element = Self;
-///
-///     fn into_element(self) -> Self::Element {
-///         self
-///     }
-/// }
-///
 /// impl Element for Probe {
 ///     type RequestLayoutState = ();
 ///     type PrepaintState = Bounds<Pixels>;
@@ -177,7 +169,7 @@ use std::{
 /// For a complete element, see
 /// [`custom_element`](crate::_documentation::examples::custom_element). It is a slider that inserts
 /// a hitbox in `prepaint` and handles dragging in `paint`.
-pub trait Element: 'static + IntoElement {
+pub trait Element: 'static + Sized {
     /// The state that [`Element::request_layout`] returns for the later phases.
     ///
     /// `prepaint` and `paint` each receive a `&mut` reference to it. Use `()` if the element needs
@@ -298,7 +290,15 @@ pub trait Element: 'static + IntoElement {
 
     /// Convert this element into a dynamically-typed [`AnyElement`].
     fn into_any(self) -> AnyElement {
-        AnyElement::new(self)
+        AnyElement::new_please_call_into_any_to_avoid_double_box(self)
+    }
+}
+
+impl<T: Element> IntoElement for T {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
     }
 }
 
@@ -1104,7 +1104,12 @@ where
 pub struct AnyElement(ArenaBox<dyn ElementObject>);
 
 impl AnyElement {
-    pub(crate) fn new<E>(element: E) -> Self
+    /// Boxes `element` into an `AnyElement`, erasing its concrete type.
+    ///
+    /// This always allocates and always adds a level of boxing, even when `element` is
+    /// already an [`AnyElement`], which would nest one `AnyElement` inside another. Call
+    /// [`Element::into_any`] instead; it skips the wrapper for `AnyElement` itself.
+    fn new_please_call_into_any_to_avoid_double_box<E>(element: E) -> Self
     where
         E: 'static + Element,
         E::RequestLayoutState: Any,
@@ -1240,16 +1245,8 @@ impl Element for AnyElement {
     ) {
         self.paint(window, cx);
     }
-}
 
-impl IntoElement for AnyElement {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-
-    fn into_any_element(self) -> AnyElement {
+    fn into_any(self) -> AnyElement {
         self
     }
 }
@@ -1259,14 +1256,6 @@ impl IntoElement for AnyElement {
 /// Return it where a view or component must produce an element but has nothing to show. Its
 /// layout has `display: none`, so it doesn't affect its siblings.
 pub struct Empty;
-
-impl IntoElement for Empty {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
 
 impl Element for Empty {
     type RequestLayoutState = ();

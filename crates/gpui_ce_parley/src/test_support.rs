@@ -54,14 +54,6 @@ struct ParagraphProbe {
     remeasure: bool,
 }
 
-impl IntoElement for ParagraphProbe {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
 impl Element for ParagraphProbe {
     type RequestLayoutState = DivFrameState;
     type PrepaintState = <Div as Element>::PrepaintState;

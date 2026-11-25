@@ -6,11 +6,11 @@ use crate::editable_text::{
 use gpui::{
     A11ySubtreeBuilder, App, Bounds, CaretPosition, CursorStyle, DefiniteLength, DispatchPhase,
     Display, Element, ElementId, ElementInputHandler, Entity, FocusHandle, Focusable, Hitbox,
-    HitboxBehavior, Hsla, InteractiveElement, Interactivity, IntoElement, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, ParagraphDirection, Pixels, Point,
-    ShapedText, SharedString, Size, StatefulInteractiveElement, Style, StyleRefinement, Styled,
-    TextAlign, TextLayout, TextLayoutOptions, UnicodeBidi, WeakEntity, Window, accesskit, point,
-    px, relative, size,
+    HitboxBehavior, Hsla, InteractiveElement, Interactivity, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, ParagraphDirection, Pixels, Point, ShapedText,
+    SharedString, Size, StatefulInteractiveElement, Style, StyleRefinement, Styled, TextAlign,
+    TextLayout, TextLayoutOptions, UnicodeBidi, WeakEntity, Window, accesskit, point, px, relative,
+    size,
 };
 use palette::IntoColor;
 use smallvec::SmallVec;
@@ -182,13 +182,6 @@ impl StatefulInteractiveElement for EditableTextElement {}
 impl Styled for EditableTextElement {
     fn style(&mut self) -> &mut StyleRefinement {
         &mut self.interactivity.base_style
-    }
-}
-
-impl IntoElement for EditableTextElement {
-    type Element = Self;
-    fn into_element(self) -> Self::Element {
-        self
     }
 }
 
