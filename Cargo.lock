@@ -2757,6 +2757,7 @@ name = "gpui_ce_platform"
 version = "0.4.0-unity.20261112"
 dependencies = [
  "console_error_panic_hook",
+ "criterion",
  "gpui-ce",
  "gpui-ce-fonts",
  "gpui_ce_apple",
