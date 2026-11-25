@@ -823,6 +823,12 @@ fn write_native_shaders(out_dir: &std::path::Path) {
             requires_dual_source_lowering: false,
         },
         NativeShaderModule {
+            pipeline: &OPAQUE_QUADS,
+            pipeline_path: "OPAQUE_QUADS",
+            source: &shaders::quad::WGSL_SOURCE,
+            requires_dual_source_lowering: false,
+        },
+        NativeShaderModule {
             pipeline: &SHADOWS,
             pipeline_path: "SHADOWS",
             source: &shaders::shadow::WGSL_SOURCE,

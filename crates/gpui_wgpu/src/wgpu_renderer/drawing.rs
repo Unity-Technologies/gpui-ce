@@ -30,18 +30,11 @@ impl WgpuRenderer {
         } else {
             &pipelines.quads
         };
-        let count = quads.iter().filter(|quad| !depth.hides(quad)).count();
+        let count = depth.shared.blended_quad_count(quads);
         if count == 0 {
             return Ok(());
         }
-        let blended = quads
-            .iter()
-            .enumerate()
-            .filter(|(_, quad)| !depth.hides(quad))
-            .map(|(offset, quad)| Quad {
-                depth: depth.quad_depth(first_index + offset),
-                ..*quad
-            });
+        let blended = depth.shared.blended_quads(quads, first_index);
         let Some(slice) = instances.write_iter(count, blended) else {
             return Err(frame::DrawError::CapacityPlanningInvariant);
         };

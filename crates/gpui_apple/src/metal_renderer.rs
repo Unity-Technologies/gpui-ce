@@ -8,7 +8,7 @@ use gpui::{
     Underline, size,
 };
 use gpui_render::{
-    TargetStack,
+    SceneDepth, TargetStack,
     artifacts::{NATIVE_SHADERS, NativeShader},
     blur::{
         BlurAxis, BlurKernel, BlurUniforms, GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS, ScissorRectangle,
@@ -37,13 +37,14 @@ use objc2_core_video::{
 use objc2_foundation::{NSRange, NSString};
 use objc2_metal::{
     MTLBlendFactor, MTLBlendOperation, MTLBuffer, MTLClearColor, MTLCommandBuffer,
-    MTLCommandEncoder, MTLCommandQueue, MTLCompileOptions, MTLCopyAllDevices,
-    MTLCreateSystemDefaultDevice, MTLDevice, MTLDrawable, MTLFunction, MTLGPUFamily, MTLLibrary,
-    MTLLoadAction, MTLPixelFormat, MTLPrimitiveType, MTLRenderCommandEncoder,
-    MTLRenderPassColorAttachmentDescriptor, MTLRenderPassDescriptor, MTLRenderPipelineDescriptor,
-    MTLRenderPipelineState, MTLResourceOptions, MTLSamplerDescriptor, MTLSamplerMinMagFilter,
-    MTLSamplerState, MTLScissorRect, MTLStorageMode, MTLStoreAction, MTLTexture,
-    MTLTextureDescriptor, MTLTextureUsage, MTLViewport,
+    MTLCommandEncoder, MTLCommandQueue, MTLCompareFunction, MTLCompileOptions, MTLCopyAllDevices,
+    MTLCreateSystemDefaultDevice, MTLDepthStencilDescriptor, MTLDepthStencilState, MTLDevice,
+    MTLDrawable, MTLFunction, MTLGPUFamily, MTLLibrary, MTLLoadAction, MTLPixelFormat,
+    MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassColorAttachmentDescriptor,
+    MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState,
+    MTLResourceOptions, MTLSamplerDescriptor, MTLSamplerMinMagFilter, MTLSamplerState,
+    MTLScissorRect, MTLStorageMode, MTLStoreAction, MTLTexture, MTLTextureDescriptor,
+    MTLTextureUsage, MTLViewport,
 };
 #[cfg(any(
     test,
@@ -69,6 +70,11 @@ type MtlFunction = ProtocolObject<dyn MTLFunction>;
 type MtlPipeline = ProtocolObject<dyn MTLRenderPipelineState>;
 type MtlCommandBuffer = ProtocolObject<dyn MTLCommandBuffer>;
 type MtlEncoder = ProtocolObject<dyn MTLRenderCommandEncoder>;
+type MtlDepthState = ProtocolObject<dyn MTLDepthStencilState>;
+
+/// Depth format of the scene passes. Quads draw at depths that are exact multiples of a power
+/// of two, which a 32-bit float stores without rounding.
+const SCENE_DEPTH_FORMAT: MTLPixelFormat = MTLPixelFormat::Depth32Float;
 
 // Buffer slots declared by the generated MSL. Group 0 globals land at 0/1, the group 1 data
 // binding at 2 (path tiles add curves at 3 and paints at 4), Naga's runtime-array sizes buffer
@@ -285,6 +291,35 @@ impl PathFrameData {
     }
 }
 
+/// Writes the first `count` of `items` into the instance buffer at `offset`, which the caller
+/// bounds-checked for `count` items.
+fn write_instance_iter<T>(
+    instance_buffer: &InstanceBuffer,
+    offset: usize,
+    count: usize,
+    items: impl Iterator<Item = T>,
+) {
+    // SAFETY: `acquire` checked `contents` is non-null, the caller checked
+    // `offset + count * size_of::<T>() <= instance_buffer.size`, and at most `count` items are
+    // written. Unaligned writes keep this sound for any `T` at a 256-byte aligned `offset`.
+    let contents = unsafe {
+        instance_buffer
+            .metal_buffer
+            .contents()
+            .as_ptr()
+            .cast::<u8>()
+            .add(offset)
+            .cast::<T>()
+    };
+    let mut written = 0;
+    for (index, item) in items.take(count).enumerate() {
+        // SAFETY: `index < count`, inside the bounds-checked range above.
+        unsafe { contents.add(index).write_unaligned(item) };
+        written += 1;
+    }
+    debug_assert_eq!(written, count, "fewer instances than the caller reserved");
+}
+
 /// Writes `items` into the instance buffer at `offset`, which the caller bounds-checked.
 fn write_instances<T>(instance_buffer: &InstanceBuffer, offset: usize, items: &[T]) {
     // SAFETY: `acquire` checked `contents` is non-null, and the caller checked
@@ -472,6 +507,45 @@ impl InstanceBufferPool {
     }
 }
 
+/// The shared [`SceneDepth`] plus the scene encoder's current viewport depth range.
+struct MetalSceneDepth {
+    shared: SceneDepth,
+    viewport_size: Size<DevicePixels>,
+    /// `None` is the full range, where quads place themselves; `Some(depth)` pins every
+    /// fragment to `depth`.
+    viewport: Option<f32>,
+}
+
+impl MetalSceneDepth {
+    fn new(scene: &Scene, viewport_size: Size<DevicePixels>) -> Self {
+        Self {
+            shared: SceneDepth::new(scene),
+            viewport_size,
+            viewport: None,
+        }
+    }
+
+    fn begin_scene_pass(&mut self) {
+        self.shared.begin_scene_pass();
+    }
+
+    fn set_viewport(&mut self, encoder: &MtlEncoder, depth: Option<f32>) {
+        if self.viewport == depth {
+            return;
+        }
+        let (znear, zfar) = depth.map_or((0.0, 1.0), |depth| (depth as f64, depth as f64));
+        encoder.setViewport(MTLViewport {
+            originX: 0.0,
+            originY: 0.0,
+            width: i32::from(self.viewport_size.width) as f64,
+            height: i32::from(self.viewport_size.height) as f64,
+            znear,
+            zfar,
+        });
+        self.viewport = depth;
+    }
+}
+
 enum DisplayLinkMode {
     Detached,
     Attached { drawable: Option<MetalDrawable> },
@@ -491,6 +565,14 @@ pub struct MetalRenderer {
     smoothed_shadows_pipeline_state: Retained<MtlPipeline>,
     quads_pipeline_state: Retained<MtlPipeline>,
     smoothed_quads_pipeline_state: Retained<MtlPipeline>,
+    /// Unblended opaque quad fills, drawn front to back with depth write before the
+    /// blended primitives of each scene pass.
+    opaque_quads_pipeline_state: Retained<MtlPipeline>,
+    depth_write_state: Retained<MtlDepthState>,
+    depth_test_state: Retained<MtlDepthState>,
+    /// Shared by every scene pass, which clears it on load; sized to the viewport.
+    depth_texture: Option<Retained<MtlTexture>>,
+    is_apple_gpu: bool,
     underlines_pipeline_state: Retained<MtlPipeline>,
     monochrome_sprites_pipeline_state: Retained<MtlPipeline>,
     polychrome_sprites_pipeline_state: Retained<MtlPipeline>,
@@ -683,6 +765,21 @@ impl MetalRenderer {
             smoothed_quads_shader,
             MTLPixelFormat::BGRA8Unorm,
         )?;
+        let (opaque_quads_shader, opaque_quads_library) = pipeline("opaque_quads")?;
+        let opaque_quads_pipeline_state = new_pipeline_state(
+            &device,
+            opaque_quads_shader,
+            &*new_pipeline_descriptor(
+                &device,
+                &opaque_quads_library,
+                opaque_quads_shader,
+                MTLPixelFormat::BGRA8Unorm,
+                Blend::None,
+                true,
+            )?,
+        )?;
+        let depth_write_state = build_depth_stencil_state(&device, true)?;
+        let depth_test_state = build_depth_stencil_state(&device, false)?;
         let (underlines_shader, underlines_library) = pipeline("underlines")?;
         let underlines_pipeline_state = build_pipeline_state(
             &device,
@@ -713,11 +810,17 @@ impl MetalRenderer {
             MTLPixelFormat::BGRA8Unorm,
         )?;
         let (surfaces_shader, surfaces_library) = pipeline("surfaces")?;
-        let surfaces_pipeline_state = build_path_sprite_pipeline_state(
+        let surfaces_pipeline_state = new_pipeline_state(
             &device,
-            &surfaces_library,
             surfaces_shader,
-            MTLPixelFormat::BGRA8Unorm,
+            &*new_pipeline_descriptor(
+                &device,
+                &surfaces_library,
+                surfaces_shader,
+                MTLPixelFormat::BGRA8Unorm,
+                Blend::Premultiplied,
+                true,
+            )?,
         )?;
         let (blur_downsample_shader, blur_downsample_library) = pipeline("blur_downsample")?;
         let blur_downsample_pipeline_state = build_blur_pipeline_state(
@@ -785,6 +888,11 @@ impl MetalRenderer {
             smoothed_shadows_pipeline_state,
             quads_pipeline_state,
             smoothed_quads_pipeline_state,
+            opaque_quads_pipeline_state,
+            depth_write_state,
+            depth_test_state,
+            depth_texture: None,
+            is_apple_gpu,
             underlines_pipeline_state,
             monochrome_sprites_pipeline_state,
             polychrome_sprites_pipeline_state,
@@ -1278,18 +1386,29 @@ impl MetalRenderer {
         };
 
         let mut targets = TargetStack::new(scene_color);
+        let depth_texture = self.depth_texture_for(viewport_size)?;
+        let mut depth = MetalSceneDepth::new(scene, viewport_size);
 
-        let mut command_encoder = new_command_encoder_for_texture(
+        let mut command_encoder = self.begin_scene_pass(
             command_buffer,
             targets.current(),
-            viewport_size,
+            &depth_texture,
             |color_attachment| {
                 color_attachment.setLoadAction(MTLLoadAction::Clear);
                 color_attachment.setClearColor(clear_color(0., 0., 0., alpha));
             },
-        );
+            scene,
+            &mut depth,
+            instance_buffer,
+            &mut instance_offset,
+            &scene_uniforms,
+        )?;
 
         for command in scene.render_commands() {
+            if let RenderCommand::Batch(batch) = command {
+                let batch_depth = depth.shared.enter_batch(batch);
+                depth.set_viewport(&command_encoder, batch_depth);
+            }
             let ok = match command {
                 RenderCommand::Batch(PrimitiveBatch::Shadows { range, smoothed }) => self
                     .draw_shadows(
@@ -1302,6 +1421,8 @@ impl MetalRenderer {
                     ),
                 RenderCommand::Batch(PrimitiveBatch::Quads { range, smoothed }) => self.draw_quads(
                     &scene.quads[range.clone()],
+                    range.start,
+                    &depth.shared,
                     *smoothed,
                     instance_buffer,
                     &mut instance_offset,
@@ -1394,14 +1515,20 @@ impl MetalRenderer {
                             );
                         }
                     }
-                    command_encoder = new_command_encoder_for_texture(
+                    depth.begin_scene_pass();
+                    command_encoder = self.begin_scene_pass(
                         command_buffer,
                         targets.current(),
-                        viewport_size,
+                        &depth_texture,
                         |color_attachment| {
                             color_attachment.setLoadAction(MTLLoadAction::Load);
                         },
-                    );
+                        scene,
+                        &mut depth,
+                        instance_buffer,
+                        &mut instance_offset,
+                        &scene_uniforms,
+                    )?;
                     true
                 }
                 RenderCommand::BeginFilter {
@@ -1413,15 +1540,21 @@ impl MetalRenderer {
                         &group_owned[target_index.as_usize()],
                         scene.filter_boundaries[*boundary_index].filters.is_empty(),
                     );
-                    command_encoder = new_command_encoder_for_texture(
+                    depth.begin_scene_pass();
+                    command_encoder = self.begin_scene_pass(
                         command_buffer,
                         targets.current(),
-                        viewport_size,
+                        &depth_texture,
                         |color_attachment| {
                             color_attachment.setLoadAction(MTLLoadAction::Clear);
                             color_attachment.setClearColor(clear_color(0., 0., 0., 0.));
                         },
-                    );
+                        scene,
+                        &mut depth,
+                        instance_buffer,
+                        &mut instance_offset,
+                        &scene_uniforms,
+                    )?;
                     true
                 }
                 RenderCommand::EndFilter {
@@ -1448,14 +1581,20 @@ impl MetalRenderer {
                         boundary.opacity,
                         false,
                     );
-                    command_encoder = new_command_encoder_for_texture(
+                    depth.begin_scene_pass();
+                    command_encoder = self.begin_scene_pass(
                         command_buffer,
                         parent,
-                        viewport_size,
+                        &depth_texture,
                         |color_attachment| {
                             color_attachment.setLoadAction(MTLLoadAction::Load);
                         },
-                    );
+                        scene,
+                        &mut depth,
+                        instance_buffer,
+                        &mut instance_offset,
+                        &scene_uniforms,
+                    )?;
                     true
                 }
                 RenderCommand::BeginFilter {
@@ -1488,6 +1627,10 @@ impl MetalRenderer {
 
         command_encoder.endEncoding();
         targets.assert_balanced();
+        debug_assert_eq!(
+            depth.shared.scene_pass() + 1,
+            scene.render_plan().scene_pass_count()
+        );
 
         // Present the offscreen scene by copying it into the drawable/target texture.
         if use_offscreen && scene_color_owned.is_some() {
@@ -1749,6 +1892,96 @@ impl MetalRenderer {
         }
     }
 
+    /// Returns the scene passes' depth attachment, recreating it when the viewport resized.
+    fn depth_texture_for(&mut self, size: Size<DevicePixels>) -> Result<Retained<MtlTexture>> {
+        let width = (size.width.0.max(1)) as usize;
+        let height = (size.height.0.max(1)) as usize;
+        if let Some(texture) = &self.depth_texture
+            && texture.width() == width
+            && texture.height() == height
+        {
+            return Ok(texture.clone());
+        }
+        let descriptor = MTLTextureDescriptor::new();
+        // SAFETY: The size is a drawable or viewport size, which the device supports.
+        unsafe {
+            descriptor.setWidth(width);
+            descriptor.setHeight(height);
+        }
+        descriptor.setPixelFormat(SCENE_DEPTH_FORMAT);
+        descriptor.setUsage(MTLTextureUsage::RenderTarget);
+        // Depth never leaves its scene pass, so Apple GPUs keep it in tile memory without
+        // allocating backing store.
+        descriptor.setStorageMode(if self.is_apple_gpu {
+            MTLStorageMode::Memoryless
+        } else {
+            MTLStorageMode::Private
+        });
+        let texture = self
+            .device
+            .newTextureWithDescriptor(&descriptor)
+            .ok_or_else(|| anyhow::anyhow!("Metal could not allocate the depth texture"))?;
+        self.depth_texture = Some(texture.clone());
+        Ok(texture)
+    }
+
+    /// Begins a scene pass on `target`: clears depth, draws the pass's opaque fills front to
+    /// back with depth write, then leaves the encoder depth-testing for the blended batches.
+    #[allow(clippy::too_many_arguments)]
+    fn begin_scene_pass(
+        &self,
+        command_buffer: &MtlCommandBuffer,
+        target: &MtlTexture,
+        depth_texture: &MtlTexture,
+        configure_color_attachment: impl Fn(&MTLRenderPassColorAttachmentDescriptor),
+        scene: &Scene,
+        depth: &mut MetalSceneDepth,
+        instance_buffer: &mut InstanceBuffer,
+        instance_offset: &mut usize,
+        scene_uniforms: &SceneUniforms,
+    ) -> Result<Retained<MtlEncoder>> {
+        let encoder = new_encoder(
+            command_buffer,
+            target,
+            Some(depth_texture),
+            depth.viewport_size,
+            configure_color_attachment,
+        );
+        // `new_encoder` set the full depth range.
+        depth.viewport = None;
+        let count = scene
+            .render_plan()
+            .opaque_quads(depth.shared.scene_pass())
+            .len();
+        if count > 0 {
+            align_offset(instance_offset);
+            let next_offset = *instance_offset + count * mem::size_of::<Quad>();
+            if next_offset > instance_buffer.size {
+                encoder.endEncoding();
+                anyhow::bail!("scene too large: {count} opaque quads");
+            }
+            encoder.setRenderPipelineState(&self.opaque_quads_pipeline_state);
+            encoder.setDepthStencilState(Some(&self.depth_write_state));
+            bind_scene_uniforms(&encoder, scene_uniforms);
+            write_instance_iter(
+                instance_buffer,
+                *instance_offset,
+                count,
+                depth.shared.opaque_fills(scene),
+            );
+            bind_instance_bytes(
+                &encoder,
+                &instance_buffer.metal_buffer,
+                *instance_offset,
+                count * mem::size_of::<Quad>(),
+            );
+            draw_instanced(&encoder, MTLPrimitiveType::TriangleStrip, 4, count);
+            *instance_offset = next_offset;
+        }
+        encoder.setDepthStencilState(Some(&self.depth_test_state));
+        Ok(encoder)
+    }
+
     fn draw_shadows(
         &self,
         shadows: &[Shadow],
@@ -1795,21 +2028,27 @@ impl MetalRenderer {
         true
     }
 
+    /// Draws quads `first_index..` of the scene at their depths, leaving out the opaque
+    /// rectangles the pass's opaque fills already drew.
+    #[allow(clippy::too_many_arguments)]
     fn draw_quads(
         &self,
         quads: &[Quad],
+        first_index: usize,
+        depth: &SceneDepth,
         smoothed: bool,
         instance_buffer: &mut InstanceBuffer,
         instance_offset: &mut usize,
         scene_uniforms: &SceneUniforms,
         command_encoder: &MtlEncoder,
     ) -> bool {
-        if quads.is_empty() {
+        let count = depth.blended_quad_count(quads);
+        if count == 0 {
             return true;
         }
         align_offset(instance_offset);
 
-        let quad_bytes_len = mem::size_of_val(quads);
+        let quad_bytes_len = count * mem::size_of::<Quad>();
         let next_offset = *instance_offset + quad_bytes_len;
         if next_offset > instance_buffer.size {
             return false;
@@ -1823,20 +2062,20 @@ impl MetalRenderer {
         command_encoder.setRenderPipelineState(pipeline);
         bind_scene_uniforms(command_encoder, scene_uniforms);
 
-        write_instances(instance_buffer, *instance_offset, quads);
-        bind_instances(
+        write_instance_iter(
+            instance_buffer,
+            *instance_offset,
+            count,
+            depth.blended_quads(quads, first_index),
+        );
+        bind_instance_bytes(
             command_encoder,
             &instance_buffer.metal_buffer,
             *instance_offset,
-            quads,
+            quad_bytes_len,
         );
 
-        draw_instanced(
-            command_encoder,
-            MTLPrimitiveType::TriangleStrip,
-            4,
-            quads.len(),
-        );
+        draw_instanced(command_encoder, MTLPrimitiveType::TriangleStrip, 4, count);
         *instance_offset = next_offset;
         true
     }
@@ -2104,7 +2343,33 @@ fn new_command_encoder_for_texture(
     viewport_size: Size<DevicePixels>,
     configure_color_attachment: impl Fn(&MTLRenderPassColorAttachmentDescriptor),
 ) -> Retained<MtlEncoder> {
+    new_encoder(
+        command_buffer,
+        texture,
+        None,
+        viewport_size,
+        configure_color_attachment,
+    )
+}
+
+/// Begins a render pass on `texture`, with `depth_texture` cleared as its depth attachment
+/// when given.
+fn new_encoder(
+    command_buffer: &MtlCommandBuffer,
+    texture: &MtlTexture,
+    depth_texture: Option<&MtlTexture>,
+    viewport_size: Size<DevicePixels>,
+    configure_color_attachment: impl Fn(&MTLRenderPassColorAttachmentDescriptor),
+) -> Retained<MtlEncoder> {
     let render_pass_descriptor = MTLRenderPassDescriptor::new();
+    if let Some(depth_texture) = depth_texture {
+        let depth_attachment = render_pass_descriptor.depthAttachment();
+        depth_attachment.setTexture(Some(depth_texture));
+        depth_attachment.setLoadAction(MTLLoadAction::Clear);
+        depth_attachment.setClearDepth(0.0);
+        // Each scene pass clears depth, so it never outlives the pass.
+        depth_attachment.setStoreAction(MTLStoreAction::DontCare);
+    }
     // SAFETY: Index 0 is always a valid color attachment slot.
     let color_attachment = unsafe {
         render_pass_descriptor
@@ -2264,6 +2529,8 @@ fn new_pipeline_descriptor(
     shader: &NativeShader,
     pixel_format: MTLPixelFormat,
     blend: Blend,
+    // Pipelines drawn inside a scene pass must declare its depth attachment.
+    scene_depth: bool,
 ) -> Result<Retained<MTLRenderPipelineDescriptor>, MetalRendererError> {
     let vertex_fn = locate_function(device, library, shader.vertex_entry)?;
     let fragment_fn = locate_function(device, library, shader.fragment_entry)?;
@@ -2272,6 +2539,9 @@ fn new_pipeline_descriptor(
     descriptor.setLabel(Some(&NSString::from_str(shader.label)));
     descriptor.setVertexFunction(Some(&vertex_fn));
     descriptor.setFragmentFunction(Some(&fragment_fn));
+    if scene_depth {
+        descriptor.setDepthAttachmentPixelFormat(SCENE_DEPTH_FORMAT);
+    }
     // SAFETY: Index 0 is always a valid color attachment slot.
     let color_attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
     color_attachment.setPixelFormat(pixel_format);
@@ -2300,7 +2570,7 @@ fn build_pipeline_state(
     pixel_format: MTLPixelFormat,
 ) -> Result<Retained<MtlPipeline>, MetalRendererError> {
     let descriptor =
-        new_pipeline_descriptor(device, library, shader, pixel_format, Blend::Straight)?;
+        new_pipeline_descriptor(device, library, shader, pixel_format, Blend::Straight, true)?;
     new_pipeline_state(device, shader, &descriptor)
 }
 
@@ -2310,8 +2580,14 @@ fn build_path_sprite_pipeline_state(
     shader: &NativeShader,
     pixel_format: MTLPixelFormat,
 ) -> Result<Retained<MtlPipeline>, MetalRendererError> {
-    let descriptor =
-        new_pipeline_descriptor(device, library, shader, pixel_format, Blend::Premultiplied)?;
+    let descriptor = new_pipeline_descriptor(
+        device,
+        library,
+        shader,
+        pixel_format,
+        Blend::Premultiplied,
+        false,
+    )?;
     new_pipeline_state(device, shader, &descriptor)
 }
 
@@ -2323,8 +2599,29 @@ fn build_blur_pipeline_state(
     shader: &NativeShader,
     pixel_format: MTLPixelFormat,
 ) -> Result<Retained<MtlPipeline>, MetalRendererError> {
-    let descriptor = new_pipeline_descriptor(device, library, shader, pixel_format, Blend::None)?;
+    let descriptor =
+        new_pipeline_descriptor(device, library, shader, pixel_format, Blend::None, false)?;
     new_pipeline_state(device, shader, &descriptor)
+}
+
+/// Both depth states pass only fragments closer than the depth buffer, which clears to zero:
+/// greater depth is closer.
+fn build_depth_stencil_state(
+    device: &MtlDevice,
+    write_depth: bool,
+) -> Result<Retained<MtlDepthState>, MetalRendererError> {
+    let descriptor = MTLDepthStencilDescriptor::new();
+    descriptor.setDepthCompareFunction(MTLCompareFunction::Greater);
+    descriptor.setDepthWriteEnabled(write_depth);
+    device
+        .newDepthStencilStateWithDescriptor(&descriptor)
+        .ok_or_else(|| {
+            MetalRendererError::new(
+                Some(device),
+                "creating a depth stencil state",
+                "Metal returned nil",
+            )
+        })
 }
 
 fn required_instance_buffer_size(scene: &Scene) -> usize {
@@ -2361,6 +2658,10 @@ fn required_instance_buffer_size(scene: &Scene) -> usize {
             | PrimitiveBatch::BackdropFilters(_)
             | PrimitiveBatch::FilterBoundary(_) => {}
         }
+    }
+    let plan = scene.render_plan();
+    for scene_pass in 0..plan.scene_pass_count() {
+        reserve(mem::size_of::<Quad>(), plan.opaque_quads(scene_pass).len());
     }
     required
 }
@@ -3405,6 +3706,223 @@ mod tests {
                 g > 20 && g < 200 && texel.0[0] < 11
             }),
             "triangle edges are antialiased",
+        );
+    }
+
+    /// Opaque quads, translucent quads and every kind of pass break the opaque pre-pass has
+    /// to respect: a backdrop blur, an opacity group, a blurred content group and a faded
+    /// mask. Mirrors `overdraw_scene` in `gpui_wgpu`'s headless tests.
+    fn overdraw_scene(renderer: &MetalHeadlessRenderer) -> Scene {
+        let rect = |x: f32, y: f32, w: f32, h: f32| Bounds {
+            origin: gpui::point(ScaledPixels(x), ScaledPixels(y)),
+            size: Size {
+                width: ScaledPixels(w),
+                height: ScaledPixels(h),
+            },
+        };
+        let full_mask = || ContentMask {
+            bounds: rect(0.0, 0.0, 310.0, 100.0),
+            ..Default::default()
+        };
+        let pixels: Vec<u8> = (0..64)
+            .flat_map(|index| [index as u8 * 4, 90, 255 - index as u8 * 4, 255])
+            .collect();
+        let image = renderer
+            .sprite_atlas()
+            .get_or_insert_with(
+                AtlasKey::Image(RenderImageParams {
+                    image_id: ImageId(7),
+                    frame_index: 0,
+                    downscale_level: 0,
+                }),
+                &mut || {
+                    Ok(Some((
+                        Size {
+                            width: DevicePixels(8),
+                            height: DevicePixels(8),
+                        },
+                        Cow::Owned(pixels.clone()),
+                    )))
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let color = |rgb: u32, alpha: f32| {
+            let mut color = gpui::rgb_to_hsla(gpui::rgb(rgb));
+            color.alpha = alpha;
+            color
+        };
+        let quad = |x: f32, y: f32, w: f32, h: f32, rgb: u32, alpha: f32| Quad {
+            bounds: rect(x, y, w, h),
+            content_mask: full_mask(),
+            background: solid_background(color(rgb, alpha)),
+            ..Default::default()
+        };
+        let group = |is_start: bool, filters, opacity| gpui::FilterBoundary {
+            order: 0,
+            bounds: rect(150.0, 0.0, 80.0, 100.0),
+            content_mask: full_mask(),
+            corner_radii: Corners::all(ScaledPixels(6.0)),
+            corner_smoothing: 0.0,
+            filters,
+            opacity,
+            is_start,
+        };
+
+        let mut scene = Scene::default();
+        scene.insert_primitive(quad(0.0, 0.0, 310.0, 100.0, 0x202428, 1.0));
+        // Opaque cards: plain, bordered and rounded, smoothed, and under a translucent overlay.
+        scene.insert_primitive(quad(6.0, 6.0, 40.0, 40.0, 0x3050ff, 1.0));
+        scene.insert_primitive(Quad {
+            border_color: color(0xffffff, 0.6).into(),
+            border_widths: Edges::all(ScaledPixels(3.0)),
+            corner_radii: Corners::all(ScaledPixels(9.0)),
+            ..quad(30.0, 20.0, 50.0, 40.0, 0xe0a020, 1.0)
+        });
+        scene.insert_primitive(Quad {
+            corner_radii: Corners::all(ScaledPixels(12.0)),
+            corner_smoothing: 0.8,
+            ..quad(60.0, 40.0, 40.0, 40.0, 0x20c060, 1.0)
+        });
+        scene.insert_primitive(quad(20.0, 50.0, 70.0, 30.0, 0xff2040, 0.5));
+        scene.insert_primitive(Shadow {
+            order: 0,
+            blur_radius: ScaledPixels(4.0),
+            bounds: rect(84.0, 4.0, 40.0, 30.0),
+            corner_radii: Corners::all(ScaledPixels(4.0)),
+            content_mask: full_mask(),
+            color: color(0x000000, 0.7).into(),
+            shape_bounds: rect(88.0, 8.0, 32.0, 22.0),
+            shape_corner_radii: Corners::all(ScaledPixels(4.0)),
+            inset: gpui::ShaderBool::Disabled,
+            corner_smoothing: 0.0,
+        });
+        scene.insert_primitive(quad(88.0, 8.0, 32.0, 22.0, 0xf0f0f0, 1.0));
+        scene.insert_primitive(PolychromeSprite {
+            order: 0,
+            grayscale: gpui::ShaderBool::Disabled,
+            opacity: 1.0,
+            corner_smoothing: 0.0,
+            bounds: rect(96.0, 14.0, 16.0, 16.0),
+            content_mask: full_mask(),
+            corner_radii: Default::default(),
+            tile: image,
+        });
+        scene.insert_primitive(Underline {
+            order: 0,
+            padding: 0,
+            bounds: rect(88.0, 32.0, 32.0, 3.0),
+            content_mask: full_mask(),
+            color: color(0x30a0ff, 1.0).into(),
+            thickness: ScaledPixels(2.0),
+            wavy: gpui::ShaderBool::Disabled,
+        });
+        // An opaque quad whose mask fades out must still blend at its edges.
+        scene.insert_primitive(Quad {
+            content_mask: ContentMask {
+                bounds: rect(100.0, 40.0, 45.0, 50.0),
+                fade_out: Edges::all(ScaledPixels(8.0)),
+            },
+            ..quad(100.0, 40.0, 45.0, 50.0, 0xc040c0, 1.0)
+        });
+        // An opacity group and a blurred group over opaque cards: their contents must not
+        // occlude what lies behind the group.
+        scene.insert_primitive(quad(150.0, 10.0, 70.0, 30.0, 0x40e0e0, 1.0));
+        scene.insert_primitive(group(true, smallvec::smallvec![], 0.5));
+        scene.insert_primitive(quad(160.0, 20.0, 50.0, 40.0, 0xffff00, 1.0));
+        scene.insert_primitive(Quad {
+            corner_radii: Corners::all(ScaledPixels(5.0)),
+            ..quad(170.0, 30.0, 40.0, 20.0, 0x0040ff, 1.0)
+        });
+        scene.insert_primitive(group(false, smallvec::smallvec![], 0.5));
+        scene.insert_primitive(group(
+            true,
+            smallvec::smallvec![ScaledFilter::Blur(ScaledPixels(2.0))],
+            1.0,
+        ));
+        scene.insert_primitive(quad(155.0, 65.0, 30.0, 25.0, 0xffffff, 1.0));
+        scene.insert_primitive(group(
+            false,
+            smallvec::smallvec![ScaledFilter::Blur(ScaledPixels(2.0))],
+            1.0,
+        ));
+        // A backdrop blur splits the pass: quads before it are blurred, quads after it are not.
+        scene.insert_primitive(quad(235.0, 5.0, 30.0, 90.0, 0xff8000, 1.0));
+        scene.insert_primitive(quad(270.0, 5.0, 30.0, 90.0, 0x8000ff, 1.0));
+        scene.insert_primitive(BackdropFilter {
+            order: 0,
+            bounds: rect(240.0, 20.0, 55.0, 60.0),
+            content_mask: full_mask(),
+            corner_radii: Corners::all(ScaledPixels(10.0)),
+            corner_smoothing: 0.0,
+            filters: smallvec::smallvec![ScaledFilter::Blur(ScaledPixels(6.0))],
+            opacity: 1.0,
+        });
+        scene.insert_primitive(quad(250.0, 40.0, 20.0, 20.0, 0x00ff80, 1.0));
+        scene.insert_primitive(quad(255.0, 45.0, 30.0, 10.0, 0xffffff, 0.4));
+        scene.finish();
+        scene
+    }
+
+    /// The opaque pre-pass only skips work: with it and without it, every pixel matches.
+    #[test]
+    fn opaque_prepass_keeps_every_pixel() {
+        let target = Size {
+            width: DevicePixels(310),
+            height: DevicePixels(100),
+        };
+        let mut renderer = MetalHeadlessRenderer::new().unwrap();
+        let scene = overdraw_scene(&renderer);
+        let plan = scene.render_plan();
+        assert!(
+            plan.scene_pass_count() >= 4,
+            "the groups and the backdrop filter split the frame into scene passes"
+        );
+        let opaque_passes = (0..plan.scene_pass_count())
+            .filter(|&pass| !plan.opaque_quads(pass).is_empty())
+            .count();
+        assert!(opaque_passes >= 3, "opaque fills in {opaque_passes} passes");
+        let Some(with_prepass) = render_for_contracts(&mut renderer, &scene, target) else {
+            return;
+        };
+
+        let mut blended = overdraw_scene(&renderer);
+        blended.disable_opaque_quads();
+        let without_prepass = render_for_contracts(&mut renderer, &blended, target)
+            .expect("the first render ran on Metal");
+
+        let differing: Vec<_> = with_prepass
+            .enumerate_pixels()
+            .zip(without_prepass.pixels())
+            .filter(|((_, _, actual), expected)| actual != expected)
+            .map(|((x, y, actual), expected)| (x, y, actual.0, expected.0))
+            .take(8)
+            .collect();
+        if !differing.is_empty() {
+            let _ = with_prepass.save(std::env::temp_dir().join("gpui_metal_opaque_prepass.png"));
+            let _ =
+                without_prepass.save(std::env::temp_dir().join("gpui_metal_opaque_blended.png"));
+        }
+        assert!(differing.is_empty(), "pixels differ: {differing:?}");
+        // Equal renders could still both be wrong, since both depth-test. The pre-pass drew
+        // this card alone, and the sprite and underline must pass the depth test.
+        assert_pixel_close(
+            &with_prepass,
+            10,
+            10,
+            [0x30, 0x50, 0xff, 255],
+            1,
+            "opaque card",
+        );
+        assert_ne!(
+            pixel(&with_prepass, 104, 22),
+            [0xf0, 0xf0, 0xf0, 255],
+            "sprite"
+        );
+        assert_ne!(
+            pixel(&with_prepass, 104, 33),
+            [0x20, 0x24, 0x28, 255],
+            "underline"
         );
     }
 }
