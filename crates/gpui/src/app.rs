@@ -85,6 +85,7 @@ pub const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(200);
 #[doc(hidden)]
 pub struct AppCell {
     app: RefCell<App>,
+    borrow_origin: Cell<Option<(&'static std::panic::Location<'static>, &'static str)>>,
 }
 
 thread_local! {
@@ -108,6 +109,21 @@ fn note_app_borrow(delta: isize) {
 }
 
 impl AppCell {
+    #[cold]
+    #[track_caller]
+    fn borrow_failed(&self, kind: &str) -> ! {
+        let attempted = std::panic::Location::caller();
+        if let Some((origin, existing_kind)) = self.borrow_origin.get() {
+            panic!(
+                "RefCell already borrowed: attempted {kind} App borrow at {attempted}; \
+                 existing {existing_kind} borrow group began at {origin}"
+            );
+        }
+        panic!(
+            "RefCell already borrowed: attempted {kind} App borrow at {attempted}; origin unavailable"
+        );
+    }
+
     #[doc(hidden)]
     #[track_caller]
     pub fn borrow(&self) -> AppRef<'_> {
@@ -115,21 +131,28 @@ impl AppCell {
             let thread_id = std::thread::current().id();
             eprintln!("borrowed {thread_id:?}");
         }
-        let app = self.app.borrow();
+        // Keep the first origin across overlapping shared borrows. The old
+        // origin may remain after release; the next group replaces it.
+        let starts_borrow_group = self.app.try_borrow_mut().is_ok();
+        let borrow = match self.app.try_borrow() {
+            Ok(borrow) => borrow,
+            Err(_) => self.borrow_failed("shared"),
+        };
+        if starts_borrow_group {
+            self.borrow_origin
+                .set(Some((std::panic::Location::caller(), "shared")));
+        }
         note_app_borrow(1);
-        AppRef(app)
+        AppRef(borrow)
     }
 
     #[doc(hidden)]
     #[track_caller]
     pub fn borrow_mut(&self) -> AppRefMut<'_> {
-        if option_env!("TRACK_THREAD_BORROWS").is_some() {
-            let thread_id = std::thread::current().id();
-            eprintln!("borrowed {thread_id:?}");
+        match self.try_borrow_mut() {
+            Ok(borrow) => borrow,
+            Err(_) => self.borrow_failed("mutable"),
         }
-        let app = self.app.borrow_mut();
-        note_app_borrow(1);
-        AppRefMut(app)
     }
 
     #[doc(hidden)]
@@ -139,9 +162,11 @@ impl AppCell {
             let thread_id = std::thread::current().id();
             eprintln!("borrowed {thread_id:?}");
         }
-        let app = self.app.try_borrow_mut()?;
+        let borrow = self.app.try_borrow_mut()?;
+        self.borrow_origin
+            .set(Some((std::panic::Location::caller(), "mutable")));
         note_app_borrow(1);
-        Ok(AppRefMut(app))
+        Ok(AppRefMut(borrow))
     }
 }
 
@@ -1059,6 +1084,7 @@ impl App {
         let _ref_counts = entities.ref_counts_drop_handle();
 
         let app = Rc::new_cyclic(|this| AppCell {
+            borrow_origin: Cell::new(None),
             app: RefCell::new(App {
                 this: this.clone(),
                 platform: platform.clone(),
@@ -4317,6 +4343,55 @@ mod test {
 
         assert!(launched.get());
         assert!(async_app.app.upgrade().is_none());
+    }
+
+    #[gpui::test]
+    fn app_borrow_diagnostics(cx: &mut TestAppContext) {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        let app = cx.app.clone();
+        let first_line = line!() + 1;
+        let first = app.borrow();
+        let second = app.borrow();
+        drop(first);
+        assert!(app.try_borrow_mut().is_err());
+        let attempted_line = line!() + 1;
+        let panic = catch_unwind(AssertUnwindSafe(|| drop(app.borrow_mut())));
+        let message = *panic
+            .expect_err("conflicting borrow")
+            .downcast::<String>()
+            .unwrap();
+        assert!(message.contains(&format!(
+            "mutable App borrow at {}:{attempted_line}:",
+            file!()
+        )));
+        assert!(message.contains(&format!(
+            "shared borrow group began at {}:{first_line}:",
+            file!()
+        )));
+        drop(second);
+
+        let origin_line = line!() + 2;
+        let panic = catch_unwind(AssertUnwindSafe(|| {
+            let _borrow = app.try_borrow_mut().expect("initial borrow");
+            drop(app.borrow());
+        }));
+        let message = *panic
+            .expect_err("conflicting borrow")
+            .downcast::<String>()
+            .unwrap();
+        assert!(message.contains("attempted shared App borrow"));
+        assert!(message.contains(&format!(
+            "mutable borrow group began at {}:{origin_line}:",
+            file!()
+        )));
+
+        let next_line = line!() + 1;
+        let _borrow = app.borrow();
+        assert_eq!(
+            app.borrow_origin.get().expect("new origin").0.line(),
+            next_line
+        );
     }
 
     struct RenderCounter(Rc<Cell<usize>>);
