@@ -5,7 +5,7 @@
 //! touches, winners claim them, and losers are cancelled. Recognized gestures
 //! are surfaced through *existing* semantic events wherever possible, a tap
 //! becomes [`ClickEvent::Touch`](crate::ClickEvent), a pan becomes
-//! [`ScrollWheelEvent`](crate::ScrollWheelEvent)s carrying a
+//! [`ScrollEvent`](crate::ScrollEvent)s carrying a
 //! [`TouchPhase`](crate::TouchPhase), and a pinch becomes
 //! [`PinchEvent`](crate::PinchEvent)s — so components written against
 //! `on_click` and scroll containers work untouched on mobile.
@@ -19,8 +19,8 @@ use smallvec::SmallVec;
 
 use crate::{
     Axis, GestureEvent, InputEvent, IsZero, Modifiers, MouseButton, MouseDownEvent, MouseEvent,
-    MouseUpEvent, Pixels, PlatformInput, Point, ScrollDelta, ScrollWheelEvent, TouchEvent, TouchId,
-    TouchPhase, point, px, seal::Sealed,
+    MouseUpEvent, Pixels, PlatformInput, Point, ScrollDelta, ScrollEvent, ScrollSource, TouchEvent,
+    TouchId, TouchPhase, point, px, seal::Sealed,
 };
 
 const SCROLL_EVENT_SEPARATION: Duration = Duration::from_millis(28);
@@ -356,7 +356,7 @@ pub struct GestureKinds {
     /// Long press, surfaced as [`LongPressEvent`].
     pub long_press: bool,
     /// Pan/scroll (including fling momentum), surfaced as
-    /// [`ScrollWheelEvent`](crate::ScrollWheelEvent)s.
+    /// [`ScrollEvent`](crate::ScrollEvent)s.
     pub pan: bool,
     /// Pinch to zoom, surfaced as [`PinchEvent`](crate::PinchEvent)s.
     pub pinch: bool,
@@ -500,7 +500,7 @@ pub(crate) struct TouchGestureRecognizer {
 pub(crate) enum RecognizedTouchGesture {
     /// One step of a pan (or of its post-release momentum), delivered to
     /// scroll listeners at the pan's starting position.
-    Scroll(ScrollWheelEvent),
+    Scroll(ScrollEvent),
     /// A recognized tap, delivered as a synthesized mouse press and release.
     Tap {
         down: MouseDownEvent,
@@ -1032,12 +1032,13 @@ fn scroll_event(
     position: Point<Pixels>,
     delta: Point<Pixels>,
     touch_phase: TouchPhase,
-) -> ScrollWheelEvent {
-    ScrollWheelEvent {
+) -> ScrollEvent {
+    ScrollEvent {
         position,
         delta: ScrollDelta::Pixels(delta),
         modifiers: Modifiers::default(),
         touch_phase,
+        source: ScrollSource::Touch,
     }
 }
 
@@ -2115,7 +2116,7 @@ mod tests {
         );
         assert!(matches!(
             moved.as_slice(),
-            [RecognizedTouchGesture::Scroll(ScrollWheelEvent {
+            [RecognizedTouchGesture::Scroll(ScrollEvent {
                 touch_phase: TouchPhase::Started,
                 ..
             })]
@@ -2189,7 +2190,7 @@ mod tests {
         );
         assert!(matches!(
             moved.as_slice(),
-            [RecognizedTouchGesture::Scroll(ScrollWheelEvent {
+            [RecognizedTouchGesture::Scroll(ScrollEvent {
                 touch_phase: TouchPhase::Started,
                 ..
             })]

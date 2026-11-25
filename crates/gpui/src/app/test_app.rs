@@ -728,11 +728,12 @@ impl<V: 'static + Render> TestAppWindow<V> {
     ///
     /// No modifier keys are held.
     pub fn simulate_scroll(&mut self, position: Point<Pixels>, delta: Point<Pixels>) {
-        self.simulate_event(crate::ScrollWheelEvent {
+        self.simulate_event(crate::ScrollEvent {
             position,
             delta: crate::ScrollDelta::Pixels(delta),
             modifiers: Default::default(),
             touch_phase: crate::TouchPhase::Moved,
+            source: crate::ScrollSource::Pointer,
         });
     }
 
