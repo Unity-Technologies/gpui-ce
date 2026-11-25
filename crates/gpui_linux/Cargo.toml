@@ -19,7 +19,6 @@ test-support = ["gpui/test-support"]
 # (`Window::render_to_image`) without the rest of `test-support`.
 render-to-image = ["gpui/render-to-image", "gpui_wgpu?/render-to-image"]
 wayland = [
-  "bitflags",
   "gpui_wgpu",
   "ashpd/wayland",
 
@@ -80,7 +79,6 @@ raw-window-handle.workspace = true
 
 # Used in both windowing options
 ashpd = { workspace = true, optional = true }
-bitflags = { workspace = true, optional = true }
 filedescriptor = { workspace = true, optional = true }
 open = { workspace = true, optional = true }
 xkbcommon = { workspace = true, optional = true }
@@ -130,4 +128,4 @@ xim = { workspace = true, optional = true, features = [
 gpui = { workspace = true, features = ["test-support"] }
 
 [package.metadata.cargo-shear]
-ignored = ["bitflags", "scap"]
+ignored = ["scap"]

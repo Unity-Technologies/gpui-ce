@@ -279,7 +279,6 @@ fn normal_hints(
 }
 
 pub struct X11WindowState {
-    pub destroyed: bool,
     parent: Option<X11WindowStatePtr>,
     children: FxHashSet<xproto::Window>,
     client: X11ClientStatePtr,
@@ -292,7 +291,9 @@ pub struct X11WindowState {
     pub(crate) last_sync_counter: Option<sync::Int64>,
     bounds: Bounds<Pixels>,
     scale_factor: f32,
-    renderer: WgpuRenderer,
+    /// Taken when the window is dropped. Its GPU objects use the X connection, so they mustn't
+    /// outlive the window, which a display mode switch relies on.
+    renderer: Option<WgpuRenderer>,
     display: Rc<dyn PlatformDisplay>,
     input_handler: Option<PlatformInputHandler>,
     appearance: WindowAppearance,
@@ -326,6 +327,13 @@ impl X11WindowState {
     fn is_maximized(&self) -> bool {
         // A maximized window that gets minimized will still retain its maximized state.
         !self.hidden && self.maximized_vertical && self.maximized_horizontal
+    }
+
+    fn update_transparency(&mut self) {
+        let is_transparent = self.is_transparent();
+        if let Some(renderer) = &mut self.renderer {
+            renderer.update_transparency(is_transparent);
+        }
     }
 }
 
@@ -865,7 +873,7 @@ impl X11WindowState {
                 visual_id: visual.id,
                 bounds: bounds.to_pixels(scale_factor),
                 scale_factor,
-                renderer,
+                renderer: Some(renderer),
                 atoms: *atoms,
                 input_handler: None,
                 active: false,
@@ -881,7 +889,6 @@ impl X11WindowState {
                 appearance,
                 handle,
                 background_appearance: WindowBackgroundAppearance::Opaque,
-                destroyed: false,
                 client_side_decorations_supported,
                 decorations: WindowDecorations::Server,
                 last_insets: [0, 0, 0, 0],
@@ -920,9 +927,11 @@ impl Drop for X11Window {
             parent.state.borrow_mut().children.remove(&self.0.x_window);
         }
 
-        state.renderer.destroy();
+        // The renderer's GPU objects use the X connection, and a display mode switch closes the
+        // connection once no window is left in the client's window map, so both go now.
+        state.renderer.take();
 
-        let destroy_x_window = maybe!({
+        maybe!({
             check_reply(
                 || "X11 DestroyWindow failure.",
                 self.0.xcb.destroy_window(self.0.x_window),
@@ -932,22 +941,13 @@ impl Drop for X11Window {
             anyhow::Ok(())
         })
         .log_err();
-
-        if destroy_x_window.is_some() {
-            state.destroyed = true;
-
-            let this_ptr = self.0.clone();
-            let client_ptr = state.client.clone();
-            state
-                .executor
-                .spawn(async move {
-                    this_ptr.close();
-                    client_ptr.drop_window(this_ptr.x_window);
-                })
-                .detach();
-        }
-
+        let client = state.client.clone();
+        let executor = state.executor.clone();
         drop(state);
+
+        client.drop_window(self.0.x_window);
+        let this_ptr = self.0.clone();
+        executor.spawn(async move { this_ptr.close() }).detach();
     }
 }
 
@@ -1366,7 +1366,9 @@ impl X11WindowStatePtr {
             }
 
             let gpu_size = query_render_extent(&self.xcb, self.x_window)?;
-            state.renderer.update_drawable_size(gpu_size);
+            if let Some(renderer) = &mut state.renderer {
+                renderer.update_drawable_size(gpu_size);
+            }
             let result = (is_resize, state.content_size(), state.scale_factor);
             if let Some(value) = state.last_sync_counter.take() {
                 check_reply(
@@ -1434,8 +1436,7 @@ impl X11WindowStatePtr {
     pub fn set_appearance(&mut self, appearance: WindowAppearance) {
         let mut state = self.state.borrow_mut();
         state.appearance = appearance;
-        let is_transparent = state.is_transparent();
-        state.renderer.update_transparency(is_transparent);
+        state.update_transparency();
         state.appearance = appearance;
         drop(state);
         let callback = self.callbacks.borrow_mut().appearance_changed.take();
@@ -1588,8 +1589,11 @@ impl PlatformWindow for X11Window {
         let Some(client) = self.0.state.borrow().client.get_client() else {
             return;
         };
-        let executor = client.0.borrow().common.background_executor.clone();
-        crate::linux::character_palette::show_character_palette(executor, None);
+        let state = client.0.borrow();
+        let executor = state.common.borrow().background_executor.clone();
+        let environment = state.graphical_environment.clone();
+        drop(state);
+        crate::linux::character_palette::show_character_palette(executor, None, environment);
     }
 
     fn prompt(
@@ -1706,8 +1710,7 @@ impl PlatformWindow for X11Window {
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
         let mut state = self.0.state.borrow_mut();
         state.background_appearance = background_appearance;
-        let transparent = state.is_transparent();
-        state.renderer.update_transparency(transparent);
+        state.update_transparency();
     }
 
     fn background_appearance(&self) -> WindowBackgroundAppearance {
@@ -1834,6 +1837,10 @@ impl PlatformWindow for X11Window {
         self.0.callbacks.borrow_mut().moved = Some(callback);
     }
 
+    // A GPUI display on X11 is an X screen, which spans every monitor, and a
+    // window never changes screen.
+    fn on_display_changed(&self, _callback: Box<dyn FnMut()>) {}
+
     fn on_should_close(&self, callback: Box<dyn FnMut() -> bool>) {
         self.0.callbacks.borrow_mut().should_close = Some(callback);
     }
@@ -1855,8 +1862,12 @@ impl PlatformWindow for X11Window {
 
     fn draw(&self, scene: &Scene) {
         let mut inner = self.0.state.borrow_mut();
+        let inner = &mut *inner;
+        let Some(renderer) = &mut inner.renderer else {
+            return;
+        };
 
-        if inner.renderer.device_lost() {
+        if renderer.device_lost() {
             let raw_window = RawWindow {
                 connection: as_raw_xcb_connection::AsRawXcbConnection::as_raw_xcb_connection(
                     &*self.0.xcb,
@@ -1865,7 +1876,7 @@ impl PlatformWindow for X11Window {
                 window_id: self.0.x_window,
                 visual_id: inner.visual_id,
             };
-            match inner.renderer.recover(&raw_window) {
+            match renderer.recover(&raw_window) {
                 Ok(()) => {}
                 Err(err) => {
                     log::warn!("GPU recovery failed, will retry on next frame: {err}");
@@ -1876,9 +1887,9 @@ impl PlatformWindow for X11Window {
             return;
         }
 
-        inner.renderer.draw(scene);
+        renderer.draw(scene);
 
-        if inner.renderer.needs_redraw() {
+        if renderer.needs_redraw() {
             inner.force_render_after_recovery = true;
         }
     }
@@ -1889,8 +1900,14 @@ impl PlatformWindow for X11Window {
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
-        let inner = self.0.state.borrow();
-        inner.renderer.sprite_atlas().clone()
+        self.0
+            .state
+            .borrow()
+            .renderer
+            .as_ref()
+            .expect("the renderer is only taken when the window is dropped")
+            .sprite_atlas()
+            .clone()
     }
 
     fn show_window_menu(&self, position: Point<Pixels>) {
@@ -2064,13 +2081,11 @@ impl PlatformWindow for X11Window {
         match decorations {
             WindowDecorations::Server => {
                 state.decorations = WindowDecorations::Server;
-                let is_transparent = state.is_transparent();
-                state.renderer.update_transparency(is_transparent);
+                state.update_transparency();
             }
             WindowDecorations::Client => {
                 state.decorations = WindowDecorations::Client;
-                let is_transparent = state.is_transparent();
-                state.renderer.update_transparency(is_transparent);
+                state.update_transparency();
             }
         }
 
@@ -2089,11 +2104,16 @@ impl PlatformWindow for X11Window {
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
-        self.0.state.borrow().renderer.gpu_specs().into()
+        self.0
+            .state
+            .borrow()
+            .renderer
+            .as_ref()
+            .map(WgpuRenderer::gpu_specs)
     }
 
     fn gpu_context(&self) -> Option<Box<dyn std::any::Any>> {
-        let (device, queue) = self.0.state.borrow().renderer.gpu_context();
+        let (device, queue) = self.0.state.borrow().renderer.as_ref()?.gpu_context();
         Some(Box::new((device, queue)))
     }
 
@@ -2102,6 +2122,7 @@ impl PlatformWindow for X11Window {
             .state
             .borrow()
             .renderer
+            .as_ref()?
             .gpu_context_info()
             .map(|context| Box::new(context) as Box<dyn std::any::Any>)
     }
@@ -2109,7 +2130,7 @@ impl PlatformWindow for X11Window {
     fn gpu_device_lost(&self) -> Option<bool> {
         // Only loads an atomic flag — safe even mid-recovery, when
         // `gpu_context` would panic on the torn-down resources.
-        Some(self.0.state.borrow().renderer.device_lost())
+        Some(self.0.state.borrow().renderer.as_ref()?.device_lost())
     }
 
     fn play_system_bell(&self) {

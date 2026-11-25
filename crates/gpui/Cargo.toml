@@ -160,6 +160,8 @@ windows = { workspace = true, features = [
   "Win32_Foundation",
   "Win32_Graphics_Direct3D11",
   "Win32_System_Power",
+  "Win32_System_RemoteDesktop",
+  "Win32_System_Threading",
   "Win32_System_WindowsProgramming",
   "Win32_UI_WindowsAndMessaging",
 ] }
@@ -374,3 +376,7 @@ path = "examples/legacy/window_positioning.rs"
 [[example]]
 name = "window_shadow"
 path = "examples/legacy/window_shadow.rs"
+
+[[example]]
+name = "toggle_headless"
+path = "examples/toggle_headless.rs"

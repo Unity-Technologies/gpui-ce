@@ -33,6 +33,7 @@ impl WgpuRenderer {
                 transparent: false,
                 preferred_present_mode: None,
             },
+            false,
             None,
             None,
             Arc::new(WgpuAtlas::from_context(context)),

@@ -2568,7 +2568,6 @@ dependencies = [
  "anyhow",
  "as-raw-xcb-connection",
  "ashpd",
- "bitflags",
  "bytemuck",
  "calloop",
  "calloop-wayland-source",

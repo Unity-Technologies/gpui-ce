@@ -91,13 +91,16 @@ impl WgpuRenderer {
         context: &WgpuContext,
         surface: Option<wgpu::Surface<'static>>,
         config: WgpuSurfaceConfig,
+        surface_configured: bool,
         compositor_gpu: Option<CompositorGpuHint>,
         extra_requirements: Option<WgpuDeviceRequirements>,
         atlas: Arc<WgpuAtlas>,
     ) -> anyhow::Result<Self> {
         let target =
             RenderTarget::new(&context.adapter, &context.device, surface.as_ref(), config)?;
-        if let Some(surface) = surface.as_ref() {
+        // Adapter selection configures the surface with this same configuration when it
+        // creates the context, so only configure it here when that did not happen.
+        if let Some(surface) = surface.as_ref().filter(|_| !surface_configured) {
             surface.configure(&context.device, target.configuration());
         }
 
@@ -136,6 +139,18 @@ impl WgpuRenderer {
                 recovery_not_before: None,
             },
         })
+    }
+
+    /// Returns the configuration a renderer created for `surface` with `config` will use.
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn surface_configuration(
+        adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
+        surface: &wgpu::Surface<'_>,
+        config: &WgpuSurfaceConfig,
+    ) -> anyhow::Result<wgpu::SurfaceConfiguration> {
+        RenderTarget::new(adapter, device, Some(surface), *config)
+            .map(|target| target.configuration().clone())
     }
 
     pub fn update_drawable_size(&mut self, size: Size<DevicePixels>) {

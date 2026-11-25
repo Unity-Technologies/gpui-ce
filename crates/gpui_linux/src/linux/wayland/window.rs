@@ -24,6 +24,7 @@ use wayland_client::{
     Dispatch, Proxy, QueueHandle,
     protocol::{wl_callback, wl_output, wl_seat, wl_shm, wl_surface},
 };
+use wayland_protocols::ext::background_effect::v1::client::ext_background_effect_surface_v1;
 use wayland_protocols::wp::viewporter::client::wp_viewport;
 use wayland_protocols::xdg::decoration::zv1::client::{
     zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1,
@@ -41,9 +42,9 @@ use wayland_protocols_plasma::blur::client::org_kde_kwin_blur;
 use wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_surface_v1;
 
 use crate::linux::wayland::{display::WaylandDisplay, serial::SerialKind};
-use crate::linux::{Globals, Output, WaylandClientStatePtr, get_window};
+use crate::linux::{Globals, Output, PendingActivation, WaylandClientStatePtr, get_window};
 use gpui::{
-    AnyWindowHandle, Bounds, Capslock, Decorations, DevicePixels, ExternalDragPayload,
+    AnyWindowHandle, Bounds, Capslock, Corners, Decorations, DevicePixels, ExternalDragPayload,
     FrameRequestSource, GpuSpecs, Modifiers, Pixels, PlatformAtlas, PlatformDisplay,
     PlatformFrameSignal, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton,
     PromptLevel, RequestFrameOptions, ResizeEdge, Scene, Size, Tiling, WindowAppearance,
@@ -64,6 +65,7 @@ pub(crate) struct Callbacks {
     hover_status_change: Option<Box<dyn FnMut(bool)>>,
     resize: Option<Box<dyn FnMut(Size<Pixels>, f32)>>,
     moved: Option<Box<dyn FnMut()>>,
+    display_changed: Option<Box<dyn FnMut()>>,
     should_close: Option<Box<dyn FnMut() -> bool>>,
     close: Option<Box<dyn FnOnce()>>,
     appearance_changed: Option<Box<dyn FnMut()>>,
@@ -120,12 +122,15 @@ pub struct WaylandWindowState {
     title: Option<String>,
     window_min_size: Option<Size<Pixels>>,
     appearance: WindowAppearance,
-    blur: Option<org_kde_kwin_blur::OrgKdeKwinBlur>,
+    kde_blur: Option<org_kde_kwin_blur::OrgKdeKwinBlur>,
+    background_effects: Option<ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1>,
     viewport: Option<wp_viewport::WpViewport>,
     outputs: HashMap<ObjectId, Output>,
     display: Option<(ObjectId, Output)>,
     globals: Globals,
-    renderer: WgpuRenderer,
+    /// Taken when the window is dropped. Its GPU objects use the Wayland connection, so they
+    /// mustn't outlive the window, which a display mode switch relies on.
+    renderer: Option<WgpuRenderer>,
     bounds: Bounds<Pixels>,
     scale: f32,
     input_handler: Option<PlatformInputHandler>,
@@ -150,6 +155,7 @@ pub struct WaylandWindowState {
     in_progress_window_controls: Option<WindowControls>,
     window_controls: WindowControls,
     client_inset: Option<Pixels>,
+    client_corner_radii: Corners<Pixels>,
     accesskit_adapter: Option<accesskit_unix::Adapter>,
     icon: Option<Arc<ImageBuffer<Rgba<u8>, Vec<u8>>>>,
     generated_icons: Vec<FileDescriptor>,
@@ -742,12 +748,13 @@ impl WaylandWindowState {
             window_min_size: options.window_min_size,
             icon: options.icon,
             generated_icons: Vec::default(),
-            blur: None,
+            kde_blur: None,
+            background_effects: None,
             viewport,
             globals,
             outputs: HashMap::default(),
             display: None,
-            renderer,
+            renderer: Some(renderer),
             bounds: options.bounds,
             scale: 1.0,
             input_handler: None,
@@ -772,6 +779,7 @@ impl WaylandWindowState {
             in_progress_window_controls: None,
             window_controls: WindowControls::default(),
             client_inset: None,
+            client_corner_radii: Corners::default(),
             accesskit_adapter: None,
         })
     }
@@ -810,10 +818,12 @@ impl WaylandWindowState {
                 .set_min_size(f32::from(size.width) as i32, f32::from(size.height) as i32);
         }
 
-        let max_texture_size = self.renderer.max_texture_size() as i32;
-        xdg_state
-            .toplevel
-            .set_max_size(max_texture_size, max_texture_size);
+        if let Some(renderer) = &self.renderer {
+            let max_texture_size = renderer.max_texture_size() as i32;
+            xdg_state
+                .toplevel
+                .set_max_size(max_texture_size, max_texture_size);
+        }
 
         if let Some(parent) = self.parent.as_ref() {
             let parent_toplevel = parent.toplevel();
@@ -834,12 +844,19 @@ impl WaylandWindowState {
             .as_ref()
             .and_then(|(_, output)| output.subpixel)
             .is_some_and(|s| s == Subpixel::HorizontalBgr);
-        self.renderer.set_subpixel_layout(is_bgr);
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_subpixel_layout(is_bgr);
+        }
     }
 
     pub fn primary_output_scale(&mut self) -> i32 {
         let mut scale = 1;
-        let mut current_output = self.display.take();
+        // Keep the display the surface last left only while it is on no
+        // other output.
+        let mut current_output = self
+            .display
+            .take()
+            .filter(|(id, _)| self.outputs.is_empty() || self.outputs.contains_key(id));
         for (id, output) in self.outputs.iter() {
             if let Some((_, output_data)) = &current_output {
                 if output.scale > output_data.scale {
@@ -952,11 +969,16 @@ impl Drop for WaylandWindow {
 
         let client = state.client.clone();
 
-        state.renderer.destroy();
+        state.renderer.take();
 
         // Destroy blur first, this has no dependencies.
-        if let Some(blur) = &state.blur {
+        if let Some(blur) = &state.kde_blur {
             blur.release();
+        }
+
+        // Destroy background effects, this has no dependencies.
+        if let Some(background_effects) = &state.background_effects {
+            background_effects.destroy();
         }
 
         // Destroys any decoration before its toplevel. layer_surface has no dependencies.
@@ -971,13 +993,13 @@ impl Drop for WaylandWindow {
         // The wl_surface itself should always be destroyed last.
         state.surface.destroy();
 
+        client.drop_window(&surface_id);
         let state_ptr = self.0.clone();
         state
             .globals
             .executor
             .spawn(async move {
                 state_ptr.close();
-                client.drop_window(&surface_id)
             })
             .detach();
         drop(state);
@@ -1349,7 +1371,7 @@ impl WaylandWindowStatePtr {
 
             let initial_configure = self.frame_loop.get() == FrameLoop::Unconfigured;
             let visible = state.visible;
-            drop(state);
+            update_window(state);
             if !visible {
                 return;
             } else if initial_configure {
@@ -1601,7 +1623,10 @@ impl WaylandWindowStatePtr {
 
                 state.outputs.insert(id, output.clone());
 
+                let previous_display = state.display.as_ref().map(|(id, _)| id.clone());
                 let scale = state.primary_output_scale();
+                let display_changed =
+                    state.display.as_ref().map(|(id, _)| id) != previous_display.as_ref();
                 state.update_subpixel_layout();
 
                 // We use `PreferredBufferScale` instead to set the scale if it's available
@@ -1612,12 +1637,18 @@ impl WaylandWindowStatePtr {
                 } else {
                     drop(state);
                 }
+                if display_changed {
+                    self.report_display_changed();
+                }
                 self.request_redraw();
             }
             wl_surface::Event::Leave { output } => {
                 state.outputs.remove(&output.id());
 
+                let previous_display = state.display.as_ref().map(|(id, _)| id.clone());
                 let scale = state.primary_output_scale();
+                let display_changed =
+                    state.display.as_ref().map(|(id, _)| id) != previous_display.as_ref();
                 state.update_subpixel_layout();
 
                 // We use `PreferredBufferScale` instead to set the scale if it's available
@@ -1627,6 +1658,9 @@ impl WaylandWindowStatePtr {
                     self.rescale(scale as f32);
                 } else {
                     drop(state);
+                }
+                if display_changed {
+                    self.report_display_changed();
                 }
                 self.request_redraw();
             }
@@ -1696,7 +1730,9 @@ impl WaylandWindowStatePtr {
                 state.scale = scale;
             }
             let device_bounds = state.bounds.to_device_pixels(state.scale);
-            state.renderer.update_drawable_size(device_bounds.size);
+            if let Some(renderer) = &mut state.renderer {
+                renderer.update_drawable_size(device_bounds.size);
+            }
             (state.bounds.size, state.scale)
         };
 
@@ -1706,13 +1742,11 @@ impl WaylandWindowStatePtr {
             self.callbacks.borrow_mut().resize = Some(fun);
         }
 
-        {
-            let state = self.state.borrow();
-            if let Some(viewport) = &state.viewport {
-                viewport
-                    .set_destination(f32::from(size.width) as i32, f32::from(size.height) as i32);
-            }
+        let state = self.state.borrow_mut();
+        if let Some(viewport) = &state.viewport {
+            viewport.set_destination(f32::from(size.width) as i32, f32::from(size.height) as i32);
         }
+        update_window(state);
     }
 
     fn notify_resize(&self) {
@@ -1737,17 +1771,21 @@ impl WaylandWindowStatePtr {
 
     pub fn close(&self) {
         let state = self.state.borrow();
-        let client = state.client.get_client();
+        // Closing is deferred to a task, which can run after the client is dropped by a switch to
+        // headless mode. The client's window map, and so any child window, is gone with it.
+        let client = state.client.try_get_client();
         let children = state.children.keys().cloned().collect::<Vec<_>>();
         drop(state);
 
-        for child in children {
-            let mut client_state = client.borrow_mut();
-            let window = get_window(&mut client_state, &child);
-            drop(client_state);
+        if let Some(client) = client {
+            for child in children {
+                let mut client_state = client.borrow_mut();
+                let window = get_window(&mut client_state, &child);
+                drop(client_state);
 
-            if let Some(child) = window {
-                child.close();
+                if let Some(child) = window {
+                    child.close();
+                }
             }
         }
         let mut callbacks = self.callbacks.borrow_mut();
@@ -1798,6 +1836,29 @@ impl WaylandWindowStatePtr {
         if let Some(mut fun) = callback {
             fun(focus);
             self.callbacks.borrow_mut().hover_status_change = Some(fun);
+        }
+    }
+
+    fn report_display_changed(&self) {
+        let callback = self.callbacks.borrow_mut().display_changed.take();
+        if let Some(mut callback) = callback {
+            callback();
+            self.callbacks.borrow_mut().display_changed = Some(callback);
+        }
+    }
+
+    /// Updates the window's copy of an output it is on after the compositor
+    /// changes the output's properties, such as its mode.
+    pub fn handle_output_changed(&self, id: &ObjectId, output: &Output) {
+        let mut state = self.state.borrow_mut();
+        let Some(entered) = state.outputs.get_mut(id) else {
+            return;
+        };
+        *entered = output.clone();
+        if let Some((display_id, display)) = &mut state.display
+            && display_id == id
+        {
+            *display = output.clone();
         }
     }
 
@@ -2052,13 +2113,18 @@ impl PlatformWindow for WaylandWindow {
 
     fn display(&self) -> Option<Rc<dyn PlatformDisplay>> {
         let state = self.borrow();
-        state.display.as_ref().map(|(id, display)| {
-            Rc::new(WaylandDisplay {
-                id: id.clone(),
-                name: display.name.clone(),
-                bounds: display.bounds.to_pixels(state.scale),
-            }) as Rc<dyn PlatformDisplay>
-        })
+        // The compositor only names the window's output after mapping it. With
+        // one output the window can only be there, so don't wait for `enter`.
+        let (id, display) = state
+            .display
+            .clone()
+            .or_else(|| state.client.sole_output())?;
+        Some(Rc::new(WaylandDisplay {
+            id,
+            name: display.name.clone(),
+            bounds: display.bounds.to_pixels(state.scale),
+            refresh_interval: display.refresh_interval,
+        }))
     }
 
     fn mouse_position(&self) -> Point<Pixels> {
@@ -2114,17 +2180,22 @@ impl PlatformWindow for WaylandWindow {
             return true;
         }
 
-        // Try to request an activation token. Even though the activation is likely going to be rejected,
-        // KWin and Mutter can use the app_id to visually indicate we're requesting attention.
         if let (Some(activation), Some(app_id)) = (&state.globals.activation, state.app_id.clone())
         {
-            state.client.set_pending_activation(state.surface.id());
-            let token = activation.get_activation_token(&state.globals.qh, ());
-            // The serial isn't exactly important here, since the activation is probably going to be rejected anyway.
-            let serial = state.client.get_serial(SerialKind::MousePress);
+            let token = activation.get_activation_token(
+                &state.globals.qh,
+                PendingActivation::Window(state.surface.id()),
+            );
             token.set_app_id(app_id);
-            token.set_serial(serial.as_raw(), &state.globals.seat);
-            token.set_surface(&state.surface);
+            // Without a recent press the compositor won't grant focus, but still request a
+            // token: KWin and Mutter mark the window as demanding attention and end their
+            // launch feedback once the token is passed to `activate`.
+            if let Some(context) = state.client.activation_context() {
+                token.set_serial(context.serial.as_raw(), &state.globals.seat);
+                token.set_surface(&context.requesting_surface);
+            } else {
+                token.set_surface(&state.surface);
+            }
             token.commit();
             true
         } else {
@@ -2210,7 +2281,9 @@ impl PlatformWindow for WaylandWindow {
             // The next map must wait for a new configure before presenting another buffer.
             state.pending_frame_callback.take();
             // The driver must drop its surface before the null attach (HUB-8810).
-            state.renderer.release_surface();
+            if let Some(renderer) = &mut state.renderer {
+                renderer.release_surface();
+            }
             let state = &mut *state;
             state.surface_state.unmap(&state.surface);
             state.presentation = PresentationState::Unpresented;
@@ -2289,6 +2362,10 @@ impl PlatformWindow for WaylandWindow {
         self.0.callbacks.borrow_mut().moved = Some(callback);
     }
 
+    fn on_display_changed(&self, callback: Box<dyn FnMut()>) {
+        self.0.callbacks.borrow_mut().display_changed = Some(callback);
+    }
+
     fn on_should_close(&self, callback: Box<dyn FnMut() -> bool>) {
         self.0.callbacks.borrow_mut().should_close = Some(callback);
     }
@@ -2310,16 +2387,20 @@ impl PlatformWindow for WaylandWindow {
 
     fn draw(&self, scene: &Scene) {
         let mut state = self.borrow_mut();
-
+        let state = &mut *state;
         if !state.visible {
             state.redraw_requested = true;
             self.0.frame_loop.set(FrameLoop::Unconfigured);
             return;
         }
 
-        if state.renderer.device_lost() {
-            let raw_window = state.raw_window();
-            match state.renderer.recover(&raw_window) {
+        let raw_window = state.raw_window();
+        let Some(renderer) = &mut state.renderer else {
+            return;
+        };
+
+        if renderer.device_lost() {
+            match renderer.recover(&raw_window) {
                 Ok(()) => {}
                 Err(err) => {
                     log::warn!("GPU recovery failed, will retry on next frame: {err}");
@@ -2331,8 +2412,7 @@ impl PlatformWindow for WaylandWindow {
         }
 
         // A hide released the surface; build a new one for this map.
-        let raw_window = state.raw_window();
-        if let Err(err) = state.renderer.restore_surface(&raw_window) {
+        if let Err(err) = renderer.restore_surface(&raw_window) {
             log::warn!("Restoring the window surface failed, will retry on next frame: {err}");
             state.redraw_requested = true;
             return;
@@ -2344,7 +2424,7 @@ impl PlatformWindow for WaylandWindow {
             let callback = state.surface.frame(&state.globals.qh, state.surface.id());
             state.pending_frame_callback = Some(callback);
         }
-        if state.renderer.draw(scene) {
+        if renderer.draw(scene) {
             state.presentation = PresentationState::Presented;
             self.0.frame_loop.set(FrameLoop::AwaitingCallback);
         } else {
@@ -2352,7 +2432,7 @@ impl PlatformWindow for WaylandWindow {
             self.0.frame_loop.set(FrameLoop::PresentationFailed);
         }
 
-        if state.renderer.needs_redraw() {
+        if renderer.needs_redraw() {
             state.redraw_requested = true;
         }
     }
@@ -2367,8 +2447,12 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
-        let state = self.borrow();
-        state.renderer.sprite_atlas().clone()
+        self.borrow()
+            .renderer
+            .as_ref()
+            .expect("the renderer is only taken when the window is dropped")
+            .sprite_atlas()
+            .clone()
     }
 
     fn show_window_menu(&self, position: Point<Pixels>) {
@@ -2509,6 +2593,15 @@ impl PlatformWindow for WaylandWindow {
         }
     }
 
+    fn set_client_corner_radii(&self, radii: Corners<Pixels>) {
+        let mut state = self.borrow_mut();
+        if radii != state.client_corner_radii {
+            state.client_corner_radii = radii;
+            update_window(state);
+            self.0.request_redraw();
+        }
+    }
+
     fn update_ime_position(&self, bounds: Bounds<Pixels>) {
         let state = self.borrow();
         if !state.active {
@@ -2518,17 +2611,18 @@ impl PlatformWindow for WaylandWindow {
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
-        self.borrow().renderer.gpu_specs().into()
+        self.borrow().renderer.as_ref().map(WgpuRenderer::gpu_specs)
     }
 
     fn gpu_context(&self) -> Option<Box<dyn std::any::Any>> {
-        let (device, queue) = self.borrow().renderer.gpu_context();
+        let (device, queue) = self.borrow().renderer.as_ref()?.gpu_context();
         Some(Box::new((device, queue)))
     }
 
     fn gpu_context_info(&self) -> Option<Box<dyn std::any::Any>> {
         self.borrow()
             .renderer
+            .as_ref()?
             .gpu_context_info()
             .map(|context| Box::new(context) as Box<dyn std::any::Any>)
     }
@@ -2536,7 +2630,7 @@ impl PlatformWindow for WaylandWindow {
     fn gpu_device_lost(&self) -> Option<bool> {
         // Only loads an atomic flag — safe even mid-recovery, when
         // `gpu_context` would panic on the torn-down resources.
-        Some(self.borrow().renderer.device_lost())
+        Some(self.borrow().renderer.as_ref()?.device_lost())
     }
 
     fn play_system_bell(&self) {
@@ -2606,27 +2700,164 @@ impl accesskit::DeactivationHandler for TrivialDeactivationHandler {
     }
 }
 
+fn add_rounded_rect(
+    area: Bounds<i32>,
+    radii: Corners<Pixels>,
+    mut add_rectangle: impl FnMut(i32, i32, i32, i32),
+) {
+    if area.size.width <= 0 || area.size.height <= 0 {
+        return;
+    }
+
+    let clamp_radius = |radius: Pixels| {
+        radius
+            .to_i32()
+            .max(0)
+            .min(area.size.width / 2)
+            .min(area.size.height / 2)
+    };
+    let top_left = clamp_radius(radii.top_left);
+    let top_right = clamp_radius(radii.top_right);
+    let bottom_left = clamp_radius(radii.bottom_left);
+    let bottom_right = clamp_radius(radii.bottom_right);
+
+    let corner_inset = |radius: i32, row: i32| {
+        if row >= radius {
+            return 0;
+        }
+        let y = f64::from(radius) - (f64::from(row) + 0.5);
+        let x = (f64::from(radius).powi(2) - y * y).sqrt();
+        (f64::from(radius) - x - 0.5).ceil() as i32
+    };
+
+    for (left_radius, right_radius, bottom) in [
+        (top_left, top_right, false),
+        (bottom_left, bottom_right, true),
+    ] {
+        for row in 0..left_radius.max(right_radius) {
+            let left_inset = corner_inset(left_radius, row);
+            let right_inset = corner_inset(right_radius, row);
+            let width = area.size.width - left_inset - right_inset;
+            if width <= 0 {
+                continue;
+            }
+            let y = if bottom {
+                area.origin.y + area.size.height - row - 1
+            } else {
+                area.origin.y + row
+            };
+            add_rectangle(area.origin.x + left_inset, y, width, 1);
+        }
+    }
+
+    let top_height = top_left.max(top_right);
+    let bottom_height = bottom_left.max(bottom_right);
+    let height = area.size.height - top_height - bottom_height;
+    if height > 0 {
+        add_rectangle(
+            area.origin.x,
+            area.origin.y + top_height,
+            area.size.width,
+            height,
+        );
+    }
+}
+
+#[cfg(test)]
+mod rounded_rect_tests {
+    use super::add_rounded_rect;
+    use gpui::{Bounds, Corners, Pixels, point, px, size};
+
+    fn rectangles(area: Bounds<i32>, radii: Corners<Pixels>) -> Vec<(i32, i32, i32, i32)> {
+        let mut rectangles = Vec::new();
+        add_rounded_rect(area, radii, |x, y, width, height| {
+            rectangles.push((x, y, width, height));
+        });
+        rectangles
+    }
+
+    #[test]
+    fn square_corners() {
+        let area = Bounds::new(point(10, 20), size(8, 8));
+        assert_eq!(rectangles(area, Corners::default()), vec![(10, 20, 8, 8)]);
+    }
+
+    #[test]
+    fn independent_corners() {
+        let area = Bounds::new(point(10, 20), size(8, 8));
+        let radii = Corners {
+            top_left: px(4.0),
+            top_right: px(0.0),
+            bottom_left: px(0.0),
+            bottom_right: px(4.0),
+        };
+        assert_eq!(
+            rectangles(area, radii),
+            vec![
+                (12, 20, 6, 1),
+                (11, 21, 7, 1),
+                (10, 22, 8, 1),
+                (10, 23, 8, 1),
+                (10, 27, 6, 1),
+                (10, 26, 7, 1),
+                (10, 25, 8, 1),
+                (10, 24, 8, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn clamps_radii() {
+        let area = Bounds::new(point(10, 20), size(10, 6));
+        assert_eq!(
+            rectangles(area, Corners::all(px(100.0))),
+            rectangles(area, Corners::all(px(3.0)))
+        );
+        assert_eq!(
+            rectangles(area, Corners::all(px(-1.0))),
+            rectangles(area, Corners::default())
+        );
+    }
+
+    #[test]
+    fn empty_area() {
+        for dimensions in [size(0, 10), size(10, 0), size(-1, 10), size(10, -1)] {
+            let area = Bounds::new(point(10, 20), dimensions);
+            assert!(rectangles(area, Corners::all(px(4.0))).is_empty());
+        }
+    }
+}
+
 fn update_window(mut state: RefMut<WaylandWindowState>) {
     let opaque = !state.is_transparent();
 
-    state.renderer.update_transparency(!opaque);
-    let opaque_area = state.window_bounds.map(|v| f32::from(v) as i32);
-    opaque_area.inset(f32::from(state.inset()) as i32);
+    if let Some(renderer) = &mut state.renderer {
+        renderer.update_transparency(!opaque);
+    }
+
+    let area = inset_by_tiling(
+        state.bounds.map_origin(|_| px(0.0)),
+        state.inset(),
+        state.tiling,
+    )
+    .map(|value| value.to_i32())
+    .map_size(|value| value.max(0));
 
     let region = state
         .globals
         .compositor
         .create_region(&state.globals.qh, ());
-    region.add(
-        opaque_area.origin.x,
-        opaque_area.origin.y,
-        opaque_area.size.width,
-        opaque_area.size.height,
-    );
 
-    // Note that rounded corners make this rectangle API hard to work with.
-    // As this is common when using CSD, let's just disable this API.
+    // Client decorations include transparent shadows and antialiased corners,
+    // so don't promise the compositor an opaque region.
     if state.background_appearance.is_opaque() && state.decorations == WindowDecorations::Server {
+        region.add(
+            area.origin.x,
+            area.origin.y,
+            area.size.width,
+            area.size.height,
+        );
+
         // Promise the compositor that this region of the window surface
         // contains no transparent pixels. This allows the compositor to skip
         // updating whatever is behind the surface for better performance.
@@ -2635,17 +2866,45 @@ fn update_window(mut state: RefMut<WaylandWindowState>) {
         state.surface.set_opaque_region(None);
     }
 
-    if let Some(ref blur_manager) = state.globals.blur_manager {
+    // Prefer the ext-background-effect protocol, as it is DE agnostic and
+    // replaces the deprecated kde-blur protocol, which is no longer supported
+    // since KDE Plasma 6.7.
+    // https://invent.kde.org/plasma/kwin/-/commit/7f9e0aa1cd2c2ab4fea1097800893b6f780089eb
+    if let Some(ref background_effects_manager) = state.globals.background_effects_manager {
         if state.background_appearance == WindowBackgroundAppearance::Blurred {
-            if state.blur.is_none() {
-                let blur = blur_manager.create(&state.surface, &state.globals.qh, ());
-                state.blur = Some(blur);
+            if state.background_effects.is_none() {
+                log::debug!("Using ext-background-effect protocol");
+                let background_effects = background_effects_manager.get_background_effect(
+                    &state.surface,
+                    &state.globals.qh,
+                    (),
+                );
+                state.background_effects = Some(background_effects);
             }
-            state.blur.as_ref().unwrap().commit();
+
+            add_rounded_rect(area, state.client_corner_radii, |x, y, width, height| {
+                region.add(x, y, width, height);
+            });
+
+            state
+                .background_effects
+                .as_ref()
+                .unwrap()
+                .set_blur_region(Some(&region));
+        } else if let Some(background_effects) = state.background_effects.take() {
+            background_effects.destroy();
+        }
+    } else if let Some(ref blur_manager) = state.globals.kde_blur_manager {
+        if state.background_appearance == WindowBackgroundAppearance::Blurred {
+            if state.kde_blur.is_none() {
+                log::debug!("Using kde-blur protocol");
+                let blur = blur_manager.create(&state.surface, &state.globals.qh, ());
+                state.kde_blur = Some(blur);
+            }
+            state.kde_blur.as_ref().unwrap().commit();
         } else {
-            // It probably doesn't hurt to clear the blur for opaque windows
             blur_manager.unset(&state.surface);
-            if let Some(b) = state.blur.take() {
+            if let Some(b) = state.kde_blur.take() {
                 b.release()
             }
         }

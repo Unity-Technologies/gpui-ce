@@ -564,6 +564,7 @@ impl WgpuContext {
     pub(crate) fn new_with_adapter_policy(
         instance: NativeInstance,
         surface: &wgpu::Surface<'_>,
+        config: &crate::WgpuSurfaceConfig,
         compositor_gpu: Option<CompositorGpuHint>,
         adapter_policy: SoftwareAdapterPolicy,
         extra_requirements: Option<&WgpuDeviceRequirements>,
@@ -587,6 +588,7 @@ impl WgpuContext {
             instance.backend,
             device_id_filter,
             surface,
+            config,
             compositor_gpu.as_ref(),
             adapter_policy,
             extra_requirements,
@@ -783,6 +785,7 @@ impl WgpuContext {
         backend: NativeBackend,
         device_id_filter: Option<u32>,
         surface: &wgpu::Surface<'_>,
+        config: &crate::WgpuSurfaceConfig,
         compositor_gpu: Option<&CompositorGpuHint>,
         adapter_policy: SoftwareAdapterPolicy,
         extra_requirements: Option<&WgpuDeviceRequirements>,
@@ -891,7 +894,9 @@ impl WgpuContext {
 
             log::info!("Testing adapter: {} ({:?})...", info.name, info.backend);
 
-            match Self::try_adapter_with_surface(&adapter, surface, extra_requirements).await {
+            match Self::try_adapter_with_surface(&adapter, surface, config, extra_requirements)
+                .await
+            {
                 Ok(device) => {
                     log::info!(
                         "Adapter passed surface configuration test: {} ({:?})",
@@ -920,6 +925,7 @@ impl WgpuContext {
     async fn try_adapter_with_surface(
         adapter: &wgpu::Adapter,
         surface: &wgpu::Surface<'_>,
+        config: &crate::WgpuSurfaceConfig,
         extra_requirements: Option<&WgpuDeviceRequirements>,
     ) -> anyhow::Result<CreatedDevice> {
         let caps = surface.get_capabilities(adapter);
@@ -931,23 +937,15 @@ impl WgpuContext {
         }
 
         let device = Self::create_device(adapter, extra_requirements).await?;
+        // Test with the configuration the renderer will use, so that it doesn't need to
+        // configure the surface a second time.
+        let surface_config =
+            crate::WgpuRenderer::surface_configuration(adapter, &device.device, surface, config)?;
         let error_scope = device
             .device
             .push_error_scope(wgpu::ErrorFilter::Validation);
 
-        let test_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: caps.formats[0],
-            width: 64,
-            height: 64,
-            present_mode: wgpu::PresentMode::Fifo,
-            desired_maximum_frame_latency: 2,
-            alpha_mode: caps.alpha_modes[0],
-            view_formats: vec![],
-            color_space: wgpu::SurfaceColorSpace::Auto,
-        };
-
-        surface.configure(&device.device, &test_config);
+        surface.configure(&device.device, &surface_config);
 
         let error = error_scope.pop().await;
         if let Some(e) = error {
