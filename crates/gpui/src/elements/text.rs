@@ -800,6 +800,13 @@ impl TextLayoutTruncation {
     }
 }
 
+#[derive(Clone, Copy)]
+enum TextPaintPass {
+    All,
+    Background,
+    Foreground,
+}
+
 impl TextLayout {
     /// Evaluates the width to wrap the text at.
     pub fn evaluate_wrap_width(
@@ -1035,43 +1042,69 @@ impl TextLayout {
     }
 
     fn paint(&self, text: &str, window: &mut Window, cx: &mut App) {
+        self.paint_document(TextPaintPass::All, window, cx)
+            .with_context(|| format!("failed to paint {text}"))
+            .unwrap();
+    }
+
+    /// Paints the backgrounds of the text runs without the glyphs, so that callers can paint
+    /// content, such as highlights, between the backgrounds and the text. Follow it with
+    /// [`Self::paint_foreground`] to paint the glyphs.
+    pub fn paint_background(&self, window: &mut Window, cx: &mut App) -> anyhow::Result<()> {
+        self.paint_document(TextPaintPass::Background, window, cx)
+    }
+
+    /// Paints the glyphs and decorations of the text without the run backgrounds.
+    pub fn paint_foreground(&self, window: &mut Window, cx: &mut App) -> anyhow::Result<()> {
+        self.paint_document(TextPaintPass::Foreground, window, cx)
+    }
+
+    fn paint_document(
+        &self,
+        pass: TextPaintPass,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> anyhow::Result<()> {
         if window.current_inline_fragments.is_some() {
-            return;
+            return Ok(());
         }
 
         let element_state = self.0.layout.borrow();
         let element_state = element_state
             .as_ref()
-            .with_context(|| format!("measurement has not been performed on {text}"))
-            .unwrap();
+            .context("measurement has not been performed")?;
         let bounds = element_state
             .bounds
-            .with_context(|| format!("prepaint has not been performed on {text}"))
-            .unwrap();
+            .context("prepaint has not been performed")?;
 
         let line_height = element_state.line_height;
         if let Some(document) = &element_state.document {
-            document
-                .paint_background(
-                    bounds.origin,
-                    line_height,
-                    TextAlign::Left,
-                    None,
-                    window,
-                    cx,
-                )
-                .log_err();
-            document
-                .paint(
-                    bounds.origin,
-                    line_height,
-                    TextAlign::Left,
-                    None,
-                    window,
-                    cx,
-                )
-                .log_err();
+            if matches!(pass, TextPaintPass::All | TextPaintPass::Background) {
+                document
+                    .paint_background(
+                        bounds.origin,
+                        line_height,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    )
+                    .log_err();
+            }
+            if matches!(pass, TextPaintPass::All | TextPaintPass::Foreground) {
+                document
+                    .paint(
+                        bounds.origin,
+                        line_height,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    )
+                    .log_err();
+            }
         }
+        Ok(())
     }
 
     fn measured(&self) -> Ref<'_, TextLayoutInner> {
