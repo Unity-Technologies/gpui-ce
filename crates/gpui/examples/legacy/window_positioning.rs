@@ -71,8 +71,6 @@ fn build_window_options(display_id: DisplayId, bounds: Bounds<Pixels>) -> Window
     let options = options.macos_window_background(MacosWindowBackground::Transparent);
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     let options = options.linux_window_background(LinuxWindowBackground::Transparent);
-    #[cfg(not(any(target_os = "macos", any(target_os = "linux", target_os = "freebsd"))))]
-    let options = options;
     options
 }
 
