@@ -5475,15 +5475,17 @@ impl Window {
             return false;
         }
 
+        // Checked before the background because it's cheap, while some platforms lock the
+        // window to read its background appearance, and this runs for every glyph.
+        if !self.platform_window.is_subpixel_rendering_supported() {
+            return false;
+        }
+
         if self
             .platform_window
             .background_appearance()
             .is_transparent()
         {
-            return false;
-        }
-
-        if !self.platform_window.is_subpixel_rendering_supported() {
             return false;
         }
 
