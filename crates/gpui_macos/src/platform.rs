@@ -736,6 +736,7 @@ impl Platform for MacPlatform {
             renderer_context,
             options.bounds.size.map(|pixels| pixels.as_f32()),
             false,
+            options.use_display_p3,
         )?;
         Ok(Box::new(MacWindow::open(
             handle,

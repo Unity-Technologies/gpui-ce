@@ -635,7 +635,7 @@ mod tests {
         }
         let mut scene = gpui::Scene::default();
         scene.finish();
-        let mut renderer = crate::renderer::MetalRenderer::new(Default::default(), false).unwrap();
+        let mut renderer = crate::renderer::MetalRenderer::new(Default::default(), false, false).unwrap();
         renderer.update_drawable_size(gpui::size(gpui::DevicePixels(64), gpui::DevicePixels(64)));
         let layer = renderer.layer().expect("window renderer has a layer");
         // SAFETY: metal-rs and objc2 both wrap the same `CAMetalLayer` object.

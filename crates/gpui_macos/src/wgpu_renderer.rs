@@ -32,6 +32,8 @@ pub fn new_renderer(
     context: Context,
     bounds: gpui::Size<f32>,
     transparent: bool,
+    // wgpu chooses the surface color space itself; Display P3 is Metal-renderer only.
+    _use_display_p3: bool,
 ) -> anyhow::Result<Renderer> {
     MacWgpuRenderer::new(context, bounds, transparent)
 }

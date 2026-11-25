@@ -1,6 +1,7 @@
 use crate::metal_atlas::MetalAtlas;
 use anyhow::Result;
 use block2::RcBlock;
+use core_graphics::color_space::{CGColorSpace, kCGColorSpaceDisplayP3};
 use core_graphics::geometry::CGSize;
 use gpui::{
     AtlasTextureId, Bounds, Corners, DevicePixels, FilterRenderTarget, MAX_FILTER_GROUP_DEPTH,
@@ -167,12 +168,33 @@ pub fn new_window_layer(transparent: bool) -> metal::MetalLayer {
     layer
 }
 
+/// Tags the layer's contents as Display P3, so colors are not clamped to sRGB.
+fn set_display_p3_color_space(layer: &metal::MetalLayerRef) {
+    // SAFETY: The constant is extern, from Core Graphics.
+    let display_p3_name = unsafe { kCGColorSpaceDisplayP3 };
+    let Some(display_p3_color_space) = CGColorSpace::create_with_name(display_p3_name) else {
+        log::error!("unable to create the Display P3 color space");
+        return;
+    };
+    // metal-rs doesn't bind CAMetalLayer's `colorspace` setter, so view the
+    // same object through objc2's typed binding.
+    let layer_object = unsafe { &*(layer.as_ptr() as *const Objc2CAMetalLayer) };
+    // SAFETY: `layer` is a CAMetalLayer and the color space outlives the call.
+    unsafe {
+        let _: () = objc2::msg_send![
+            layer_object,
+            setColorspace: display_p3_color_space.as_ptr().cast::<std::ffi::c_void>()
+        ];
+    }
+}
+
 pub fn new_renderer(
     context: self::Context,
     _bounds: gpui::Size<f32>,
     transparent: bool,
+    use_display_p3: bool,
 ) -> Result<Renderer> {
-    Ok(MetalRenderer::new(context, transparent)?)
+    Ok(MetalRenderer::new(context, transparent, use_display_p3)?)
 }
 
 /// Why a [`MetalRenderer`] could not be created.
@@ -368,10 +390,14 @@ impl MetalRenderer {
     pub fn new(
         instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
         transparent: bool,
+        use_display_p3: bool,
     ) -> Result<Self, MetalRendererError> {
         let device = Self::create_device()?;
 
         let layer = new_window_layer(transparent);
+        if use_display_p3 {
+            set_display_p3_color_space(&layer);
+        }
         layer.set_device(&device);
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
         layer.set_maximum_drawable_count(3);
@@ -2423,7 +2449,7 @@ mod tests {
     fn display_link_mode_consumes_and_clears_drawables() {
         let mut scene = Scene::default();
         scene.finish();
-        let mut renderer = MetalRenderer::new(Default::default(), false).unwrap();
+        let mut renderer = MetalRenderer::new(Default::default(), false, false).unwrap();
         renderer.update_drawable_size(size(DevicePixels(64), DevicePixels(64)));
         let drawable = renderer
             .layer()
