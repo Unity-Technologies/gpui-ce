@@ -94,10 +94,12 @@ fn vertex_output_shape(module: &naga::Module, entry_name: &str) -> (usize, u32) 
 fn ordinary_vertex_interfaces_stay_within_compact_budgets() {
     let module = naga::front::wgsl::parse_str(&base::WGSL_SOURCE.wgsl_source().unwrap()).unwrap();
     for (entry, maximum_shape) in [
-        ("vertex_quad", (8, 29)),
-        ("vertex_shadow", (5, 17)),
-        ("vertex_polychrome_sprite", (3, 7)),
-        ("vertex_blur_composite", (2, 6)),
+        ("vertex_quad", (7, 25)),
+        ("vertex_shadow", (4, 13)),
+        ("vertex_underline", (2, 5)),
+        ("vertex_polychrome_sprite", (2, 3)),
+        ("vertex_surface", (1, 2)),
+        ("vertex_blur_composite", (1, 2)),
     ] {
         let actual_shape = vertex_output_shape(&module, entry);
         assert!(
@@ -252,4 +254,60 @@ fn linear_gradients_preserve_native_dithering() {
     let second = paint_color(paint, vec2f(11.0, 10.0), prepared);
 
     assert_ne!(first.w, second.w);
+}
+
+#[test]
+fn clip_to_mask_keeps_corners_inside_the_mask() {
+    use common::*;
+    use wgsl_rs::std::*;
+
+    let bounds = Bounds {
+        origin: vec2f(10.0, 20.0),
+        size: vec2f(40.0, 20.0),
+    };
+    let mask = Bounds {
+        origin: vec2f(20.0, 0.0),
+        size: vec2f(100.0, 30.0),
+    };
+    let top_left = clip_to_mask(vec2f(0.0, 0.0), bounds, mask);
+    assert_eq!((top_left.position.x, top_left.position.y), (20.0, 20.0));
+    assert_eq!(
+        (top_left.unit_position.x, top_left.unit_position.y),
+        (0.25, 0.0)
+    );
+    let bottom_right = clip_to_mask(vec2f(1.0, 1.0), bounds, mask);
+    assert_eq!(
+        (bottom_right.position.x, bottom_right.position.y),
+        (50.0, 30.0)
+    );
+    assert_eq!(
+        (bottom_right.unit_position.x, bottom_right.unit_position.y),
+        (1.0, 0.5)
+    );
+
+    // A mask inside the bounds becomes the geometry.
+    let inner = Bounds {
+        origin: vec2f(15.0, 25.0),
+        size: vec2f(5.0, 5.0),
+    };
+    let corner = clip_to_mask(vec2f(1.0, 0.0), bounds, inner);
+    assert_eq!((corner.position.x, corner.position.y), (20.0, 25.0));
+
+    // A disjoint mask collapses to zero area, and an empty primitive stays finite.
+    let disjoint = Bounds {
+        origin: vec2f(200.0, 200.0),
+        size: vec2f(10.0, 10.0),
+    };
+    let first = clip_to_mask(vec2f(0.0, 0.0), bounds, disjoint);
+    let last = clip_to_mask(vec2f(1.0, 1.0), bounds, disjoint);
+    assert_eq!(
+        (first.position.x, first.position.y),
+        (last.position.x, last.position.y)
+    );
+    let empty = Bounds {
+        origin: vec2f(5.0, 5.0),
+        size: vec2f(0.0, 0.0),
+    };
+    let degenerate = clip_to_mask(vec2f(1.0, 1.0), empty, mask);
+    assert!(degenerate.unit_position.x.is_finite() && degenerate.unit_position.y.is_finite());
 }

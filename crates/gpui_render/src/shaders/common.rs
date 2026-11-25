@@ -383,6 +383,46 @@ mod source {
         }
     }
 
+    /// A rectangle corner pulled inside an axis-aligned mask. `unit_position` stays relative
+    /// to the unclipped `bounds`, so texture and paint coordinates keep their mapping.
+    #[derive(Clone, Copy, Wgsl)]
+    pub struct ClippedCorner {
+        pub position: Vec2f,
+        pub unit_position: Vec2f,
+    }
+
+    pub fn clip_to_mask(unit_position: Vec2f, bounds: Bounds, mask: Bounds) -> ClippedCorner {
+        let origin = max(bounds.origin, mask.origin);
+        let corner = min(bounds.origin + bounds.size, mask.origin + mask.size);
+        let size = max(corner - origin, vec2f(0.0, 0.0));
+        let position = origin + unit_position * size;
+        // An empty primitive has no area to rasterize; the guard only keeps the
+        // interpolated coordinate finite.
+        let safe_size = max(
+            bounds.size,
+            vec2f(MIN_NORMALIZED_WEIGHT, MIN_NORMALIZED_WEIGHT),
+        );
+        ClippedCorner {
+            position,
+            unit_position: (position - bounds.origin) / safe_size,
+        }
+    }
+
+    /// Clips an untransformed rectangle's geometry to its content mask in the vertex stage,
+    /// so the rasterizer never shades a pixel outside the mask.
+    pub fn clipped_rectangle_vertex(
+        vertex_id: u32,
+        bounds: Bounds,
+        mask: Bounds,
+    ) -> RectangleVertex {
+        let clipped = clip_to_mask(rectangle_corner(vertex_id), bounds, mask);
+        RectangleVertex {
+            unit_position: clipped.unit_position,
+            viewport_position: clipped.position,
+            clip_position: viewport_to_clip_position(clipped.position),
+        }
+    }
+
     pub fn transformed_rectangle_vertex(
         vertex_id: u32,
         bounds: Bounds,
@@ -431,9 +471,6 @@ mod source {
         min(min(distances.x, distances.y), min(distances.z, distances.w)) < 0.0
     }
 
-    pub fn unclipped_distances() -> Vec4f {
-        vec4f(1.0, 1.0, 1.0, 1.0)
-    }
     pub fn srgb_to_linear(srgb: Vec3f) -> Vec3f {
         let cutoff = vec3b(
             srgb.x < SRGB_DECODE_CUTOFF,

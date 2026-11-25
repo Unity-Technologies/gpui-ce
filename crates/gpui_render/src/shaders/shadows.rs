@@ -167,7 +167,6 @@ pub mod shadow {
         pub position: Vec4f,
         pub paint: PreparedPaint,
         pub shadow_id: u32,
-        pub clip_distances: Vec4f,
     }
 
     pub fn prepare_shadow_vertex(
@@ -175,12 +174,15 @@ pub mod shadow {
         instance_id: u32,
         shadow: Shadow,
     ) -> ShadowVertexData {
-        let vertex = rectangle_vertex(vertex_id, shadow_geometry(shadow));
+        let vertex = clipped_rectangle_vertex(
+            vertex_id,
+            shadow_geometry(shadow),
+            shadow.content_mask.bounds,
+        );
         ShadowVertexData {
             position: vertex.clip_position,
             paint: prepare_paint(shadow_paint(shadow)),
             shadow_id: instance_id,
-            clip_distances: clip_distances(vertex.viewport_position, shadow.content_mask.bounds),
         }
     }
 
@@ -200,8 +202,6 @@ pub mod shadow {
         #[location(3)]
         #[interpolate(flat)]
         pub shadow_id: u32,
-        #[location(4)]
-        pub clip_distances: Vec4f,
     }
 
     #[vertex]
@@ -217,15 +217,11 @@ pub mod shadow {
             paint_color0: vertex.paint.color0,
             paint_color1: vertex.paint.color1,
             shadow_id: vertex.shadow_id,
-            clip_distances: vertex.clip_distances,
         }
     }
 
     #[fragment]
     pub fn fragment_shadow(input: ShadowVarying) -> Vec4f {
-        if is_clipped(input.clip_distances) {
-            return transparent();
-        }
         let shadow = get!(SHADOWS)[input.shadow_id as usize];
         let color = paint_color(
             shadow_paint(shadow),
@@ -256,20 +252,18 @@ pub mod shadow {
         #[interpolate(flat)]
         pub shadow_id: u32,
         #[location(4)]
-        pub clip_distances: Vec4f,
-        #[location(5)]
         #[interpolate(flat)]
         pub horizontal_corner_reaches: Vec4f,
-        #[location(6)]
+        #[location(5)]
         #[interpolate(flat)]
         pub vertical_corner_reaches: Vec4f,
-        #[location(7)]
+        #[location(6)]
         #[interpolate(flat)]
         pub element_horizontal_corner_reaches: Vec4f,
-        #[location(8)]
+        #[location(7)]
         #[interpolate(flat)]
         pub element_vertical_corner_reaches: Vec4f,
-        #[location(9)]
+        #[location(8)]
         #[interpolate(flat)]
         pub smoothing_factors: Vec4f,
     }
@@ -300,7 +294,6 @@ pub mod shadow {
             paint_color0: vertex.paint.color0,
             paint_color1: vertex.paint.color1,
             shadow_id: vertex.shadow_id,
-            clip_distances: vertex.clip_distances,
             horizontal_corner_reaches: prepared.horizontal_reaches,
             vertical_corner_reaches: prepared.vertical_reaches,
             element_horizontal_corner_reaches: prepared_element.horizontal_reaches,
@@ -311,9 +304,6 @@ pub mod shadow {
 
     #[fragment]
     pub fn fragment_smoothed_shadow(input: SmoothedShadowVarying) -> Vec4f {
-        if is_clipped(input.clip_distances) {
-            return transparent();
-        }
         let shadow = get!(SHADOWS)[input.shadow_id as usize];
         let coverage = smoothed_shadow_coverage(
             shadow,

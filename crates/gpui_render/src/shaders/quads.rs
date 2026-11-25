@@ -506,17 +506,15 @@ pub mod quad {
         pub position: Vec4f,
         pub border: PreparedPaint,
         pub quad_id: u32,
-        pub clip_distances: Vec4f,
         pub fill: PreparedPaint,
     }
 
     pub fn prepare_quad_vertex(vertex_id: u32, instance_id: u32, quad: Quad) -> QuadVertexData {
-        let vertex = rectangle_vertex(vertex_id, quad.bounds);
+        let vertex = clipped_rectangle_vertex(vertex_id, quad.bounds, quad.content_mask.bounds);
         QuadVertexData {
             position: vertex.clip_position,
             border: prepare_paint(Paint::new(quad.border_color, quad.bounds)),
             quad_id: instance_id,
-            clip_distances: clip_distances(vertex.viewport_position, quad.content_mask.bounds),
             fill: prepare_paint(Paint::new(quad.background, quad.bounds)),
         }
     }
@@ -532,20 +530,18 @@ pub mod quad {
         #[interpolate(flat)]
         pub quad_id: u32,
         #[location(2)]
-        pub clip_distances: Vec4f,
-        #[location(3)]
         #[interpolate(flat)]
         pub fill_solid: Vec4f,
-        #[location(4)]
+        #[location(3)]
         #[interpolate(flat)]
         pub fill_color0: Vec4f,
-        #[location(5)]
+        #[location(4)]
         #[interpolate(flat)]
         pub fill_color1: Vec4f,
-        #[location(6)]
+        #[location(5)]
         #[interpolate(flat)]
         pub border_color0: Vec4f,
-        #[location(7)]
+        #[location(6)]
         #[interpolate(flat)]
         pub border_color1: Vec4f,
     }
@@ -561,7 +557,6 @@ pub mod quad {
             position: vertex.position,
             border_solid: vertex.border.solid,
             quad_id: vertex.quad_id,
-            clip_distances: vertex.clip_distances,
             fill_solid: vertex.fill.solid,
             fill_color0: vertex.fill.color0,
             fill_color1: vertex.fill.color1,
@@ -572,9 +567,6 @@ pub mod quad {
 
     #[fragment]
     pub fn fragment_quad(input: QuadVarying) -> Vec4f {
-        if is_clipped(input.clip_distances) {
-            return transparent();
-        }
         let quad = get!(QUADS)[input.quad_id as usize];
         let fade = ContentMask::alpha(quad.content_mask, input.position.xy());
         let fill_color = paint_color(
@@ -624,35 +616,33 @@ pub mod quad {
         #[interpolate(flat)]
         pub quad_id: u32,
         #[location(2)]
-        pub clip_distances: Vec4f,
-        #[location(3)]
         #[interpolate(flat)]
         pub fill_solid: Vec4f,
-        #[location(4)]
+        #[location(3)]
         #[interpolate(flat)]
         pub fill_color0: Vec4f,
-        #[location(5)]
+        #[location(4)]
         #[interpolate(flat)]
         pub fill_color1: Vec4f,
-        #[location(6)]
+        #[location(5)]
         #[interpolate(flat)]
         pub horizontal_corner_reaches: Vec4f,
-        #[location(7)]
+        #[location(6)]
         #[interpolate(flat)]
         pub vertical_corner_reaches: Vec4f,
-        #[location(8)]
+        #[location(7)]
         #[interpolate(flat)]
         pub corner_lengths: Vec4f,
-        #[location(9)]
+        #[location(8)]
         #[interpolate(flat)]
         pub smoothing_factors: Vec4f,
-        #[location(10)]
+        #[location(9)]
         #[interpolate(flat)]
         pub superellipse_power: f32,
-        #[location(11)]
+        #[location(10)]
         #[interpolate(flat)]
         pub border_color0: Vec4f,
-        #[location(12)]
+        #[location(11)]
         #[interpolate(flat)]
         pub border_color1: Vec4f,
     }
@@ -675,7 +665,6 @@ pub mod quad {
             position: vertex.position,
             border_solid: vertex.border.solid,
             quad_id: vertex.quad_id,
-            clip_distances: vertex.clip_distances,
             fill_solid: vertex.fill.solid,
             fill_color0: vertex.fill.color0,
             fill_color1: vertex.fill.color1,
@@ -691,9 +680,6 @@ pub mod quad {
 
     #[fragment]
     pub fn fragment_smoothed_quad(input: SmoothedQuadVarying) -> Vec4f {
-        if is_clipped(input.clip_distances) {
-            return transparent();
-        }
         let quad = get!(QUADS)[input.quad_id as usize];
         let fade = ContentMask::alpha(quad.content_mask, input.position.xy());
         let fill_color = paint_color(
