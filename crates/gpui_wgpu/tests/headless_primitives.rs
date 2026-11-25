@@ -659,3 +659,172 @@ fn painted(
     };
     gpui::PaintedPath::new(path, 1.0, mask, color)
 }
+
+/// Opaque quads, translucent quads and every kind of pass break the opaque pre-pass has to
+/// respect: a backdrop blur, an opacity group, a blurred content group and a faded mask.
+fn overdraw_scene(renderer: &WgpuHeadlessRenderer) -> Scene {
+    let image = tile(
+        renderer,
+        AtlasKey::Image(RenderImageParams {
+            image_id: gpui::ImageId(7),
+            frame_index: 0,
+            downscale_level: 0,
+        }),
+        (0..64)
+            .flat_map(|index| [index as u8 * 4, 90, 255 - index as u8 * 4, 255])
+            .collect(),
+    );
+    let color = |rgb: u32, alpha: f32| {
+        let mut color = gpui::rgb_to_hsla(gpui::rgb(rgb));
+        color.alpha = alpha;
+        color
+    };
+    let quad = |x: f32, y: f32, w: f32, h: f32, rgb: u32, alpha: f32| Quad {
+        bounds: bounds(x, y, w, h),
+        content_mask: full_mask(),
+        background: solid_background(color(rgb, alpha)),
+        ..Default::default()
+    };
+    let group = |is_start: bool, filters, opacity| gpui::FilterBoundary {
+        order: 0,
+        bounds: bounds(150.0, 0.0, 80.0, 100.0),
+        content_mask: full_mask(),
+        corner_radii: Corners::all(ScaledPixels(6.0)),
+        corner_smoothing: 0.0,
+        filters,
+        opacity,
+        is_start,
+    };
+
+    let mut scene = Scene::default();
+    scene.insert_primitive(quad(0.0, 0.0, 310.0, 100.0, 0x202428, 1.0));
+    // Opaque cards: plain, bordered and rounded, smoothed, and under a translucent overlay.
+    scene.insert_primitive(quad(6.0, 6.0, 40.0, 40.0, 0x3050ff, 1.0));
+    scene.insert_primitive(Quad {
+        border_color: color(0xffffff, 0.6).into(),
+        border_widths: Edges::all(ScaledPixels(3.0)),
+        corner_radii: Corners::all(ScaledPixels(9.0)),
+        ..quad(30.0, 20.0, 50.0, 40.0, 0xe0a020, 1.0)
+    });
+    scene.insert_primitive(Quad {
+        corner_radii: Corners::all(ScaledPixels(12.0)),
+        corner_smoothing: 0.8,
+        ..quad(60.0, 40.0, 40.0, 40.0, 0x20c060, 1.0)
+    });
+    scene.insert_primitive(quad(20.0, 50.0, 70.0, 30.0, 0xff2040, 0.5));
+    scene.insert_primitive(Shadow {
+        order: 0,
+        blur_radius: ScaledPixels(4.0),
+        bounds: bounds(84.0, 4.0, 40.0, 30.0),
+        corner_radii: Corners::all(ScaledPixels(4.0)),
+        content_mask: full_mask(),
+        color: color(0x000000, 0.7).into(),
+        shape_bounds: bounds(88.0, 8.0, 32.0, 22.0),
+        shape_corner_radii: Corners::all(ScaledPixels(4.0)),
+        inset: ShaderBool::Disabled,
+        corner_smoothing: 0.0,
+    });
+    scene.insert_primitive(quad(88.0, 8.0, 32.0, 22.0, 0xf0f0f0, 1.0));
+    scene.insert_primitive(PolychromeSprite {
+        order: 0,
+        grayscale: ShaderBool::Disabled,
+        opacity: 1.0,
+        corner_smoothing: 0.0,
+        bounds: bounds(96.0, 14.0, 16.0, 16.0),
+        content_mask: full_mask(),
+        corner_radii: Default::default(),
+        tile: image,
+    });
+    scene.insert_primitive(Underline {
+        order: 0,
+        padding: 0,
+        bounds: bounds(88.0, 32.0, 32.0, 3.0),
+        content_mask: full_mask(),
+        color: color(0x30a0ff, 1.0).into(),
+        thickness: ScaledPixels(2.0),
+        wavy: ShaderBool::Disabled,
+    });
+    // An opaque quad whose mask fades out must still blend at its edges.
+    scene.insert_primitive(Quad {
+        content_mask: ContentMask {
+            bounds: bounds(100.0, 40.0, 45.0, 50.0),
+            fade_out: Edges::all(ScaledPixels(8.0)),
+        },
+        ..quad(100.0, 40.0, 45.0, 50.0, 0xc040c0, 1.0)
+    });
+    // An opacity group and a blurred group over opaque cards: their contents must not
+    // occlude what lies behind the group.
+    scene.insert_primitive(quad(150.0, 10.0, 70.0, 30.0, 0x40e0e0, 1.0));
+    scene.insert_primitive(group(true, smallvec![], 0.5));
+    scene.insert_primitive(quad(160.0, 20.0, 50.0, 40.0, 0xffff00, 1.0));
+    scene.insert_primitive(Quad {
+        corner_radii: Corners::all(ScaledPixels(5.0)),
+        ..quad(170.0, 30.0, 40.0, 20.0, 0x0040ff, 1.0)
+    });
+    scene.insert_primitive(group(false, smallvec![], 0.5));
+    scene.insert_primitive(group(
+        true,
+        smallvec![ScaledFilter::Blur(ScaledPixels(2.0))],
+        1.0,
+    ));
+    scene.insert_primitive(quad(155.0, 65.0, 30.0, 25.0, 0xffffff, 1.0));
+    scene.insert_primitive(group(
+        false,
+        smallvec![ScaledFilter::Blur(ScaledPixels(2.0))],
+        1.0,
+    ));
+    // A backdrop blur splits the pass: quads before it are blurred, quads after it are not.
+    scene.insert_primitive(quad(235.0, 5.0, 30.0, 90.0, 0xff8000, 1.0));
+    scene.insert_primitive(quad(270.0, 5.0, 30.0, 90.0, 0x8000ff, 1.0));
+    scene.insert_primitive(BackdropFilter {
+        order: 0,
+        bounds: bounds(240.0, 20.0, 55.0, 60.0),
+        content_mask: full_mask(),
+        corner_radii: Corners::all(ScaledPixels(10.0)),
+        corner_smoothing: 0.0,
+        filters: smallvec![ScaledFilter::Blur(ScaledPixels(6.0))],
+        opacity: 1.0,
+    });
+    scene.insert_primitive(quad(250.0, 40.0, 20.0, 20.0, 0x00ff80, 1.0));
+    scene.insert_primitive(quad(255.0, 45.0, 30.0, 10.0, 0xffffff, 0.4));
+    scene.finish();
+    scene
+}
+
+/// The opaque pre-pass only skips work: with it and without it, every pixel matches.
+#[test]
+fn opaque_prepass_keeps_every_pixel() {
+    let mut renderer = WgpuHeadlessRenderer::new().expect("headless renderer");
+    let scene = overdraw_scene(&renderer);
+    let plan = scene.render_plan();
+    assert!(
+        plan.scene_pass_count() >= 4,
+        "the groups and the backdrop filter split the frame into scene passes"
+    );
+    let opaque_passes = (0..plan.scene_pass_count())
+        .filter(|&pass| !plan.opaque_quads(pass).is_empty())
+        .count();
+    assert!(opaque_passes >= 3, "opaque fills in {opaque_passes} passes");
+    let with_prepass = renderer
+        .render_scene_to_image(&scene, TARGET)
+        .expect("render must succeed");
+
+    let mut blended = overdraw_scene(&renderer);
+    blended.disable_opaque_quads();
+    let without_prepass = renderer
+        .render_scene_to_image(&blended, TARGET)
+        .expect("render must succeed");
+
+    let differing: Vec<_> = with_prepass
+        .enumerate_pixels()
+        .zip(without_prepass.pixels())
+        .filter(|((_, _, actual), expected)| actual != expected)
+        .map(|((x, y, actual), expected)| (x, y, actual.0, expected.0))
+        .take(8)
+        .collect();
+    if !differing.is_empty() {
+        let _ = with_prepass.save(std::env::temp_dir().join("gpui_opaque_prepass.png"));
+        let _ = without_prepass.save(std::env::temp_dir().join("gpui_opaque_blended.png"));
+    }
+    assert!(differing.is_empty(), "pixels differ: {differing:?}");
+}

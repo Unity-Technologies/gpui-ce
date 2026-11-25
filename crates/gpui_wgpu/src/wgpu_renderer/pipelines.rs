@@ -48,8 +48,24 @@ fn instance_binding_entries(source: InstanceBindingSource<'_>) -> Vec<wgpu::Bind
     }
 }
 
+/// Depth format of the scene passes. Quads draw at depths that are exact multiples of a power
+/// of two, which a 32-bit float stores without rounding.
+pub(super) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+/// How a pipeline uses the scene pass's depth buffer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DepthMode {
+    /// Drawn outside scene passes, which have no depth attachment.
+    None,
+    /// Hidden behind closer opaque fills; writes no depth.
+    Test,
+    /// Opaque fills, drawn front to back.
+    TestAndWrite,
+}
+
 pub(super) struct WgpuPipelines {
     pub(super) quads: WgpuRenderPipeline,
+    pub(super) opaque_quads: WgpuRenderPipeline,
     pub(super) smoothed_quads: WgpuRenderPipeline,
     pub(super) shadows: WgpuRenderPipeline,
     pub(super) smoothed_shadows: WgpuRenderPipeline,
@@ -455,28 +471,40 @@ impl WgpuPipelines {
             shader::DataLayout::Blur => &blur_layout,
         };
         let create =
-            |specification: shader::Pipeline, target: &wgpu::ColorTargetState, samples, module| {
+            |specification: shader::Pipeline, target: &wgpu::ColorTargetState, depth, module| {
                 create_render_pipeline(
                     device,
                     specification,
                     layout_for(specification.data_layout),
                     target,
-                    samples,
+                    depth,
                     module,
                 )
             };
+        use DepthMode::{None as NoDepth, Test, TestAndWrite};
 
         Self {
-            quads: create(shader::QUADS, &scene_target, 1, &shader_module),
-            smoothed_quads: create(shader::SMOOTHED_QUADS, &scene_target, 1, &shader_module),
-            shadows: create(shader::SHADOWS, &scene_target, 1, &shader_module),
-            smoothed_shadows: create(shader::SMOOTHED_SHADOWS, &scene_target, 1, &shader_module),
-            path_tiles: create(shader::PATH_TILES, &scene_target, 1, &shader_module),
-            underlines: create(shader::UNDERLINES, &scene_target, 1, &shader_module),
+            quads: create(shader::QUADS, &scene_target, Test, &shader_module),
+            opaque_quads: create(
+                shader::OPAQUE_QUADS,
+                &overwrite_target,
+                TestAndWrite,
+                &shader_module,
+            ),
+            smoothed_quads: create(shader::SMOOTHED_QUADS, &scene_target, Test, &shader_module),
+            shadows: create(shader::SHADOWS, &scene_target, Test, &shader_module),
+            smoothed_shadows: create(
+                shader::SMOOTHED_SHADOWS,
+                &scene_target,
+                Test,
+                &shader_module,
+            ),
+            path_tiles: create(shader::PATH_TILES, &scene_target, Test, &shader_module),
+            underlines: create(shader::UNDERLINES, &scene_target, Test, &shader_module),
             monochrome_sprites: create(
                 shader::MONOCHROME_SPRITES,
                 &scene_target,
-                1,
+                Test,
                 &shader_module,
             ),
             subpixel_sprites: subpixel_shader_module.as_ref().map(|module| {
@@ -486,35 +514,40 @@ impl WgpuPipelines {
                         write_mask: wgpu::ColorWrites::COLOR,
                         ..color_target(surface_format, Some(subpixel_blend_state()))
                     },
-                    1,
+                    Test,
                     module,
                 )
             }),
             polychrome_sprites: create(
                 shader::POLYCHROME_SPRITES,
                 &scene_target,
-                1,
+                Test,
                 &shader_module,
             ),
             smoothed_polychrome_sprites: create(
                 shader::SMOOTHED_POLYCHROME_SPRITES,
                 &scene_target,
-                1,
+                Test,
                 &shader_module,
             ),
-            surfaces: create(shader::SURFACES, &composite_target, 1, &shader_module),
+            surfaces: create(shader::SURFACES, &composite_target, Test, &shader_module),
             blur_downsample: create(
                 shader::BLUR_DOWNSAMPLE,
                 &overwrite_target,
-                1,
+                NoDepth,
                 &shader_module,
             ),
-            blur: create(shader::BLUR, &overwrite_target, 1, &shader_module),
-            blur_composite: create(shader::BLUR_COMPOSITE, &composite_target, 1, &shader_module),
+            blur: create(shader::BLUR, &overwrite_target, NoDepth, &shader_module),
+            blur_composite: create(
+                shader::BLUR_COMPOSITE,
+                &composite_target,
+                NoDepth,
+                &shader_module,
+            ),
             smoothed_blur_composite: create(
                 shader::SMOOTHED_BLUR_COMPOSITE,
                 &composite_target,
-                1,
+                NoDepth,
                 &shader_module,
             ),
         }
@@ -603,7 +636,7 @@ fn create_render_pipeline(
     specification: shader::Pipeline,
     layout: &wgpu::PipelineLayout,
     color_target: &wgpu::ColorTargetState,
-    sample_count: u32,
+    depth: DepthMode,
     module: &wgpu::ShaderModule,
 ) -> WgpuRenderPipeline {
     let raw = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -628,11 +661,15 @@ fn create_render_pipeline(
             },
             ..Default::default()
         },
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState {
-            count: sample_count,
-            ..Default::default()
-        },
+        depth_stencil: (depth != DepthMode::None).then(|| wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled: Some(depth == DepthMode::TestAndWrite),
+            // Depth clears to zero and closer primitives have greater depth.
+            depth_compare: Some(wgpu::CompareFunction::Greater),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
         cache: None,
     });

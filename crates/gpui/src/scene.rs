@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Path, PathTiles,
     Pixels, Point, Radians, ScaledFilter, ScaledPixels, Size, TimedTransformation,
-    bounds_tree::BoundsTree,
+    bounds_tree::BoundsTree, point,
 };
 use smallvec::SmallVec;
 use std::{
@@ -455,8 +455,8 @@ impl Scene {
                 }
             }
         }
-        let commands = std::mem::take(&mut self.render_plan.commands);
-        self.render_plan = ScenePlan::build(self, commands);
+        let storage = self.render_plan.take_storage();
+        self.render_plan = ScenePlan::build(self, storage);
         self.is_finished = true;
     }
 
@@ -487,6 +487,12 @@ impl Scene {
     /// manage their target handles; nesting and overflow behavior stay consistent everywhere.
     pub fn render_commands(&self) -> &[RenderCommand] {
         self.render_plan().commands()
+    }
+
+    /// Renders the finished scene without the opaque pre-pass: every quad draws blended.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn disable_opaque_quads(&mut self) {
+        self.render_plan.forget_opaque_quads();
     }
 
     /// Returns the compiled render plan for this finished scene.
@@ -1058,7 +1064,9 @@ pub struct Quad {
     pub corner_radii: Corners<ScaledPixels>,
     pub border_widths: Edges<ScaledPixels>,
     pub corner_smoothing: f32,
-    pub padding: u32,
+    /// Depth a depth-buffered renderer assigns while uploading the quad, greater values
+    /// closer. Scene code leaves it at zero.
+    pub depth: f32,
 }
 
 impl Default for Quad {
@@ -1075,9 +1083,121 @@ impl Default for Quad {
             corner_radii: Default::default(),
             border_widths: Default::default(),
             corner_smoothing: Default::default(),
-            padding: Default::default(),
+            depth: Default::default(),
         }
     }
+}
+
+impl Quad {
+    /// Whether the quad paints every pixel of its clipped bounds with one fully opaque color,
+    /// exactly as an unblended rectangle of that color would. Only such quads may write depth
+    /// and hide what is drawn behind them.
+    ///
+    /// The checks mirror the quad shader's simple path: a solid background, no border, no
+    /// rounded or smoothed corners, and no content-mask fade. Alpha must be exactly one, so
+    /// source-over blending and replacing the destination produce the same pixel.
+    pub fn is_opaque_rectangle(&self) -> bool {
+        self.background.tag == crate::BackgroundTag::Solid
+            && self.background.solid.a == 1.0
+            && self.border_widths == Edges::default()
+            && self.corner_radii == Corners::default()
+            && !has_corner_smoothing(self.corner_smoothing)
+            && self.content_mask.fade_out == Edges::default()
+    }
+
+    /// The region where the quad paints exactly its fully opaque fill color, as a
+    /// depth-buffered renderer may draw it unblended: the whole quad for an
+    /// [opaque rectangle](Self::is_opaque_rectangle), the [border interior](Self::border_interior)
+    /// of a quad with borders or rounded corners, `None` when no such region is certain.
+    pub fn opaque_fill_bounds(&self) -> Option<Bounds<ScaledPixels>> {
+        if self.background.tag != crate::BackgroundTag::Solid
+            || self.background.solid.a != 1.0
+            || has_corner_smoothing(self.corner_smoothing)
+            || self.content_mask.fade_out != Edges::default()
+        {
+            return None;
+        }
+        if self.is_opaque_rectangle() {
+            return Some(self.bounds);
+        }
+        let non_negative = |length: &ScaledPixels| length.0 >= 0.0;
+        let widths = &self.border_widths;
+        let radii = &self.corner_radii;
+        if ![widths.top, widths.right, widths.bottom, widths.left]
+            .iter()
+            .chain(&[
+                radii.top_left,
+                radii.top_right,
+                radii.bottom_right,
+                radii.bottom_left,
+            ])
+            .all(non_negative)
+        {
+            return None;
+        }
+        let interior = self.border_interior();
+        (!interior.is_empty()).then_some(interior)
+    }
+
+    /// The largest rectangle inside the quad that no border, corner or edge antialiasing
+    /// reaches, so the quad paints only its fill there.
+    pub(crate) fn border_interior(&self) -> Bounds<ScaledPixels> {
+        let quad = self;
+        let radii = &quad.corner_radii;
+        let widths = &quad.border_widths;
+        let reach_factor = 1.0 + quad.corner_smoothing;
+        let edge_reaches = Edges {
+            top: radii.top_left.max(radii.top_right) * reach_factor,
+            right: radii.top_right.max(radii.bottom_right) * reach_factor,
+            bottom: radii.bottom_left.max(radii.bottom_right) * reach_factor,
+            left: radii.top_left.max(radii.bottom_left) * reach_factor,
+        };
+
+        let antialias_inset = point(ScaledPixels(1.0), ScaledPixels(1.0));
+        let inset_bounds = |top_left_inset, bottom_right_inset| {
+            Bounds::from_corners(
+                quad.bounds.origin + top_left_inset + antialias_inset,
+                quad.bounds.bottom_right() - bottom_right_inset - antialias_inset,
+            )
+        };
+
+        // Rounded corners need only be excluded on one axis. Either candidate
+        // is empty of border pixels, so use the larger interior.
+        let horizontal_band = inset_bounds(
+            point(widths.left, widths.top.max(edge_reaches.top)),
+            point(widths.right, widths.bottom.max(edge_reaches.bottom)),
+        );
+        let vertical_band = inset_bounds(
+            point(widths.left.max(edge_reaches.left), widths.top),
+            point(widths.right.max(edge_reaches.right), widths.bottom),
+        );
+
+        let area = |bounds: &Bounds<ScaledPixels>| {
+            bounds.size.width.0.max(0.) * bounds.size.height.0.max(0.)
+        };
+        if area(&horizontal_band) >= area(&vertical_band) {
+            horizontal_band
+        } else {
+            vertical_band
+        }
+    }
+}
+
+/// Quad counts above this draw without depth-buffer occlusion: every depth step must stay
+/// an exact multiple of a power of two below one.
+pub const MAX_DEPTH_SORTED_QUADS: usize = (1 << 24) - 1;
+
+/// The depth step between consecutive quads in a frame with `quad_count` quads.
+pub fn quad_depth_scale(quad_count: usize) -> f32 {
+    let denominator = (quad_count.min(MAX_DEPTH_SORTED_QUADS) + 1).next_power_of_two();
+    1.0 / denominator as f32
+}
+
+/// Maps the index of a quad in [`Scene::quads`] to its depth, greater values closer.
+/// A batch drawn after `quad_index` quads uses `quad_depth(quad_index, scale)` too: it
+/// passes the depth test against every earlier quad and fails against the next one.
+pub fn quad_depth(quad_index: usize, scale: f32) -> f32 {
+    ((quad_index.min(MAX_DEPTH_SORTED_QUADS) + 1) as f32 * scale).min(1.0)
 }
 
 impl From<Quad> for Primitive {
@@ -2510,5 +2630,242 @@ mod tests {
             )
         };
         assert_eq!(orders(&replayed), orders(&scene));
+    }
+
+    fn opaque_quad() -> Quad {
+        Quad {
+            background: crate::solid_background(crate::red()),
+            ..quad()
+        }
+    }
+
+    #[test]
+    fn only_provably_opaque_quads_are_opaque_rectangles() {
+        let translucent = |alpha| {
+            let mut color = crate::red();
+            color.alpha = alpha;
+            Quad {
+                background: crate::solid_background(color),
+                ..quad()
+            }
+        };
+        let faded_mask = ContentMask {
+            fade_out: Edges {
+                left: scaled(4.0),
+                ..Default::default()
+            },
+            ..mask()
+        };
+        assert!(opaque_quad().is_opaque_rectangle());
+        // A default background is opaque black, as the shaders have always drawn it.
+        assert!(quad().is_opaque_rectangle());
+        let not_opaque = [
+            ("transparent", translucent(0.0)),
+            ("translucent", translucent(0.999)),
+            ("NaN alpha", translucent(f32::NAN)),
+            (
+                "gradient",
+                Quad {
+                    background: crate::linear_gradient(
+                        0.0,
+                        crate::linear_color_stop(crate::red(), 0.0),
+                        crate::linear_color_stop(crate::blue(), 1.0),
+                    ),
+                    ..quad()
+                },
+            ),
+            (
+                "pattern",
+                Quad {
+                    background: crate::pattern_slash(crate::red(), 2.0, 2.0),
+                    ..quad()
+                },
+            ),
+            (
+                "bordered",
+                Quad {
+                    border_widths: Edges::all(scaled(1.0)),
+                    ..opaque_quad()
+                },
+            ),
+            (
+                "rounded",
+                Quad {
+                    corner_radii: Corners::all(scaled(4.0)),
+                    ..opaque_quad()
+                },
+            ),
+            (
+                "smoothed",
+                Quad {
+                    corner_smoothing: 0.5,
+                    ..opaque_quad()
+                },
+            ),
+            (
+                "faded mask",
+                Quad {
+                    content_mask: faded_mask,
+                    ..opaque_quad()
+                },
+            ),
+        ];
+        for (name, quad) in not_opaque {
+            assert!(!quad.is_opaque_rectangle(), "{name}");
+        }
+    }
+
+    #[test]
+    fn opaque_fill_bounds_keep_clear_of_borders_corners_and_antialiasing() {
+        assert_eq!(opaque_quad().opaque_fill_bounds(), Some(full_bounds()));
+
+        let card = Quad {
+            border_widths: Edges::all(scaled(2.0)),
+            border_color: crate::blue().into(),
+            corner_radii: Corners::all(scaled(10.0)),
+            ..opaque_quad()
+        };
+        let interior = card
+            .opaque_fill_bounds()
+            .expect("a large card has an interior");
+        assert!(!card.is_opaque_rectangle());
+        // The interior clears the 10px corners on one axis and, on both, the 2px border
+        // plus one antialiasing pixel.
+        let (origin, corner) = (interior.origin, interior.bottom_right());
+        assert!(
+            origin.x >= scaled(3.0) && origin.y >= scaled(3.0),
+            "{interior:?}"
+        );
+        assert!(
+            corner.x <= scaled(97.0) && corner.y <= scaled(97.0),
+            "{interior:?}"
+        );
+        assert!(
+            origin.x >= scaled(11.0) || origin.y >= scaled(11.0),
+            "{interior:?} reaches a corner"
+        );
+        assert_eq!(interior, card.border_interior());
+
+        for (name, quad) in [
+            (
+                "translucent fill",
+                Quad {
+                    background: crate::solid_background(crate::transparent_black()),
+                    ..card
+                },
+            ),
+            (
+                "smoothed corners",
+                Quad {
+                    corner_smoothing: 0.6,
+                    ..card
+                },
+            ),
+            (
+                "negative border",
+                Quad {
+                    border_widths: Edges {
+                        top: scaled(-1.0),
+                        ..card.border_widths
+                    },
+                    ..card
+                },
+            ),
+            (
+                "negative radius",
+                Quad {
+                    corner_radii: Corners {
+                        top_left: scaled(-3.0),
+                        ..card.corner_radii
+                    },
+                    ..card
+                },
+            ),
+            (
+                "border wider than the quad",
+                Quad {
+                    border_widths: Edges::all(scaled(60.0)),
+                    ..card
+                },
+            ),
+        ] {
+            assert_eq!(quad.opaque_fill_bounds(), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn quad_depths_are_exact_increasing_and_below_one() {
+        for count in [0usize, 1, 2, 3, 255, 256, 1000, MAX_DEPTH_SORTED_QUADS] {
+            let scale = quad_depth_scale(count);
+            assert!(scale.is_finite() && scale > 0.0, "{count}");
+            assert!(
+                quad_depth(0, scale) > 0.0,
+                "the first quad passes a cleared buffer"
+            );
+            assert!(quad_depth(count, scale) <= 1.0, "{count}");
+            let indices = if count == 0 {
+                Vec::new()
+            } else {
+                vec![0, count / 2, count - 1]
+            };
+            for index in indices {
+                let (this, next) = (quad_depth(index, scale), quad_depth(index + 1, scale));
+                assert!(this < next, "{count}: {index}");
+                // Each depth is an exact multiple of the scale, so no two round together.
+                assert_eq!(this / scale, (index + 1) as f32, "{count}: {index}");
+            }
+        }
+    }
+
+    #[test]
+    fn opaque_quads_are_listed_front_to_back_per_scene_pass() {
+        let group = |is_start, filters: SmallVec<[ScaledFilter; 4]>| FilterBoundary {
+            order: 0,
+            bounds: full_bounds(),
+            content_mask: mask(),
+            corner_radii: Corners::default(),
+            corner_smoothing: 0.0,
+            filters,
+            opacity: 0.5,
+            is_start,
+        };
+        let mut scene = Scene::default();
+        scene.insert_primitive(opaque_quad()); // 0
+        scene.insert_primitive(Quad {
+            background: crate::solid_background(crate::transparent_black()),
+            ..quad()
+        }); // 1: transparent, never listed
+        scene.insert_primitive(opaque_quad()); // 2
+        scene.insert_primitive(BackdropFilter {
+            bounds: full_bounds(),
+            content_mask: mask(),
+            filters: smallvec::smallvec![ScaledFilter::Blur(scaled(4.0))],
+            opacity: 1.0,
+            ..Default::default()
+        });
+        scene.insert_primitive(opaque_quad()); // 3
+        scene.insert_primitive(group(true, SmallVec::new()));
+        scene.insert_primitive(opaque_quad()); // 4
+        scene.insert_primitive(Quad {
+            corner_radii: Corners::all(scaled(4.0)),
+            ..opaque_quad()
+        }); // 5: listed for its interior
+        scene.insert_primitive(group(false, SmallVec::new()));
+        scene.insert_primitive(opaque_quad()); // 6
+        scene.finish();
+
+        let plan = scene.render_plan();
+        let passes = (0..plan.scene_pass_count())
+            .map(|pass| plan.opaque_quads(pass).to_vec())
+            .collect::<Vec<_>>();
+        assert_eq!(passes, [vec![2, 0], vec![3], vec![5, 4], vec![6]]);
+        assert_eq!(plan.requirements().opaque_quad_count, 6);
+        assert_eq!(plan.requirements().opaque_quad_pass_count, 4);
+
+        scene.disable_opaque_quads();
+        let plan = scene.render_plan();
+        assert_eq!(plan.scene_pass_count(), 4);
+        assert!((0..4).all(|pass| plan.opaque_quads(pass).is_empty()));
+        assert_eq!(plan.requirements().opaque_quad_count, 0);
     }
 }

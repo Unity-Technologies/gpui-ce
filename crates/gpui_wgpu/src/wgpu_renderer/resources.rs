@@ -63,6 +63,9 @@ pub(super) struct WgpuResources {
     pub(super) blur_pong_view: Option<wgpu::TextureView>,
     pub(super) filter_group_textures: Vec<wgpu::Texture>,
     pub(super) filter_group_views: Vec<wgpu::TextureView>,
+    /// Shared by every scene pass, which clears it on load; sized to the render target.
+    pub(super) depth_texture: Option<wgpu::Texture>,
+    pub(super) depth_view: Option<wgpu::TextureView>,
 }
 
 #[derive(Default)]
@@ -186,6 +189,8 @@ impl WgpuResources {
             blur_pong_view: None,
             filter_group_textures: Vec::new(),
             filter_group_views: Vec::new(),
+            depth_texture: None,
+            depth_view: None,
         };
         Ok((resources, metadata))
     }
@@ -203,6 +208,8 @@ impl WgpuResources {
         self.blur_pong_view = None;
         self.filter_group_textures.clear();
         self.filter_group_views.clear();
+        self.depth_texture = None;
+        self.depth_view = None;
     }
 
     pub(super) fn finish_frame_uploads(&self) {
@@ -276,6 +283,44 @@ impl WgpuRenderer {
             resources.filter_group_textures.push(texture);
             resources.filter_group_views.push(view);
         }
+    }
+
+    /// Returns the scene passes' depth attachment, recreating it when the target resized.
+    pub(super) fn ensure_depth_texture(&mut self) -> wgpu::TextureView {
+        let width = self.target.width().max(1);
+        let height = self.target.height().max(1);
+        let resources = self.resources_mut();
+        if let (Some(texture), Some(view)) = (&resources.depth_texture, &resources.depth_view)
+            && texture.width() == width
+            && texture.height() == height
+        {
+            return view.clone();
+        }
+        // Every scene pass clears depth and discards it, so tile-based GPUs can keep it
+        // in tile memory. Browsers may not know the usage bit, so web builds skip it.
+        let usage = if cfg!(target_family = "wasm") {
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+        } else {
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TRANSIENT_ATTACHMENT
+        };
+        let texture = resources.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("scene_depth_texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: super::pipelines::DEPTH_FORMAT,
+            usage,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        resources.depth_texture = Some(texture);
+        resources.depth_view = Some(view.clone());
+        view
     }
 
     pub(super) fn ensure_uniform_capacity(
