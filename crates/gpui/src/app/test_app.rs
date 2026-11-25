@@ -595,7 +595,8 @@ impl<V: 'static + Render> TestAppWindow<V> {
     /// window.read(|keys, _| assert_eq!(keys.last.as_deref(), Some("space")));
     /// ```
     pub fn simulate_keystroke(&mut self, keystroke: &str) {
-        let keystroke = Keystroke::parse(keystroke).unwrap();
+        let os = self.app.borrow().platform_info().os;
+        let keystroke = Keystroke::parse_with_os(keystroke, os).unwrap();
         {
             let mut app = self.app.borrow_mut();
             let any_handle: AnyWindowHandle = self.handle.into();

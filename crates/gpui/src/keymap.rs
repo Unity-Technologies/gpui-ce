@@ -870,7 +870,11 @@ mod tests {
         fn assert_bindings(keymap: &Keymap, action: &dyn Action, expected: &[&str]) {
             let actual = keymap
                 .bindings_for_action(action)
-                .map(|binding| binding.keystrokes[0].inner().unparse())
+                .map(|binding| {
+                    binding.keystrokes[0]
+                        .inner()
+                        .unparse(crate::OperatingSystem::Mac)
+                })
                 .collect::<Vec<_>>();
             assert_eq!(actual, expected, "{:?}", action);
         }
@@ -923,7 +927,11 @@ mod tests {
         fn assert_bindings(keymap: &Keymap, action: &dyn Action, expected: &[&str]) {
             let actual = keymap
                 .bindings_for_action(action)
-                .map(|binding| binding.keystrokes[0].inner().unparse())
+                .map(|binding| {
+                    binding.keystrokes[0]
+                        .inner()
+                        .unparse(crate::OperatingSystem::Mac)
+                })
                 .collect::<Vec<_>>();
             assert_eq!(actual, expected, "{:?}", action);
         }
@@ -1126,7 +1134,7 @@ mod tests {
                     binding
                         .keystrokes()
                         .iter()
-                        .map(|keystroke| keystroke.inner().unparse())
+                        .map(|keystroke| keystroke.inner().unparse(crate::OperatingSystem::Mac))
                         .collect::<Vec<_>>()
                         .join(" "),
                     binding.action().name(),

@@ -1109,7 +1109,7 @@ mod tests {
         fn dispatch(
             tree: &mut DispatchTree,
             pending: SmallVec<[Keystroke; 1]>,
-            key: &str,
+            key: &'static str,
             path: &DispatchPath,
         ) -> DispatchResult {
             tree.dispatch_key(pending, Keystroke::parse(key).unwrap(), path)

@@ -484,7 +484,7 @@ mod tests {
         })
     }
 
-    fn activate_key(cx: &mut VisualTestContext, key: &str) {
+    fn activate_key(cx: &mut VisualTestContext, key: &'static str) {
         let keystroke = Keystroke::parse(key).unwrap();
         cx.simulate_event(KeyDownEvent {
             keystroke: keystroke.clone(),

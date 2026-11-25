@@ -2467,6 +2467,11 @@ impl App {
         self.platform.compositor_name()
     }
 
+    /// Returns the host OS and application target reported by the backend.
+    pub fn platform_info(&self) -> crate::PlatformInfo {
+        self.platform.platform_info()
+    }
+
     /// Returns the path to a helper executable named `name` that ships with the app.
     ///
     /// See [`Application::path_for_auxiliary_executable`].

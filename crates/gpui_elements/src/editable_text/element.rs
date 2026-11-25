@@ -1085,7 +1085,7 @@ mod tests {
             self.cx.run_until_parked();
         }
 
-        fn key_down(&mut self, keystroke: &str) {
+        fn key_down(&mut self, keystroke: &'static str) {
             let keystroke = Keystroke::parse(keystroke).unwrap();
             self.dispatch(PlatformInput::KeyDown(KeyDownEvent {
                 keystroke,
@@ -1094,7 +1094,7 @@ mod tests {
             }));
         }
 
-        fn key_up(&mut self, keystroke: &str) {
+        fn key_up(&mut self, keystroke: &'static str) {
             let keystroke = Keystroke::parse(keystroke).unwrap();
             self.dispatch(PlatformInput::KeyUp(KeyUpEvent { keystroke }));
         }
@@ -1273,7 +1273,7 @@ mod tests {
             let mut fixture =
                 BidiInputFixture::new_with_direction(text, 8.0, 320.0, false, 1.0, direction);
             fixture.cx.update(|cx| {
-                cx.bind_keys(default_bindings().as_keybindings(Some(DEFAULT_INPUT_CONTEXT)));
+                cx.bind_keys(default_bindings().as_keybindings(Some(DEFAULT_INPUT_CONTEXT), cx));
             });
             fixture.cx.run_until_parked();
             fixture.update_input(|input, cx| input.move_to(middle, cx));

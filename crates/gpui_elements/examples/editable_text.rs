@@ -50,7 +50,7 @@ impl Render for Example {
 
 fn main() {
     gpui_platform::application().run(|cx: &mut App| {
-        cx.bind_keys(default_bindings().as_keybindings(Some(DEFAULT_INPUT_CONTEXT)));
+        cx.bind_keys(default_bindings().as_keybindings(Some(DEFAULT_INPUT_CONTEXT), cx));
 
         let bounds = Bounds::centered(None, size(px(500.), px(500.0)), cx);
         cx.open_window(

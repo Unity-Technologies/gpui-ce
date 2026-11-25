@@ -30,6 +30,7 @@ use wasm_bindgen::prelude::*;
 /// The platform starts with an empty font database. Applications must add fonts
 /// through [`gpui::App::text_system`] before opening a window.
 pub struct WebPlatform {
+    platform_info: gpui::PlatformInfo,
     browser_window: web_sys::Window,
     background_executor: BackgroundExecutor,
     foreground_executor: ForegroundExecutor,
@@ -153,6 +154,7 @@ impl WebPlatform {
     ) -> Self {
         let browser_window =
             web_sys::window().expect("must be running in a browser window context");
+        let platform_info = crate::events::platform_info(&browser_window);
         let dispatcher = Arc::new(WebDispatcher::new(
             browser_window.clone(),
             allow_multi_threading,
@@ -180,6 +182,7 @@ impl WebPlatform {
         ));
 
         Self {
+            platform_info,
             browser_window,
             background_executor,
             foreground_executor,
@@ -282,6 +285,10 @@ async fn initialize_graphics(
 }
 
 impl Platform for WebPlatform {
+    fn platform_info(&self) -> gpui::PlatformInfo {
+        self.platform_info
+    }
+
     fn background_executor(&self) -> BackgroundExecutor {
         self.background_executor.clone()
     }

@@ -1,15 +1,20 @@
-use crate::{Action, DummyKeyboardMapper, KeyBinding, KeyBindingContextPredicate, SharedString};
+use crate::{Action, App, KeyBinding, KeyBindingContextPredicate, SharedString};
 use std::{any::TypeId, collections::HashMap};
 
 /// A generic collection of `Action` -> keystrokes which can be bound under a shared key-context.
-/// Use `as_keybindings` to create an iterator of `KeyBinding` to provide to `App::bind_keys`.
+/// Use `as_keybindings` to create the `KeyBinding`s to provide to `App::bind_keys`.
 ///
 /// ```rust
 /// # use gpui::{ActionBindingCollection, Action};
 /// gpui::actions!([MyAction]);
 /// # #[gpui::test]
 /// # fn test(app: &mut gpui::TestAppContext) {
-/// app.bind_keys(ActionBindingCollection::default().with::<MyAction>("enter").as_keybindings(None));
+/// app.update(|cx| {
+///     let bindings = ActionBindingCollection::default()
+///         .with::<MyAction>("enter")
+///         .as_keybindings(None, cx);
+///     cx.bind_keys(bindings);
+/// });
 /// # }
 /// ```
 #[derive(Default)]
@@ -39,9 +44,11 @@ impl ActionBindingCollection {
         self
     }
 
-    /// Creates an iterator of `KeyBinding` which represents all action+keystrokes in this collection bound to the same key-context.
+    /// Creates the `KeyBinding`s which represent all action+keystrokes in this collection bound to the same key-context.
     /// This sequence can be provided to `App::bind_keys`, and any elements which use the same `InteractiveElement::key_context` will receive the bound actions.
-    pub fn as_keybindings(&self, context: Option<&str>) -> impl Iterator<Item = KeyBinding> {
+    ///
+    /// Keystrokes are parsed for the host OS that `cx` reports, so `secondary-` resolves there.
+    pub fn as_keybindings(&self, context: Option<&str>, cx: &App) -> Vec<KeyBinding> {
         let context_predicate =
             context.map(|context| KeyBindingContextPredicate::parse(context).unwrap().into());
         let iter = self.entries.iter();
@@ -55,12 +62,12 @@ impl ActionBindingCollection {
                     context_predicate.clone(),
                     false,
                     None,
-                    &DummyKeyboardMapper,
+                    cx,
                 );
                 keybinding.expect("failed to load keybinding")
             })
         });
-        iter.flatten()
+        iter.flatten().collect()
     }
 }
 
@@ -77,7 +84,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn test_single_binding(_cx: &mut TestAppContext) {
+    fn test_single_binding(cx: &mut TestAppContext) {
         let collection = ActionBindingCollection::default();
         let collection = collection.with::<TestAction>("enter");
 
@@ -85,12 +92,12 @@ mod tests {
         let entry = entry.map(|entry| &entry.keystrokes);
         assert_eq!(entry, Some(&vec![SharedString::new_static("enter")]));
 
-        let out_bindings = collection.as_keybindings(None).collect::<Vec<_>>();
+        let out_bindings = cx.update(|cx| collection.as_keybindings(None, cx));
         assert_eq!(out_bindings.len(), 1);
     }
 
     #[gpui::test]
-    fn test_single_action_many_keys(_cx: &mut TestAppContext) {
+    fn test_single_action_many_keys(cx: &mut TestAppContext) {
         let collection = ActionBindingCollection::default();
         let collection = collection.with::<TestAction>("enter");
         let collection = collection.with::<TestAction>("escape");
@@ -105,18 +112,34 @@ mod tests {
             ])
         );
 
-        let out_bindings = collection.as_keybindings(None).collect::<Vec<_>>();
+        let out_bindings = cx.update(|cx| collection.as_keybindings(None, cx));
         assert_eq!(out_bindings.len(), 2);
     }
 
     #[gpui::test]
-    fn test_single_action_many_keys_context(_cx: &mut TestAppContext) {
+    fn test_single_action_many_keys_context(cx: &mut TestAppContext) {
         let collection = ActionBindingCollection::default();
         let collection = collection.with::<TestAction>("enter");
         let collection = collection.with::<TestAction>("escape");
-        let out_bindings = collection
-            .as_keybindings(Some("test_content"))
-            .collect::<Vec<_>>();
+        let out_bindings = cx.update(|cx| collection.as_keybindings(Some("test_content"), cx));
         assert_eq!(out_bindings.len(), 2);
+    }
+
+    #[gpui::test]
+    fn test_secondary_resolves_for_the_reported_host(cx: &mut TestAppContext) {
+        let collection = ActionBindingCollection::default().with::<TestAction>("secondary-s");
+        let modifiers_on = |cx: &mut TestAppContext, os| {
+            cx.set_platform_info(crate::PlatformInfo {
+                os,
+                target: crate::PlatformTarget::Native,
+            });
+            let bindings = cx.update(|cx| collection.as_keybindings(None, cx));
+            bindings[0].keystrokes()[0].modifiers().clone()
+        };
+
+        let mac = modifiers_on(cx, crate::OperatingSystem::Mac);
+        assert!(mac.platform && !mac.control);
+        let linux = modifiers_on(cx, crate::OperatingSystem::Linux);
+        assert!(linux.control && !linux.platform);
     }
 }
