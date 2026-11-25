@@ -2953,7 +2953,7 @@ mod tests {
 
     fn tile(atlas: &dyn PlatformAtlas, key: AtlasKey, bytes: Vec<u8>) -> AtlasTile {
         atlas
-            .get_or_insert_with(&key, &mut || {
+            .get_or_insert_with(key, &mut || {
                 Ok(Some((
                     Size {
                         width: DevicePixels(8),

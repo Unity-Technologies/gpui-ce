@@ -2610,9 +2610,7 @@ mod tests {
         });
         let tile = renderer
             .sprite_atlas()
-            .get_or_insert_with(&key, &mut || {
-                Ok(Some((tile_size, Cow::Owned(vec![64; 64]))))
-            })
+            .get_or_insert_with(key, &mut || Ok(Some((tile_size, Cow::Owned(vec![64; 64])))))
             .unwrap()
             .unwrap();
         let bounds = Bounds {
@@ -3177,7 +3175,7 @@ mod tests {
         });
         let tile = renderer
             .sprite_atlas()
-            .get_or_insert_with(&key, &mut || {
+            .get_or_insert_with(key, &mut || {
                 Ok(Some((
                     Size {
                         width: DevicePixels(2),

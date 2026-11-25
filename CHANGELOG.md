@@ -14,6 +14,7 @@ Items are sorted by issue or pull request number.
 
 ### Breaking Changes
 
+- `PlatformAtlas::get_or_insert_with` takes an owned `AtlasKey`. Atlas backends share the new `AtlasState` and `AtlasBackend`, and `HeadlessAtlas` serves test and headless windows. (ported from zed#64331)
 - GPUI now requires macOS 12.0 (Monterey) or later; the deployment target moved from 10.15.7 to 12.0. (ported from zed#65994)
 - `ParleyTextSystem::new` replaces `new_with_rasterizer`. It takes only a glyph rasterizer, and starts with an empty font catalog. Use `.with_system_fonts()` or `.add_fonts(...)` to load fonts, `.with_system_fallback_family(...)` to set the `.SystemUIFont` fallback, and `.with_fallback_families(...)` to configure general fallbacks. [#399](https://github.com/gpui-ce/gpui-ce/pull/399), [#400](https://github.com/gpui-ce/gpui-ce/pull/400)
 

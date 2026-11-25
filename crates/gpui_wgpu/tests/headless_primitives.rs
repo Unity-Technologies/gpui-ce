@@ -138,7 +138,7 @@ fn mask(width: f32, height: f32) -> ContentMask<ScaledPixels> {
 fn tile(renderer: &WgpuHeadlessRenderer, key: AtlasKey, bytes: Vec<u8>) -> AtlasTile {
     renderer
         .sprite_atlas()
-        .get_or_insert_with(&key, &mut || {
+        .get_or_insert_with(key, &mut || {
             Ok(Some((
                 Size {
                     width: DevicePixels(8),

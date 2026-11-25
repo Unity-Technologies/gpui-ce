@@ -1,28 +1,25 @@
 use anyhow::{Context as _, Result};
-use collections::FxHashMap;
 use derive_more::{Deref, DerefMut};
 use etagere::BucketedAtlasAllocator;
 use gpui::{
-    AtlasKey, AtlasTextureId, AtlasTextureKind, AtlasTextureList, AtlasTile, Bounds, DevicePixels,
-    GlyphAtlasCache, GlyphAtlasEntry, PlatformAtlas, Point, RenderGlyphParams, Size,
-    ValidatedRasterizedGlyph,
+    AtlasBackend, AtlasKey, AtlasState, AtlasTextureId, AtlasTextureKind, AtlasTextureList,
+    AtlasTile, Bounds, DevicePixels, GlyphAtlasEntry, PlatformAtlas, Point, RenderGlyphParams,
+    Size, ValidatedRasterizedGlyph,
 };
 use metal::Device;
 use parking_lot::Mutex;
 use std::borrow::Cow;
 
-pub struct MetalAtlas(Mutex<MetalAtlasState>);
+pub struct MetalAtlas(Mutex<AtlasState<MetalAtlasTextures>>);
 
 impl MetalAtlas {
     pub(crate) fn new(device: Device, is_apple_gpu: bool) -> Self {
-        MetalAtlas(Mutex::new(MetalAtlasState {
+        MetalAtlas(Mutex::new(AtlasState::new(MetalAtlasTextures {
             device: AssertSend(device),
             is_apple_gpu,
             monochrome_textures: Default::default(),
             polychrome_textures: Default::default(),
-            tiles_by_key: Default::default(),
-            glyph_cache: Default::default(),
-        }))
+        })))
     }
 
     /// The Metal texture behind `id`, or `None` once the atlas released it. A batch can name a
@@ -30,37 +27,26 @@ impl MetalAtlas {
     pub(crate) fn metal_texture(&self, id: AtlasTextureId) -> Option<metal::Texture> {
         self.0
             .lock()
+            .backend
             .texture(id)
             .map(|texture| texture.metal_texture.clone())
     }
 }
 
-struct MetalAtlasState {
+struct MetalAtlasTextures {
     device: AssertSend<Device>,
     is_apple_gpu: bool,
     monochrome_textures: AtlasTextureList<MetalAtlasTexture>,
     polychrome_textures: AtlasTextureList<MetalAtlasTexture>,
-    tiles_by_key: FxHashMap<AtlasKey, AtlasTile>,
-    glyph_cache: GlyphAtlasCache,
 }
 
 impl PlatformAtlas for MetalAtlas {
     fn get_or_insert_with<'a>(
         &self,
-        key: &AtlasKey,
+        key: AtlasKey,
         build: &mut dyn FnMut() -> Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
     ) -> Result<Option<AtlasTile>> {
-        let mut lock = self.0.lock();
-        if let Some(tile) = lock.tiles_by_key.get(key) {
-            return Ok(Some(*tile));
-        }
-
-        let Some((size, bytes)) = build()? else {
-            return Ok(None);
-        };
-        let tile = lock.insert_tile(key.clone(), size, &bytes)?;
-
-        Ok(Some(tile))
+        self.0.lock().get_or_insert_with(key, build)
     }
 
     fn get_or_insert_glyph_with(
@@ -68,33 +54,34 @@ impl PlatformAtlas for MetalAtlas {
         params: &RenderGlyphParams,
         build: &mut dyn FnMut() -> Result<ValidatedRasterizedGlyph>,
     ) -> Result<GlyphAtlasEntry> {
-        let mut lock = self.0.lock();
-        if let Some(entry) = lock.glyph_cache.get(params) {
-            return Ok(entry);
-        }
-
-        let glyph = build()?;
-        let tile = if glyph.size == Size::default() {
-            None
-        } else {
-            let key = AtlasKey::from((params.clone(), glyph.format));
-            Some(lock.insert_tile(key, glyph.size, &glyph.pixels)?)
-        };
-        Ok(lock.glyph_cache.insert(params, &glyph, tile))
+        self.0.lock().get_or_insert_glyph_with(params, build)
     }
 
     fn remove(&self, key: &AtlasKey) {
-        let mut lock = self.0.lock();
-        lock.glyph_cache.remove(key);
+        self.0.lock().remove(key);
+    }
+}
 
-        let Some(tile) = lock.tiles_by_key.remove(key) else {
-            return;
-        };
+impl AtlasBackend for MetalAtlasTextures {
+    fn insert(
+        &mut self,
+        kind: AtlasTextureKind,
+        size: Size<DevicePixels>,
+        bytes: &[u8],
+    ) -> Result<AtlasTile> {
+        let tile = self.allocate(size, kind).context("failed to allocate")?;
+        self.texture(tile.texture_id)
+            .context("atlas texture missing right after allocation")?
+            .upload(tile.bounds, bytes);
+        Ok(tile)
+    }
+
+    fn remove(&mut self, tile: AtlasTile) {
         let id = tile.texture_id;
 
         let textures = match id.kind {
-            AtlasTextureKind::Monochrome => &mut lock.monochrome_textures,
-            AtlasTextureKind::Polychrome => &mut lock.polychrome_textures,
+            AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
+            AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
             AtlasTextureKind::Subpixel => unreachable!(),
         };
 
@@ -118,24 +105,7 @@ impl PlatformAtlas for MetalAtlas {
     }
 }
 
-impl MetalAtlasState {
-    fn insert_tile(
-        &mut self,
-        key: AtlasKey,
-        size: Size<DevicePixels>,
-        bytes: &[u8],
-    ) -> Result<AtlasTile> {
-        let tile = self
-            .allocate(size, key.texture_kind())
-            .context("failed to allocate")?;
-        self.texture(tile.texture_id)
-            .context("atlas texture missing right after allocation")?
-            .upload(tile.bounds, bytes);
-        self.tiles_by_key.insert(key, tile);
-
-        Ok(tile)
-    }
-
+impl MetalAtlasTextures {
     fn allocate(
         &mut self,
         size: Size<DevicePixels>,
@@ -336,7 +306,7 @@ mod tests {
         })
     }
 
-    fn insert_tile(atlas: &MetalAtlas, key: &AtlasKey, size: Size<DevicePixels>) -> AtlasTile {
+    fn insert_tile(atlas: &MetalAtlas, key: AtlasKey, size: Size<DevicePixels>) -> AtlasTile {
         atlas
             .get_or_insert_with(key, &mut || {
                 let byte_count = (size.width.0 as usize) * (size.height.0 as usize) * 4;
@@ -361,9 +331,9 @@ mod tests {
         let key_b = make_image_key(2, 0);
         let key_c = make_image_key(3, 0);
 
-        let tile_a = insert_tile(&atlas, &key_a, small);
-        let tile_b = insert_tile(&atlas, &key_b, small);
-        let tile_c = insert_tile(&atlas, &key_c, small);
+        let tile_a = insert_tile(&atlas, key_a.clone(), small);
+        let tile_b = insert_tile(&atlas, key_b.clone(), small);
+        let tile_c = insert_tile(&atlas, key_c.clone(), small);
 
         assert_eq!(tile_a.texture_id, tile_b.texture_id);
         assert_eq!(tile_b.texture_id, tile_c.texture_id);
@@ -380,7 +350,7 @@ mod tests {
 
         // Re-inserting A must allocate a fresh tile on a new texture,
         // NOT return a stale tile referencing the deleted texture.
-        let tile_a2 = insert_tile(&atlas, &key_a, small);
+        let tile_a2 = insert_tile(&atlas, key_a, small);
 
         // The texture must actually exist — this would panic before the fix.
         let _texture = atlas.metal_texture(tile_a2.texture_id);
@@ -405,12 +375,12 @@ mod tests {
         let big_key_a = make_image_key(2, 0);
         let big_key_b = make_image_key(3, 0);
 
-        let keeper_tile = insert_tile(&atlas, &keeper_key, small);
-        let tile_a = insert_tile(&atlas, &big_key_a, big);
+        let keeper_tile = insert_tile(&atlas, keeper_key, small);
+        let tile_a = insert_tile(&atlas, big_key_a.clone(), big);
         assert_eq!(keeper_tile.texture_id, tile_a.texture_id);
 
         atlas.remove(&big_key_a);
-        let tile_b = insert_tile(&atlas, &big_key_b, big);
+        let tile_b = insert_tile(&atlas, big_key_b, big);
         assert_eq!(tile_b.texture_id, keeper_tile.texture_id);
     }
 
@@ -436,7 +406,7 @@ mod tests {
             },
         });
         let tile = atlas
-            .get_or_insert_with(&key, &mut || {
+            .get_or_insert_with(key, &mut || {
                 Ok(Some((
                     Size {
                         width: DevicePixels(8),
