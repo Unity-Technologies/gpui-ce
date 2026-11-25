@@ -1114,7 +1114,7 @@ impl MacWindowState {
                     return;
                 };
                 let main_thread =
-                    MainThreadMarker::new().expect("macOS windows require the main thread");
+                    crate::main_thread_marker().expect("macOS windows require the main thread");
                 let window_state = Arc::downgrade(window_state);
                 let source = MetalFrameSource::new(layer, main_thread, move |drawable| {
                     if let Some(window_state) = window_state.upgrade() {

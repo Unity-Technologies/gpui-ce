@@ -5,7 +5,7 @@ use core_graphics::display::{
     CGDirectDisplayID, CGDisplay, CGDisplayBounds, CGGetActiveDisplayList,
 };
 use gpui::{Bounds, DisplayId, Pixels, PlatformDisplay, point, px, refresh_interval_from_hz, size};
-use objc2::{MainThreadMarker, msg_send, rc::Retained, runtime::NSObjectProtocol, sel};
+use objc2::{msg_send, rc::Retained, runtime::NSObjectProtocol, sel};
 use objc2_app_kit::NSScreen;
 use objc2_foundation::NSString;
 use std::time::Duration;
@@ -32,7 +32,7 @@ impl MacDisplay {
         // The following is what Chromium does too:
         //
         // https://chromium.googlesource.com/chromium/src/+/66.0.3359.158/ui/display/mac/screen_mac.mm#56
-        let marker = MainThreadMarker::new().expect("NSScreen access requires the main thread");
+        let marker = crate::main_thread_marker().expect("NSScreen access requires the main thread");
         let screen = NSScreen::mainScreen(marker).expect("macOS reported no primary NSScreen");
         Self(screen_id(&screen).expect("NSScreen device description is missing NSScreenNumber"))
     }
@@ -165,7 +165,7 @@ impl PlatformDisplay for MacDisplay {
 impl MacDisplay {
     /// Find the NSScreen corresponding to this display
     fn get_nsscreen(&self) -> Option<Retained<NSScreen>> {
-        let marker = MainThreadMarker::new()?;
+        let marker = crate::main_thread_marker()?;
         NSScreen::screens(marker)
             .into_iter()
             .find(|screen| screen_id(screen) == Some(self.0))

@@ -16,7 +16,7 @@ use gpui::{
 use media::core_media::{CMSampleBuffer, CMSampleBufferRef};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::{AnyThread, DefinedClass, MainThreadMarker, define_class, msg_send};
+use objc2::{AnyThread, DefinedClass, define_class, msg_send};
 use objc2_app_kit::NSScreen;
 use objc2_core_media::CMSampleBuffer as ObjcCMSampleBuffer;
 use objc2_foundation::{NSArray, NSError, NSObject, NSObjectProtocol};
@@ -184,7 +184,7 @@ struct ScreenMeta {
 }
 
 fn screen_id_to_human_label() -> HashMap<CGDirectDisplayID, ScreenMeta> {
-    let Some(mtm) = MainThreadMarker::new() else {
+    let Some(mtm) = crate::main_thread_marker() else {
         return HashMap::default();
     };
 

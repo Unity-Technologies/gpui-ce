@@ -194,7 +194,7 @@ define_class!(
 impl GPUIApplicationDelegate {
     fn new() -> Retained<Self> {
         let this =
-            Self::alloc(MainThreadMarker::new().unwrap()).set_ivars(PlatformIvars::default());
+            Self::alloc(crate::main_thread_marker().unwrap()).set_ivars(PlatformIvars::default());
         unsafe { msg_send![super(this), init] }
     }
 }
@@ -238,7 +238,7 @@ pub(crate) struct MacPlatformState {
 
 impl MacPlatform {
     pub fn new(headless: bool) -> Self {
-        let marker = MainThreadMarker::new().expect("Mac platform not created on main thread");
+        let marker = crate::main_thread_marker().expect("Mac platform not created on main thread");
         let dispatcher = Arc::new(MacDispatcher::new());
 
         let text_system = Arc::new(crate::MacTextSystem::new());
@@ -585,7 +585,7 @@ impl Platform for MacPlatform {
         }
 
         extern "C" fn quit(_: *mut c_void) {
-            NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).terminate(None);
+            NSApplication::sharedApplication(crate::main_thread_marker().unwrap()).terminate(None);
         }
     }
 
@@ -639,7 +639,7 @@ impl Platform for MacPlatform {
 
     fn activate(&self, ignoring_other_apps: bool) {
         unsafe {
-            let app = NSApplication::sharedApplication(MainThreadMarker::new().unwrap());
+            let app = NSApplication::sharedApplication(crate::main_thread_marker().unwrap());
             if ignoring_other_apps {
                 let _: () = msg_send![&*app, activateIgnoringOtherApps: true];
             } else {
@@ -649,16 +649,16 @@ impl Platform for MacPlatform {
     }
 
     fn hide(&self) {
-        NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).hide(None);
+        NSApplication::sharedApplication(crate::main_thread_marker().unwrap()).hide(None);
     }
 
     fn hide_other_apps(&self) {
-        NSApplication::sharedApplication(MainThreadMarker::new().unwrap())
+        NSApplication::sharedApplication(crate::main_thread_marker().unwrap())
             .hideOtherApplications(None);
     }
 
     fn unhide_other_apps(&self) {
-        NSApplication::sharedApplication(MainThreadMarker::new().unwrap())
+        NSApplication::sharedApplication(crate::main_thread_marker().unwrap())
             .unhideAllApplications(None);
     }
 
