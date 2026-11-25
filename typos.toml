@@ -13,6 +13,9 @@ extend-exclude = [
   # macOS APIs
   "crates/gpui/src/platform/mac/dispatcher.rs",
 
+  # Zed sync ledger: abbreviated commit SHAs read as words (abd9b3cbd2).
+  "ZED-SYNC-LEDGER.md",
+
 ]
 
 [default]
