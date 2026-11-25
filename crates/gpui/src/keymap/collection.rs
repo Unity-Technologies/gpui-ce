@@ -134,7 +134,7 @@ mod tests {
                 target: crate::PlatformTarget::Native,
             });
             let bindings = cx.update(|cx| collection.as_keybindings(None, cx));
-            bindings[0].keystrokes()[0].modifiers().clone()
+            *bindings[0].keystrokes()[0].modifiers()
         };
 
         let mac = modifiers_on(cx, crate::OperatingSystem::Mac);
