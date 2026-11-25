@@ -4,14 +4,14 @@
 
 use std::sync::Arc;
 
-use foreign_types::ForeignType as _;
 use gpui::{DevicePixels, GpuSpecs, Scene, Size};
-use gpui_apple::metal_renderer::new_window_layer;
+use gpui_apple::metal_renderer::{MetalDrawable, new_window_layer};
 use gpui_wgpu::{
     GpuContext, WgpuAtlas, WgpuContextHandle, WgpuDeviceRequirements, WgpuRenderer,
     WgpuSurfaceConfig, wgpu,
 };
-use metal::{CAMetalLayer, MetalLayer, MetalLayerRef};
+use objc2::rc::Retained;
+use objc2_quartz_core::CAMetalLayer;
 
 /// The device every window shares, and what the application requires of it.
 #[derive(Clone, Default)]
@@ -40,7 +40,7 @@ pub fn new_renderer(
 
 pub struct MacWgpuRenderer {
     renderer: WgpuRenderer,
-    layer: MetalLayer,
+    layer: Retained<CAMetalLayer>,
 }
 
 impl MacWgpuRenderer {
@@ -71,22 +71,19 @@ impl MacWgpuRenderer {
     }
 
     pub fn presents_with_transaction(&self) -> bool {
-        self.layer.presents_with_transaction()
+        self.layer.presentsWithTransaction()
     }
 
-    pub fn set_frame_drawable(
-        &mut self,
-        drawable: Option<metal::MetalDrawable>,
-    ) -> Option<metal::MetalDrawable> {
+    pub fn set_frame_drawable(&mut self, drawable: Option<MetalDrawable>) -> Option<MetalDrawable> {
         drawable
     }
 
-    pub fn layer(&self) -> Option<&MetalLayerRef> {
+    pub fn layer(&self) -> Option<&CAMetalLayer> {
         Some(&self.layer)
     }
 
     pub fn layer_ptr(&self) -> *mut CAMetalLayer {
-        self.layer.as_ptr()
+        Retained::as_ptr(&self.layer).cast_mut()
     }
 
     pub fn sprite_atlas(&self) -> &Arc<WgpuAtlas> {
@@ -95,7 +92,7 @@ impl MacWgpuRenderer {
 
     pub fn set_presents_with_transaction(&mut self, presents_with_transaction: bool) {
         self.layer
-            .set_presents_with_transaction(presents_with_transaction);
+            .setPresentsWithTransaction(presents_with_transaction);
     }
 
     pub fn update_drawable_size(&mut self, size: Size<DevicePixels>) {
@@ -164,16 +161,16 @@ mod tests {
     fn transparency_survives_resizing() {
         let mut renderer =
             MacWgpuRenderer::new(Context::default(), gpui::size(64.0, 64.0), false).unwrap();
-        assert!(renderer.layer.is_opaque());
+        assert!(renderer.layer.isOpaque());
 
         renderer.update_transparency(true);
-        assert!(!renderer.layer.is_opaque());
+        assert!(!renderer.layer.isOpaque());
         renderer.update_drawable_size(gpui::size(DevicePixels(128), DevicePixels(96)));
-        assert!(!renderer.layer.is_opaque());
+        assert!(!renderer.layer.isOpaque());
 
         renderer.update_transparency(false);
         renderer.update_drawable_size(gpui::size(DevicePixels(64), DevicePixels(64)));
-        assert!(renderer.layer.is_opaque());
+        assert!(renderer.layer.isOpaque());
     }
 
     #[cfg(feature = "test-support")]

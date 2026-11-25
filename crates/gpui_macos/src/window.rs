@@ -24,7 +24,6 @@ use core_foundation_sys::base::CFEqual;
 use core_foundation_sys::number::{CFBooleanGetValue, CFBooleanRef};
 use core_graphics::display::CGDirectDisplayID;
 use ctor::ctor;
-use foreign_types::ForeignTypeRef;
 use futures::channel::oneshot;
 use gpui_apple::display_link::MetalFrameSource;
 use gpui_util::ResultExt;
@@ -2581,10 +2580,10 @@ impl PlatformWindow for MacWindow {
         let screen: ObjcId = unsafe { msg_send![state.native_window, screen] };
         let frame = window.frame();
         let layer = state.renderer.layer().map(|layer| {
-            let drawable_size = layer.drawable_size();
+            let drawable_size = layer.drawableSize();
             serde_json::json!({
                 "drawable_size": [drawable_size.width, drawable_size.height],
-                "contents_scale": layer.contents_scale(),
+                "contents_scale": layer.contentsScale(),
             })
         });
         serde_json::json!({
@@ -3712,7 +3711,7 @@ fn update_window_scale_factor(window_state: &Arc<Mutex<MacWindowState>>) {
     if let Some(layer) = lock.renderer.layer() {
         unsafe {
             let _: () = msg_send![
-                layer.as_ptr() as ObjcId,
+                layer,
                 setContentsScale: scale_factor as f64
             ];
         }
@@ -3981,7 +3980,10 @@ extern "C" fn step(view: *mut c_void) {
     }
 }
 
-fn metal_frame(window_state: &Arc<Mutex<MacWindowState>>, drawable: metal::MetalDrawable) {
+fn metal_frame(
+    window_state: &Arc<Mutex<MacWindowState>>,
+    drawable: gpui_apple::display_link::MetalDrawable,
+) {
     let mut lock = window_state.lock();
     let FrameSource::Metal(metal_frames) = &lock.frame_source else {
         return;

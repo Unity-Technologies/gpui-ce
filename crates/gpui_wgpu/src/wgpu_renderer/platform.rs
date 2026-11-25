@@ -50,7 +50,7 @@ impl WgpuRenderer {
     #[cfg(target_os = "macos")]
     pub fn new_for_metal_layer(
         gpu_context: GpuContext,
-        layer: &metal::MetalLayerRef,
+        layer: &objc2_quartz_core::CAMetalLayer,
         config: WgpuSurfaceConfig,
         extra_requirements: Option<WgpuDeviceRequirements>,
     ) -> anyhow::Result<Self> {
@@ -368,7 +368,10 @@ impl WgpuRenderer {
 
     /// Recovers a renderer made by [`Self::new_for_metal_layer`].
     #[cfg(target_os = "macos")]
-    pub fn recover_metal_layer(&mut self, layer: &metal::MetalLayerRef) -> anyhow::Result<()> {
+    pub fn recover_metal_layer(
+        &mut self,
+        layer: &objc2_quartz_core::CAMetalLayer,
+    ) -> anyhow::Result<()> {
         self.recover_target(&|| None, NativeSurfaceTarget::metal_layer(layer))
     }
 
@@ -484,9 +487,12 @@ enum NativeSurfaceTarget {
 
 #[cfg(target_os = "macos")]
 impl NativeSurfaceTarget {
-    fn metal_layer(layer: &metal::MetalLayerRef) -> Self {
-        use metal::foreign_types::ForeignTypeRef as _;
-        Self::MetalLayer(layer.as_ptr().cast())
+    fn metal_layer(layer: &objc2_quartz_core::CAMetalLayer) -> Self {
+        Self::MetalLayer(
+            (layer as *const objc2_quartz_core::CAMetalLayer)
+                .cast_mut()
+                .cast(),
+        )
     }
 }
 
@@ -573,7 +579,7 @@ mod tests {
 
     fn renderer(
         context: &GpuContext,
-        layer: &metal::MetalLayerRef,
+        layer: &objc2_quartz_core::CAMetalLayer,
     ) -> anyhow::Result<WgpuRenderer> {
         WgpuRenderer::new_for_metal_layer(
             Rc::clone(context),
@@ -618,7 +624,10 @@ mod tests {
     #[test]
     fn metal_layer_renderers_recover_onto_one_new_device() -> anyhow::Result<()> {
         let context = GpuContext::default();
-        let (first_layer, second_layer) = (metal::MetalLayer::new(), metal::MetalLayer::new());
+        let (first_layer, second_layer) = (
+            objc2_quartz_core::CAMetalLayer::new(),
+            objc2_quartz_core::CAMetalLayer::new(),
+        );
         let mut first = renderer(&context, &first_layer)?;
         let mut second = renderer(&context, &second_layer)?;
         let (lost_device, _) = first.gpu_context();

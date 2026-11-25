@@ -748,12 +748,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "block"
-version = "0.1.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d8c1fef690941d3e7788d328517591fecc684c084084702d6ff1641e993699a"
-
-[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1265,19 +1259,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "core-graphics2"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b65858d95344d2711161cd92196732f67d6c5fea238cf12f994584828731a5c"
-dependencies = [
- "bitflags",
- "block",
- "cfg-if",
- "core-foundation",
- "libc",
-]
-
-[[package]]
 name = "core-text"
 version = "21.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1287,21 +1268,6 @@ dependencies = [
  "core-graphics",
  "foreign-types",
  "libc",
-]
-
-[[package]]
-name = "core-video"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0f83d7bc2e8fbc517a71dcf3227003db7646e6c7aa5b0b5ab3acc89bc692641"
-dependencies = [
- "block",
- "core-foundation",
- "core-graphics2",
- "libc",
- "metal",
- "objc2-core-foundation",
- "objc2-io-surface",
 ]
 
 [[package]]
@@ -2458,7 +2424,6 @@ dependencies = [
  "bitflags",
  "chrono",
  "core-text",
- "core-video",
  "criterion",
  "ctor",
  "derive_more",
@@ -2467,7 +2432,6 @@ dependencies = [
  "embed-resource",
  "env_logger",
  "etagere",
- "foreign-types",
  "futures",
  "futures-concurrency",
  "getrandom 0.4.3",
@@ -2493,6 +2457,8 @@ dependencies = [
  "lyon",
  "num_cpus",
  "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-core-video",
  "objc2-metal 0.3.2",
  "palette",
  "parking",
@@ -2547,20 +2513,18 @@ version = "0.4.0-unity.20261112"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
- "core-foundation",
- "core-graphics",
- "core-video",
- "derive_more",
  "etagere",
- "foreign-types",
  "gpui-ce",
  "gpui_ce_collections",
  "gpui_ce_render",
  "image",
  "log",
- "metal",
  "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-core-video",
  "objc2-foundation 0.3.2",
+ "objc2-metal 0.3.2",
  "objc2-quartz-core 0.3.2",
  "parking_lot 0.13.0",
  "smallvec",
@@ -2660,17 +2624,14 @@ dependencies = [
  "core-foundation-sys",
  "core-graphics",
  "core-text",
- "core-video",
  "ctor",
  "dispatch2",
  "etagere",
- "foreign-types",
  "futures",
  "gpui-ce",
  "gpui-ce-fonts",
  "gpui_ce_apple",
  "gpui_ce_collections",
- "gpui_ce_media",
  "gpui_ce_parley",
  "gpui_ce_render",
  "gpui_ce_scheduler",
@@ -2681,10 +2642,10 @@ dependencies = [
  "libc",
  "log",
  "mach2",
- "metal",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-core-media",
+ "objc2-core-video",
  "objc2-foundation 0.3.2",
  "objc2-quartz-core 0.3.2",
  "objc2-screen-capture-kit",
@@ -2721,10 +2682,9 @@ dependencies = [
  "anyhow",
  "bindgen",
  "core-foundation",
- "core-video",
- "foreign-types",
- "metal",
  "objc",
+ "objc2-core-foundation",
+ "objc2-core-video",
 ]
 
 [[package]]
@@ -2886,8 +2846,6 @@ version = "0.4.0-unity.20261112"
 dependencies = [
  "anyhow",
  "bytemuck",
- "core-foundation",
- "core-video",
  "criterion",
  "env_logger",
  "etagere",
@@ -2899,10 +2857,13 @@ dependencies = [
  "image",
  "js-sys",
  "log",
- "metal",
  "naga 30.0.2",
  "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-core-video",
+ "objc2-io-surface",
  "objc2-metal 0.3.2",
+ "objc2-quartz-core 0.3.2",
  "parking_lot 0.13.0",
  "pollster 1.0.3",
  "profiling",
@@ -3888,21 +3849,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "metal"
-version = "0.33.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7047791b5bc903b8cd963014b355f71dc9864a9a0b727057676c1dcae5cbc15"
-dependencies = [
- "bitflags",
- "block",
- "core-graphics-types",
- "foreign-types",
- "log",
- "objc",
- "paste",
-]
-
-[[package]]
 name = "mime"
 version = "0.3.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4436,6 +4382,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-io-surface",
+ "objc2-metal 0.3.2",
 ]
 
 [[package]]

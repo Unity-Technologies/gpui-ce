@@ -41,12 +41,10 @@ core-foundation.workspace = true
 core-foundation-sys.workspace = true
 core-graphics.workspace = true
 core-text.workspace = true
-core-video.workspace = true
 ctor.workspace = true
 dispatch2.workspace = true
 etagere.workspace = true
 font-kit.workspace = true
-foreign-types.workspace = true
 futures.workspace = true
 gpui_apple.workspace = true
 gpui_parley = { workspace = true, features = ["system-fonts"] }
@@ -58,12 +56,12 @@ itertools.workspace = true
 libc.workspace = true
 log.workspace = true
 mach2.workspace = true
-media.workspace = true
-metal.workspace = true
 objc2.workspace = true
 objc2-app-kit.workspace = true
 objc2-foundation.workspace = true
-objc2-core-media.workspace = true
+objc2-core-media = { workspace = true, features = ["objc2-core-video"] }
+objc2-core-video = { workspace = true, features = ["CVHostTime"] }
+objc2-quartz-core = { workspace = true, features = ["objc2-core-foundation", "objc2-metal"] }
 objc2-screen-capture-kit.workspace = true
 objc2-uniform-type-identifiers.workspace = true
 objc2-user-notifications.workspace = true
