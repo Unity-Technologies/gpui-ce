@@ -226,7 +226,11 @@ impl A11y {
     /// for more commentary.
     pub(crate) fn sync_active_flag(&mut self) {
         self.active_this_frame =
-            !self.force_disabled && (self.forced || self.active_flag.load(Ordering::SeqCst));
+            self.is_enabled() && (self.forced || self.active_flag.load(Ordering::SeqCst));
+    }
+
+    pub(crate) fn is_enabled(&self) -> bool {
+        !self.force_disabled
     }
 
     /// Build the tree every frame regardless of whether assistive technology
@@ -773,6 +777,20 @@ mod tests {
         let mut a11y = A11y::new(Arc::new(AtomicBool::new(true)), true, true, None);
         a11y.sync_active_flag();
         assert!(!a11y.is_active());
+    }
+
+    #[test]
+    fn accessibility_enabled_is_independent_of_activation() {
+        for force_disabled in [false, true] {
+            for active in [false, true] {
+                let mut a11y =
+                    A11y::new(Arc::new(AtomicBool::new(active)), force_disabled, false, None);
+                a11y.sync_active_flag();
+
+                assert_eq!(a11y.is_enabled(), !force_disabled);
+                assert_eq!(a11y.is_active(), !force_disabled && active);
+            }
+        }
     }
 
     #[test]
