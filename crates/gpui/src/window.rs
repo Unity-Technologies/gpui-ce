@@ -1873,7 +1873,6 @@ impl Window {
         let scene_animation_interval = Rc::new(Cell::new(None::<Duration>));
         let next_frame_callbacks: Rc<RefCell<Vec<FrameCallback>>> = Default::default();
         let input_rate_tracker = Rc::new(RefCell::new(InputRateTracker::default()));
-        let last_frame_time = Rc::new(Cell::new(None));
 
         platform_window
             .request_decorations(window_decorations.unwrap_or(WindowDecorations::Server));
@@ -2043,6 +2042,7 @@ impl Window {
             let next_frame_callbacks = next_frame_callbacks.clone();
             let input_rate_tracker = input_rate_tracker.clone();
             let mut deferred_force_render = false;
+            let mut frame_pacer = FramePacer::default();
             move |request_frame_options| {
                 #[cfg(feature = "profiler")]
                 let (_foreground_turn, window_id) = {
@@ -2088,22 +2088,24 @@ impl Window {
                     .update(&mut cx, |_, _, cx| (cx.thermal_state(), cx.power_mode()))
                     .log_err();
 
-                // Throttle frame rate; see `minimum_frame_interval`.
-                let wants_frame = !(request_frame_options.require_presentation
-                    || (!request_frame_options.force_render
-                        && next_frame_callbacks.borrow().is_empty()));
-                // A scene animation is the only demand: present at its own cap,
-                // still subject to the inactive, thermal and low power limits.
-                let animation_only = scene_animation_interval.get().is_some()
-                    && !wants_frame
-                    && !request_frame_options.require_presentation
-                    && !invalidator.is_dirty()
-                    && !needs_present.get()
-                    && !input_rate_tracker.borrow_mut().is_high_rate();
-                let should_throttle = wants_frame || animation_only;
-                let inactive_without_high_rate_input = should_throttle
-                    && !active.get()
-                    && !input_rate_tracker.borrow_mut().is_high_rate();
+                // Keep presenting briefly after high-rate input to prevent display
+                // underclocking, but subject to the same power limits as redraws.
+                let high_rate_input = input_rate_tracker.borrow_mut().is_high_rate();
+                let has_next_frame_callbacks = !next_frame_callbacks.borrow().is_empty();
+                let has_demand_besides_animation = invalidator.is_dirty()
+                    || force_render
+                    || has_next_frame_callbacks
+                    || request_frame_options.require_presentation
+                    || needs_present.get()
+                    || high_rate_input;
+                let has_frame_demand =
+                    has_demand_besides_animation || scene_animation_interval.get().is_some();
+
+                // Throttle frame rate; see `minimum_frame_interval`. Mandatory
+                // platform presentations bypass every limit.
+                let should_throttle = !request_frame_options.require_presentation;
+                let inactive_without_high_rate_input =
+                    should_throttle && !active.get() && !high_rate_input;
                 let (thermal_state, power_mode) =
                     power_state.unwrap_or((ThermalState::Nominal, crate::PowerMode::Unknown));
                 let min_frame_interval = minimum_frame_interval(
@@ -2113,9 +2115,11 @@ impl Window {
                     thermal_state,
                     power_mode,
                 );
+                // A scene animation that is the only demand presents at its own
+                // cap, still subject to the inactive, thermal and low power limits.
                 let animation_frame_interval = scene_animation_interval
                     .get()
-                    .filter(|interval| animation_only && !interval.is_zero());
+                    .filter(|interval| !has_demand_besides_animation && !interval.is_zero());
                 let min_frame_interval = min_frame_interval.max(animation_frame_interval);
                 // Animation limits only apply without other demand, so no input
                 // or invalidation waits on them.
@@ -2124,45 +2128,40 @@ impl Window {
                     && animation_frame_interval == min_frame_interval;
 
                 let now = Instant::now();
-                if let Some(min_interval) = min_frame_interval {
-                    if let Some(last_frame) = last_frame_time.get()
-                        && frame_arrived_too_soon(now.duration_since(last_frame), min_interval)
-                    {
-                        // Don't lose a pending forced render to throttling.
-                        deferred_force_render |= force_render;
-                        // Deferred by throttling: ask demand-driven platforms to retry.
-                        handle
-                            .update(&mut cx, |_, window, _| {
-                                #[cfg(feature = "profiler")]
-                                if !animation_limited {
-                                    window.window_profiler.record_frame_throttled();
-                                }
-                                window.platform_window.schedule_frame();
-                            })
-                            .log_err();
-                        // The demand that entered this branch (a deferred forced
-                        // render or pending next-frame callbacks) is still
-                        // unserved; platforms that stop requesting frames for
-                        // idle windows need a wakeup to deliver the retry.
-                        invalidator.wake_platform();
-                        #[cfg(feature = "profiler")]
-                        profiler::journal::record_frame_skipped(
-                            window_id,
-                            Instant::now(),
-                            if animation_limited {
-                                profiler::journal::FrameSkipReason::AnimationFrameRateLimit
-                            } else if inactive_without_high_rate_input {
-                                profiler::journal::FrameSkipReason::InactiveFrameRateLimit
-                            } else if power_mode == crate::PowerMode::LowPower {
-                                profiler::journal::FrameSkipReason::LowPowerFrameRateLimit
-                            } else {
-                                profiler::journal::FrameSkipReason::ThermalFrameRateLimit
-                            },
-                        );
-                        return;
-                    }
+                // Idle display-link ticks must neither consume a frame slot nor
+                // wake a demand-driven frame source.
+                if has_frame_demand && frame_pacer.should_defer(now, min_frame_interval) {
+                    // Don't lose a pending forced render to throttling.
+                    deferred_force_render |= force_render;
+                    // Deferred by throttling: ask demand-driven platforms to retry.
+                    handle
+                        .update(&mut cx, |_, window, _| {
+                            #[cfg(feature = "profiler")]
+                            if !animation_limited {
+                                window.window_profiler.record_frame_throttled();
+                            }
+                            window.platform_window.schedule_frame();
+                        })
+                        .log_err();
+                    // The demand is still unserved; platforms that stop
+                    // requesting frames for idle windows need a wakeup to retry.
+                    invalidator.wake_platform();
+                    #[cfg(feature = "profiler")]
+                    profiler::journal::record_frame_skipped(
+                        window_id,
+                        Instant::now(),
+                        if animation_limited {
+                            profiler::journal::FrameSkipReason::AnimationFrameRateLimit
+                        } else if inactive_without_high_rate_input {
+                            profiler::journal::FrameSkipReason::InactiveFrameRateLimit
+                        } else if power_mode == crate::PowerMode::LowPower {
+                            profiler::journal::FrameSkipReason::LowPowerFrameRateLimit
+                        } else {
+                            profiler::journal::FrameSkipReason::ThermalFrameRateLimit
+                        },
+                    );
+                    return;
                 }
-                last_frame_time.set(Some(now));
 
                 let pending_next_frame_callbacks = next_frame_callbacks.take();
                 if !pending_next_frame_callbacks.is_empty() {
@@ -2175,15 +2174,11 @@ impl Window {
                         .log_err();
                 }
 
-                // Keep presenting if input was recently arriving at a high rate (>= 60fps).
-                // Once high-rate input is detected, we sustain presentation for 1 second
-                // to prevent display underclocking during active input.
+                let should_draw = invalidator.is_dirty() || force_render;
                 let needs_present = request_frame_options.require_presentation
                     || needs_present.get()
                     || scene_animation_interval.get().is_some()
-                    || input_rate_tracker.borrow_mut().is_high_rate();
-
-                let should_draw = invalidator.is_dirty() || force_render;
+                    || high_rate_input;
                 if should_draw {
                     measure("frame duration", || {
                         handle
@@ -9206,8 +9201,34 @@ const CONSTRAINED_FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 /// Frame interval in Low Power Mode (~30fps).
 const LOW_POWER_FRAME_INTERVAL: Duration = Duration::from_micros(33_333);
 
-fn frame_arrived_too_soon(elapsed: Duration, min_interval: Duration) -> bool {
-    elapsed + FRAME_INTERVAL_TOLERANCE < min_interval
+/// Keeps throttled frames on a stable cadence despite callback delivery jitter.
+#[derive(Default)]
+struct FramePacer {
+    last_frame: Option<Instant>,
+}
+
+impl FramePacer {
+    fn should_defer(&mut self, now: Instant, minimum_interval: Option<Duration>) -> bool {
+        if let Some(interval) = minimum_interval
+            && let Some(last_frame) = self.last_frame
+        {
+            let deadline = last_frame + interval;
+            if now + FRAME_INTERVAL_TOLERANCE < deadline {
+                return true;
+            }
+            // Correct small dispatch delays without shifting subsequent deadlines,
+            // but bound the correction to a quarter interval. Larger delays restart
+            // the cadence so recovery cannot produce closely spaced catch-up frames.
+            self.last_frame = Some(if now.saturating_duration_since(deadline) <= interval / 4 {
+                deadline
+            } else {
+                now
+            });
+        } else {
+            self.last_frame = Some(now);
+        }
+        false
+    }
 }
 
 /// The minimum interval between presented frames, or `None` for no cap.
@@ -9250,35 +9271,39 @@ mod frame_limiter_tests {
     use super::*;
 
     #[test]
-    fn frame_limiter_tolerates_one_millisecond_of_early_arrival() {
-        let min = Duration::from_micros(33_333);
-        assert!(!frame_arrived_too_soon(Duration::from_micros(32_400), min));
-        assert!(!frame_arrived_too_soon(min, min));
-        assert!(frame_arrived_too_soon(Duration::from_micros(32_000), min));
+    fn frame_throttle_tracks_display_refreshes() {
+        let start = Instant::now();
+        for (elapsed, interval) in [
+            (Duration::from_micros(16_666), CONSTRAINED_FRAME_INTERVAL),
+            (Duration::from_micros(33_332), LOW_POWER_FRAME_INTERVAL),
+        ] {
+            let mut pacer = FramePacer::default();
+            assert!(!pacer.should_defer(start, Some(interval)));
+            assert!(pacer.should_defer(start + elapsed / 2, Some(interval)));
+            assert!(!pacer.should_defer(start + elapsed, Some(interval)));
+        }
     }
 
     #[test]
-    fn frame_throttle_accepts_display_link_rounding() {
-        assert!(!frame_arrived_too_soon(
-            Duration::from_micros(16_666),
-            CONSTRAINED_FRAME_INTERVAL,
-        ));
-        assert!(!frame_arrived_too_soon(
-            Duration::from_micros(33_332),
-            LOW_POWER_FRAME_INTERVAL,
-        ));
-    }
+    fn frame_throttle_preserves_cadence_without_catching_up_after_stalls() {
+        let start = Instant::now();
+        let interval = LOW_POWER_FRAME_INTERVAL;
+        let mut pacer = FramePacer::default();
+        assert!(!pacer.should_defer(start, Some(interval)));
+        let delayed_frame = start + interval + Duration::from_millis(5);
+        assert!(!pacer.should_defer(delayed_frame, Some(interval)));
+        assert!(pacer.should_defer(start + interval + interval / 2, Some(interval)));
+        assert!(!pacer.should_defer(start + interval * 2, Some(interval)));
 
-    #[test]
-    fn frame_throttle_rejects_an_extra_display_refresh() {
-        assert!(frame_arrived_too_soon(
-            Duration::from_micros(8_333),
-            CONSTRAINED_FRAME_INTERVAL,
-        ));
-        assert!(frame_arrived_too_soon(
-            Duration::from_micros(16_666),
-            LOW_POWER_FRAME_INTERVAL,
-        ));
+        // Even a stall just short of another full interval must not cause a burst.
+        let after_stall = start + interval * 4 - Duration::from_millis(1);
+        assert!(!pacer.should_defer(after_stall, Some(interval)));
+        assert!(pacer.should_defer(after_stall + interval / 2, Some(interval)));
+        assert!(!pacer.should_defer(after_stall + interval, Some(interval)));
+        // Mandatory presentation bypasses the limit and establishes a fresh cadence.
+        let mandatory_frame = after_stall + interval + Duration::from_millis(2);
+        assert!(!pacer.should_defer(mandatory_frame, None));
+        assert!(pacer.should_defer(mandatory_frame + interval / 2, Some(interval)));
     }
 
     #[test]
@@ -9888,7 +9913,7 @@ mod tests {
         cx.app.borrow_mut().mode = crate::app::GpuiMode::Production;
         let (journal, _guard) = journal::install_test_foreground_journal(256, 4);
         let mut collector = journal.collector();
-        for initially_dirty in [true, false] {
+        for (initially_dirty, schedule_callback) in [(true, false), (false, true)] {
             // Keep the throttle closed without depending on short wall-clock deadlines.
             let window = cx
                 .app
@@ -9914,13 +9939,15 @@ mod tests {
                     if initially_dirty {
                         window.refresh();
                     }
-                    window.on_next_frame({
-                        let callback_ran = callback_ran.clone();
-                        move |window, _| {
-                            callback_ran.set(true);
-                            window.refresh();
-                        }
-                    });
+                    if schedule_callback {
+                        window.on_next_frame({
+                            let callback_ran = callback_ran.clone();
+                            move |window, _| {
+                                callback_ran.set(true);
+                                window.refresh();
+                            }
+                        });
+                    }
                     draws_before
                 })
                 .expect("schedule throttled frame");
@@ -9933,6 +9960,7 @@ mod tests {
                 caused_invalidation: false,
             });
             collector.collect_unseen();
+            let wakes_before = platform_window.frame_wake_count();
             platform_window.simulate_frame_request(RequestFrameOptions {
                 signal_at: Some(Instant::now()),
                 ..Default::default()
@@ -9949,6 +9977,8 @@ mod tests {
                 })
                 .expect("inspect deferred frame");
             assert!(!callback_ran.get());
+            assert!(platform_window.frame_scheduled());
+            assert!(platform_window.frame_wake_count() > wakes_before);
             assert!(collector.collect_unseen().entries.iter().any(|entry| {
                 matches!(
                     entry,
@@ -9973,7 +10003,7 @@ mod tests {
                     );
                 })
                 .expect("inspect presented frame");
-            assert!(callback_ran.get());
+            assert_eq!(callback_ran.get(), schedule_callback);
         }
     }
 
@@ -10649,6 +10679,8 @@ mod tests {
     fn test_frame_waker_fires_on_frame_demand(cx: &mut TestAppContext) {
         let window = cx.add_window(|_, _| EmptyView);
         let test_window = cx.test_window(window.into());
+        // This test exercises idle wakeups, not the inactive-window frame limit.
+        test_window.simulate_active_status_change(true);
 
         // Windows start dirty, and that can predate waker installation;
         // installing the waker must deliver the pending wake or the first
@@ -10741,6 +10773,57 @@ mod tests {
         cx.simulate_power_mode(crate::PowerMode::Balanced);
         test_window.simulate_frame_request(RequestFrameOptions::default());
         assert_eq!(frames.get(), 2, "leaving Low Power Mode lifts the cap");
+    }
+
+    /// Frame limits apply to plain redraws too, not only to next-frame
+    /// callbacks, so the cadence does not depend on where demand came from.
+    #[gpui::test]
+    fn test_low_power_mode_limits_plain_redraws(cx: &mut TestAppContext) {
+        struct CountingView(Rc<Cell<usize>>);
+        impl Render for CountingView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.0.set(self.0.get() + 1);
+                div()
+            }
+        }
+
+        // Test mode draws dirty windows on every flush; only frame requests
+        // may draw here.
+        cx.app.borrow_mut().mode = crate::app::GpuiMode::Production;
+        let renders = Rc::new(Cell::new(0));
+        let window = cx.add_window({
+            let renders = renders.clone();
+            move |_, _| CountingView(renders)
+        });
+        let test_window = cx.test_window(window.into());
+        test_window.simulate_active_status_change(true);
+        let redraw = |cx: &mut TestAppContext| {
+            window.update(cx, |_, window, _| window.refresh()).unwrap();
+            test_window.simulate_frame_request(RequestFrameOptions::default());
+            renders.get()
+        };
+
+        let before = renders.get();
+        let drawn = redraw(cx);
+        assert!(drawn > before, "an unlimited window redraws immediately");
+
+        cx.simulate_power_mode(crate::PowerMode::LowPower);
+        assert_eq!(
+            redraw(cx),
+            drawn,
+            "a redraw right after the last frame waits for the Low Power Mode interval"
+        );
+        assert!(
+            test_window.frame_scheduled(),
+            "the deferred redraw is retried"
+        );
+
+        cx.simulate_power_mode(crate::PowerMode::Balanced);
+        test_window.simulate_frame_request(RequestFrameOptions::default());
+        assert!(
+            renders.get() > drawn,
+            "the deferred redraw lands once the cap lifts"
+        );
     }
 
     /// A frame request that arrives while next-frame callbacks are pending
