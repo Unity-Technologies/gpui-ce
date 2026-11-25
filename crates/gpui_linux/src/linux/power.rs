@@ -35,15 +35,15 @@ pub(super) async fn monitor_power_mode(
     let mut changes = Vec::new();
     for (service, path) in POWER_PROFILES_SERVICES {
         let proxy = Builder::<Proxy<'_>>::new(connection)
-            .destination(service)?
-            .path(path)?
-            .interface(service)?
+            .destination(service)
+            .path(path)
+            .interface(service)
             .cache_properties(CacheProperties::No)
             .build()
             .await?;
         let properties = PropertiesProxy::builder(connection)
-            .destination(service)?
-            .path(path)?
+            .destination(service)
+            .path(path)
             .build()
             .await?;
         changes.push(
@@ -184,18 +184,18 @@ mod tests {
         let (_bus, address) = TestBus::start()?;
         let modern_profile = Arc::new(parking_lot::Mutex::new("balanced".to_owned()));
         let legacy_profile = Arc::new(parking_lot::Mutex::new("balanced".to_owned()));
-        let server = ashpd::zbus::connection::Builder::address(address.as_str())?
+        let server = ashpd::zbus::connection::Builder::address(address.as_str())
             .serve_at(
                 POWER_PROFILES_SERVICES[0].1,
                 ModernProfiles(modern_profile.clone()),
-            )?
+            )
             .serve_at(
                 POWER_PROFILES_SERVICES[1].1,
                 LegacyProfiles(legacy_profile.clone()),
-            )?
+            )
             .build()
             .await?;
-        let connection = ashpd::zbus::connection::Builder::address(address.as_str())?
+        let connection = ashpd::zbus::connection::Builder::address(address.as_str())
             .build()
             .await?;
         let (sender, mut receiver) = mpsc::unbounded();
@@ -232,10 +232,7 @@ mod tests {
                         "PropertiesChanged",
                         &(
                             service,
-                            HashMap::from([(
-                                "ActiveProfile",
-                                ashpd::zbus::zvariant::Value::from(profile),
-                            )]),
+                            HashMap::from([("ActiveProfile", ashpd::zbus::Variant::from(profile))]),
                             Vec::<&str>::new(),
                         ),
                     )
