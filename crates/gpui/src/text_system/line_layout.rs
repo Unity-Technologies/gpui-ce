@@ -974,6 +974,11 @@ impl<Key, Value> FrameLayouts<Key, Value>
 where
     Key: Eq + Hash,
 {
+    #[cfg(test)]
+    fn keys(&self) -> impl Iterator<Item = &Arc<Key>> {
+        self.entries.keys()
+    }
+
     fn get<Query>(&self, key: &Query) -> Option<&Arc<Value>>
     where
         Arc<Key>: Borrow<Query>,
@@ -1191,6 +1196,17 @@ impl LineLayoutCache {
 
             layout
         }
+    }
+
+    /// The text of every line layout cached for the current frame.
+    #[cfg(test)]
+    pub(crate) fn current_frame_line_texts(&self) -> Vec<SharedString> {
+        self.current_frame
+            .read()
+            .lines
+            .keys()
+            .map(|key| key.text.clone())
+            .collect()
     }
 
     pub fn layout_line<Text>(

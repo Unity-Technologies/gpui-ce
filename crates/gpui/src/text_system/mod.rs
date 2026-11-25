@@ -80,6 +80,22 @@ mod layout_cache_tests {
     }
 
     #[test]
+    fn shape_line_shares_its_text_with_the_layout_cache() {
+        let system = window_text_system();
+        // Long enough to be stored on the heap rather than inline.
+        let text = SharedString::from("let value = compute_something(argument_one, argument_two);");
+        let run = TextRun {
+            len: text.len(),
+            ..Default::default()
+        };
+
+        system.shape_line(text.clone(), px(14.), &[run]);
+        let cached = system.line_layout_cache().current_frame_line_texts();
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].as_ptr(), text.as_ptr());
+    }
+
+    #[test]
     fn paint_changes_reuse_shaped_geometry() {
         let system = window_text_system();
         let text = SharedString::from("paint cache");
