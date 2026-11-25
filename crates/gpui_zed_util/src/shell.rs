@@ -88,7 +88,7 @@ pub fn get_default_system_shell() -> String {
 pub fn get_default_system_shell_preferring_bash() -> String {
     #[cfg(windows)]
     {
-        get_windows_bash().unwrap_or_else(|| get_windows_system_shell())
+        get_windows_bash().unwrap_or_else(get_windows_system_shell)
     }
 
     #[cfg(not(windows))]
