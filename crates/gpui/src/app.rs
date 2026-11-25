@@ -2228,6 +2228,24 @@ impl App {
         self.platform.write_credentials(url, username, password)
     }
 
+    /// Atomically writes credentials unless an item with this URL and username exists.
+    ///
+    /// Returns `true` if written, or `false` if the existing item was left unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if Keychain access fails or the platform lacks support.
+    #[cfg(target_os = "macos")]
+    pub fn write_credentials_if_not_exists(
+        &self,
+        url: &str,
+        username: &str,
+        password: &[u8],
+    ) -> Task<Result<bool>> {
+        self.platform
+            .write_credentials_if_not_exists(url, username, password)
+    }
+
     /// Reads the username and password stored for `url`.
     ///
     /// The task resolves to `None` when nothing is stored for `url`. Use the same `url`
