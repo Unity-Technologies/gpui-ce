@@ -34,6 +34,9 @@ pub(crate) const WM_GPUI_CONTRAST_CHANGED: u32 = WM_USER + 10;
 /// rebuilt. Its `LPARAM` owns a `Box<GpuDeviceLostError>`
 /// ([`post_gpu_device_unrecoverable`]).
 pub(crate) const WM_GPUI_GPU_DEVICE_UNRECOVERABLE: u32 = WM_USER + 11;
+/// Posted by the vsync thread when the window becomes presentable or stops
+/// being so (see `is_window_presentable`).
+pub(crate) const WM_GPUI_PRESENTABILITY_CHANGED: u32 = WM_USER + 12;
 
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
 
@@ -174,6 +177,7 @@ impl WindowsWindowInner {
             WM_GPUI_GPU_DEVICE_LOST => self.handle_device_lost(wparam, lparam),
             DM_POINTERHITTEST => self.handle_dm_pointer_hit_test(wparam),
             WM_GETOBJECT => self.handle_wm_getobject(wparam, lparam),
+            WM_GPUI_PRESENTABILITY_CHANGED => self.handle_presentability_changed(wparam),
             _ => None,
         };
         if let Some(n) = handled {
@@ -1333,6 +1337,17 @@ impl WindowsWindowInner {
             self.draw_window(handle, false);
         }
         None
+    }
+
+    /// The vsync thread saw the window become presentable or stop being so.
+    /// Cloaking, e.g. switching virtual desktops, sends the window no message
+    /// of its own.
+    fn handle_presentability_changed(self: &Rc<Self>, wparam: WPARAM) -> Option<isize> {
+        if wparam.0 != self.validation_number {
+            return None;
+        }
+        self.report_visibility();
+        Some(0)
     }
 
     // The window procedure can run while GPUI is updating this window (e.g.
