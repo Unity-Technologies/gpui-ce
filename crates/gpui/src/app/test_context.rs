@@ -1208,6 +1208,9 @@ impl VisualTestContext {
     ///
     /// Draw the view first, so that the frame contains the element. Use this to click
     /// an element without guessing its position.
+    ///
+    /// Returns `None` in builds without `debug_assertions`, which don't record
+    /// selectors; see [`crate::InteractiveElement::debug_selector`].
     pub fn debug_bounds(&mut self, selector: &'static str) -> Option<Bounds<Pixels>> {
         self.update(|window, _| window.rendered_frame.debug_bounds.get(selector).copied())
     }

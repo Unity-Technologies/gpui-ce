@@ -192,6 +192,9 @@ impl HeadlessAppContext {
 
     /// Returns the bounds of the element with `debug_selector(selector)` in the last painted frame, or `None`.
     ///
+    /// Returns `None` in builds without `debug_assertions`, which don't record
+    /// selectors; see [`crate::InteractiveElement::debug_selector`].
+    ///
     /// # Errors
     ///
     /// Returns an error if `window` has been closed.
