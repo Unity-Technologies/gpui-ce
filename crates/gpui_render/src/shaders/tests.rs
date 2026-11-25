@@ -95,7 +95,7 @@ fn ordinary_vertex_interfaces_stay_within_compact_budgets() {
     let module = naga::front::wgsl::parse_str(&base::WGSL_SOURCE.wgsl_source().unwrap()).unwrap();
     for (entry, maximum_shape) in [
         ("vertex_quad", (5, 17)),
-        ("vertex_shadow", (3, 9)),
+        ("vertex_shadow", (7, 25)),
         ("vertex_underline", (2, 5)),
         ("vertex_polychrome_sprite", (3, 4)),
         ("vertex_surface", (1, 2)),
@@ -323,5 +323,104 @@ fn simple_primitive_flag_round_trips_the_instance_index() {
         let shaped = mark_simple_primitive(index, false);
         assert!(!is_simple_primitive(shaped));
         assert_eq!(primitive_index(shaped), index);
+    }
+}
+
+/// A dense reference for a Gaussian-blurred rounded rectangle: the exact blur along x of each
+/// horizontal slice, integrated along y with `samples` midpoint samples.
+fn integrated_shadow(
+    center_to_point: wgsl_rs::std::Vec2f,
+    half_size: wgsl_rs::std::Vec2f,
+    corner_radius: f32,
+    standard_deviation: f32,
+    samples: u32,
+) -> f32 {
+    use common::*;
+    use wgsl_rs::std::*;
+
+    let along_x = |x: f32, y: f32| {
+        let beyond = (half_size.y - corner_radius - y.abs()).min(0.0);
+        let curved = half_size.x - corner_radius
+            + (corner_radius * corner_radius - beyond * beyond)
+                .max(0.0)
+                .sqrt();
+        let bounds = vec2f(x - curved, x + curved) * (0.5f32.sqrt() / standard_deviation);
+        let integral = approximate_error_function(bounds);
+        0.5 * (integral.y - integral.x)
+    };
+    let low = center_to_point.y - half_size.y;
+    let high = center_to_point.y + half_size.y;
+    let start = (-3.0 * standard_deviation).clamp(low, high);
+    let end = (3.0 * standard_deviation).clamp(low, high);
+    let step = (end - start) / samples as f32;
+    let mut y = start + step * 0.5;
+    let mut coverage = 0.0;
+    for _ in 0..samples {
+        coverage += along_x(center_to_point.x, center_to_point.y - y)
+            * gaussian(y, standard_deviation)
+            * step;
+        y += step;
+    }
+    coverage
+}
+
+#[test]
+fn levien_shadow_tracks_the_exact_blur() {
+    use common::*;
+    use wgsl_rs::std::*;
+
+    // (width, height, radius, sigma, tolerance). Levien's fit is tight for ordinary shadows
+    // and loosest where the blur is wide against an eccentric shape.
+    for (width, height, radius, sigma, tolerance) in [
+        (50.0, 36.0, 0.0, 2.0, 0.02),
+        (50.0, 36.0, 6.0, 4.0, 0.015),
+        (200.0, 40.0, 8.0, 4.0, 0.015),
+        (300.0, 200.0, 12.0, 10.0, 0.015),
+        (40.0, 40.0, 20.0, 12.0, 0.04),
+        (50.0, 36.0, 18.0, 8.0, 0.08),
+        (50.0, 36.0, 0.0, 20.0, 0.05),
+        (120.0, 20.0, 10.0, 6.0, 0.09),
+    ] {
+        let size = vec2f(width, height);
+        let corners = Corners {
+            top_left: radius,
+            top_right: radius,
+            bottom_right: radius,
+            bottom_left: radius,
+        };
+        let prepared = prepare_blurred_rectangle(size, corners, sigma);
+        let reach = 3.0 * sigma;
+        let mut worst = 0.0f32;
+        let mut x = -width / 2.0 - reach;
+        while x <= width / 2.0 + reach {
+            let mut y = -height / 2.0 - reach;
+            while y <= height / 2.0 + reach {
+                let point = vec2f(x, y);
+                let levien = blurred_rectangle_coverage(point, prepared);
+                assert!(levien.is_finite() && (-0.001..=1.001).contains(&levien));
+                let exact = integrated_shadow(point, size / 2.0, radius, sigma, 256);
+                worst = worst.max((levien - exact).abs());
+                y += 1.5;
+            }
+            x += 1.5;
+        }
+        assert!(
+            worst < tolerance,
+            "{width}x{height} r{radius} sigma {sigma}: Levien drifts {worst} from the exact blur"
+        );
+    }
+}
+
+#[test]
+fn levien_error_function_matches_known_values() {
+    for (input, expected) in [
+        (0.0f32, 0.0f32),
+        (0.5, 0.5205),
+        (1.0, 0.8427),
+        (2.0, 0.9953),
+    ] {
+        let actual = common::levien_error_function(input);
+        assert!((actual - expected).abs() < 0.001, "erf({input}) = {actual}");
+        assert!((common::levien_error_function(-input) + expected).abs() < 0.001);
     }
 }

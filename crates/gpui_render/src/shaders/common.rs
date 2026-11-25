@@ -40,6 +40,12 @@ mod source {
     pub const ERROR_FUNCTION_QUADRATIC_COEFFICIENT: f32 = 0.230389;
     pub const ERROR_FUNCTION_CUBIC_COEFFICIENT: f32 = 0.000972;
     pub const ERROR_FUNCTION_QUARTIC_COEFFICIENT: f32 = 0.078108;
+    pub const LEVIEN_ERROR_FUNCTION_A: f32 = 0.24295;
+    pub const LEVIEN_ERROR_FUNCTION_B: f32 = 0.03395;
+    pub const LEVIEN_ERROR_FUNCTION_C: f32 = 0.0104;
+    pub const LEVIEN_INNER_RADIUS_SPREAD: f32 = 1.15;
+    pub const LEVIEN_SIZE_CORRECTION: f32 = 1.25;
+    pub const LEVIEN_MIN_BLUR: f32 = 0.000001;
     pub const DARK_TEXT_CONTRAST_SCALE: f32 = 4.0;
     pub const DARK_TEXT_BRIGHTNESS_CUTOFF: f32 = 0.75;
     pub const LINEAR_SRGB_TO_CONE_RESPONSE: Mat3x3f = mat3x3f(
@@ -592,29 +598,133 @@ mod source {
         let polynomial_squared = polynomial * polynomial;
         signs - signs / (polynomial_squared * polynomial_squared)
     }
-    pub fn integrated_rounded_rectangle_coverage(
-        horizontal_position: f32,
-        vertical_position: f32,
-        standard_deviation: f32,
-        corner_radius: f32,
-        half_size: Vec2f,
-    ) -> f32 {
-        let distance_beyond_corner = min(half_size.y - corner_radius - abs(vertical_position), 0.0);
-        let curved_extent = half_size.x - corner_radius
-            + sqrt(max(
-                0.0,
-                corner_radius * corner_radius - distance_beyond_corner * distance_beyond_corner,
-            ));
-        let integration_bounds = horizontal_position + vec2f(-curved_extent, curved_extent);
-        let normalized_bounds = integration_bounds * (sqrt(0.5) / standard_deviation);
-        let integral = 0.5 + 0.5 * approximate_error_function(normalized_bounds);
-        integral.y - integral.x
-    }
     pub fn pick_corner_radius(center_to_point: Vec2f, radii: Corners) -> f32 {
         let left = select(radii.bottom_left, radii.top_left, center_to_point.y < 0.0);
         let right = select(radii.bottom_right, radii.top_right, center_to_point.y < 0.0);
         select(right, left, center_to_point.x < 0.0)
     }
+    pub fn pick_corner_value(center_to_point: Vec2f, values: Vec4f) -> f32 {
+        pick_corner_radius(
+            center_to_point,
+            Corners {
+                top_left: values.x,
+                top_right: values.y,
+                bottom_right: values.z,
+                bottom_left: values.w,
+            },
+        )
+    }
+
+    /// The error function to about 1e-4, from Raph Levien's blurred rounded rectangle notes.
+    pub fn levien_error_function(input: f32) -> f32 {
+        let x = clamp(input, -10.0, 10.0) * (2.0 / sqrt(PI));
+        let x_squared = x * x;
+        let y = x
+            + (LEVIEN_ERROR_FUNCTION_A
+                + (LEVIEN_ERROR_FUNCTION_B + LEVIEN_ERROR_FUNCTION_C * x_squared) * x_squared)
+                * (x * x_squared);
+        y / sqrt(1.0 + y * y)
+    }
+
+    /// Per-shadow terms of a blurred rounded rectangle, computed once per vertex.
+    #[derive(Clone, Copy, Wgsl)]
+    pub struct PreparedBlurredRectangle {
+        /// Adjusted half size (xy), inverse blur width (z), shorter side (w).
+        pub shape: Vec4f,
+        pub corner_radii: Vec4f,
+        pub exponents: Vec4f,
+        pub scales: Vec4f,
+    }
+
+    /// Fits Raph Levien's superellipse approximation of a Gaussian-blurred rounded rectangle:
+    /// https://raphlinus.github.io/graphics/2020/04/21/blurred-rounded-rects.html
+    /// Its blur width is the standard deviation times sqrt(2).
+    pub fn prepare_blurred_rectangle(
+        size: Vec2f,
+        corner_radii: Corners,
+        standard_deviation: f32,
+    ) -> PreparedBlurredRectangle {
+        let blur = max(standard_deviation * sqrt(2.0), LEVIEN_MIN_BLUR);
+        let inverse_blur = 1.0 / blur;
+        let shorter_side = min(size.x, size.y);
+        let max_radius = 0.5 * shorter_side;
+        let max_radii = vec4f(max_radius, max_radius, max_radius, max_radius);
+        // A radius past half the shorter side has no shape of its own to blur.
+        let radii = min(
+            vec4f(
+                corner_radii.top_left,
+                corner_radii.top_right,
+                corner_radii.bottom_right,
+                corner_radii.bottom_left,
+            ),
+            max_radii,
+        );
+        let inner_spread = LEVIEN_INNER_RADIUS_SPREAD * LEVIEN_INNER_RADIUS_SPREAD * blur * blur;
+        let outer_spread = 4.0 * blur * blur;
+        let inner_radii = min(
+            sqrt(radii * radii + vec4f(inner_spread, inner_spread, inner_spread, inner_spread)),
+            max_radii,
+        );
+        let outer_radii = min(
+            sqrt(radii * radii + vec4f(outer_spread, outer_spread, outer_spread, outer_spread)),
+            max_radii,
+        );
+
+        let half_extent = 0.5 * inverse_blur * size;
+        let delta = LEVIEN_SIZE_CORRECTION
+            * blur
+            * (exp(-half_extent.x * half_extent.x) - exp(-half_extent.y * half_extent.y));
+        let adjusted_size = vec2f(size.x + min(delta, 0.0), size.y - max(delta, 0.0));
+        let longer_side = max(adjusted_size.x, adjusted_size.y);
+        let peaks = (vec4f(longer_side, longer_side, longer_side, longer_side) - 0.5 * radii)
+            * (inverse_blur * 0.5);
+
+        PreparedBlurredRectangle {
+            shape: vec4f(
+                0.5 * adjusted_size.x,
+                0.5 * adjusted_size.y,
+                inverse_blur,
+                shorter_side,
+            ),
+            corner_radii: outer_radii,
+            exponents: 2.0 * outer_radii / inner_radii,
+            scales: 0.5
+                * vec4f(
+                    levien_error_function(peaks.x),
+                    levien_error_function(peaks.y),
+                    levien_error_function(peaks.z),
+                    levien_error_function(peaks.w),
+                ),
+        }
+    }
+
+    /// Coverage of a blurred rounded rectangle at `center_to_point` from its prepared terms.
+    pub fn blurred_rectangle_coverage(
+        center_to_point: Vec2f,
+        prepared: PreparedBlurredRectangle,
+    ) -> f32 {
+        let radius = pick_corner_value(center_to_point, prepared.corner_radii);
+        let exponent = pick_corner_value(center_to_point, prepared.exponents);
+        let scale = pick_corner_value(center_to_point, prepared.scales);
+        let inverse_blur = prepared.shape.z;
+        let shorter_side = prepared.shape.w;
+
+        let corner_to_point = abs(center_to_point) - (prepared.shape.xy() - radius);
+        let outside = max(corner_to_point, vec2f(0.0, 0.0));
+        let mut positive_distance = outside.x + outside.y;
+        if outside.x > 0.0 && outside.y > 0.0 {
+            positive_distance = pow(
+                pow(outside.x, exponent) + pow(outside.y, exponent),
+                1.0 / exponent,
+            );
+        }
+        let negative_distance = min(max(corner_to_point.x, corner_to_point.y), 0.0);
+        let distance = positive_distance + negative_distance - radius;
+        scale
+            * (levien_error_function(inverse_blur * (shorter_side + distance))
+                - levien_error_function(inverse_blur * distance))
+    }
+
     pub fn rounded_rectangle_signed_distance_from_corner(
         corner_center_to_point: Vec2f,
         corner_radius: f32,
