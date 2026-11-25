@@ -1,13 +1,15 @@
 use crate::{
     AbsoluteLength, App, Bounds, DefiniteLength, Display, Edges, GridTemplate, InlineContent,
-    LayoutDirection, Length, Pixels, Point, Position, ResolvedDirection, SharedString, Size, Style,
-    UnicodeBidi, VerticalAlign, Window, size,
+    LayoutDirection, Length, PathHash, Pixels, Point, Position, ResolvedDirection, SharedString,
+    Size, Style, UnicodeBidi, VerticalAlign, Window, size,
     util::{
         ceil_to_device_pixel, round_half_toward_zero, round_stroke_to_device_pixel,
         round_to_device_pixel,
     },
 };
 use collections::{FxHashMap, FxHashSet};
+use slotmap::{DefaultKey, KeyData, SecondaryMap};
+use smallvec::SmallVec;
 use std::{cell::Cell, fmt::Debug, ops::Range, rc::Rc, sync::Arc};
 use taffy::{
     TaffyTree, TraversePartialTree as _,
@@ -58,7 +60,13 @@ struct DirectionMetadata {
 }
 
 pub struct TaffyLayoutEngine {
-    taffy: TaffyTree<NodeContext>,
+    taffy: TaffyTree,
+    /// Kept outside of Taffy, whose context map hashes every access and marks a node dirty
+    /// whenever its context is replaced.
+    contexts: SecondaryMap<DefaultKey, NodeContext>,
+    /// Keeps layout nodes alive from one frame to the next, so Taffy's layout cache can
+    /// skip subtrees whose styles and children didn't change.
+    cache: LayoutCache,
     absolute_layout_bounds: FxHashMap<LayoutId, Bounds<Pixels>>,
     /// Unrounded absolute border-box top-left per-node coordinate in device pixels.
     absolute_outer_origins: FxHashMap<LayoutId, Point<f32>>,
@@ -68,7 +76,47 @@ pub struct TaffyLayoutEngine {
     pub(crate) inline_fragments: FxHashMap<LayoutId, Arc<[Bounds<Pixels>]>>,
     display_and_position: FxHashMap<LayoutId, (Display, Position)>,
     directions: FxHashMap<LayoutId, DirectionMetadata>,
+    /// Nodes whose tree no `compute_layout` reached this frame, such as hidden children
+    /// an inline context leaves out of the Taffy tree. Kept nodes still hold an earlier
+    /// frame's layout, so these read as a new node's zero layout instead.
+    not_laid_out: FxHashSet<LayoutId>,
     layout_bounds_scratch_space: Vec<LayoutId>,
+}
+
+/// Layout nodes requested by elements under one element ID path, in request order.
+///
+/// Elements without IDs are distinguished only by their order within the nearest ancestor
+/// with one. Which node a request reuses only affects how much of Taffy's cache survives:
+/// a reused node's style, children and measure function are always brought up to date.
+#[derive(Default)]
+struct LayoutScope {
+    /// How many of `nodes` were requested this frame.
+    requested: usize,
+    nodes: SmallVec<[NodeId; 4]>,
+}
+
+struct CachedNode {
+    /// What the node's Taffy style was converted from, compared before converting again.
+    style: LayoutStyle,
+    /// The last frame the node was requested in.
+    frame: u64,
+    /// Whether `stretch_auto_size_to_fill` changed the Taffy style since it was converted.
+    stretched: bool,
+}
+
+#[derive(Default)]
+struct LayoutCache {
+    scopes: FxHashMap<PathHash, LayoutScope>,
+    nodes: SecondaryMap<DefaultKey, CachedNode>,
+    /// Nodes no element requested last frame, detached from the tree. A request that
+    /// misses reuses one before allocating, and those still unused at the end of this
+    /// frame are removed.
+    free_nodes: Vec<NodeId>,
+    frame: u64,
+}
+
+fn node_key(id: NodeId) -> DefaultKey {
+    KeyData::from_ffi(id.into()).into()
 }
 
 const EXPECT_MESSAGE: &str = "we should avoid taffy layout errors by construction if possible";
@@ -79,6 +127,8 @@ impl TaffyLayoutEngine {
         taffy.disable_rounding();
         TaffyLayoutEngine {
             taffy,
+            contexts: SecondaryMap::new(),
+            cache: LayoutCache::default(),
             absolute_layout_bounds: FxHashMap::default(),
             absolute_outer_origins: FxHashMap::default(),
             computed_available_spaces: FxHashMap::default(),
@@ -87,12 +137,30 @@ impl TaffyLayoutEngine {
             inline_fragments: FxHashMap::default(),
             display_and_position: FxHashMap::default(),
             directions: FxHashMap::default(),
+            not_laid_out: FxHashSet::default(),
             layout_bounds_scratch_space: Vec::new(),
         }
     }
 
-    pub fn clear(&mut self) {
+    /// Drops every layout node kept from earlier frames, so the next frame builds its
+    /// tree from scratch.
+    #[cfg(test)]
+    pub(crate) fn clear_layout_cache(&mut self) {
         self.taffy.clear();
+        self.contexts.clear();
+        self.cache = LayoutCache::default();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn node_count(&self) -> usize {
+        self.taffy.total_node_count()
+    }
+
+    /// Ends the frame: nodes that weren't requested during it are evicted. The per-node
+    /// metadata below is recorded again by every request, so it is cleared every frame.
+    pub fn clear(&mut self) {
+        self.cache
+            .evict_unrequested(&mut self.taffy, &mut self.contexts);
         self.absolute_layout_bounds.clear();
         self.absolute_outer_origins.clear();
         self.computed_available_spaces.clear();
@@ -101,38 +169,26 @@ impl TaffyLayoutEngine {
         self.inline_fragments.clear();
         self.display_and_position.clear();
         self.directions.clear();
+        self.not_laid_out.clear();
     }
 
     pub fn request_layout(
         &mut self,
-        style: Style,
+        scope: PathHash,
+        style: &Style,
         rem_size: Pixels,
         scale_factor: f32,
         children: &[LayoutId],
     ) -> LayoutId {
-        let taffy_style = style.to_taffy(rem_size, scale_factor);
-
-        let node_id = if children.is_empty() {
-            self.taffy
-                .new_leaf(taffy_style)
-                .expect(EXPECT_MESSAGE)
-                .into()
-        } else {
-            self.taffy
-                // This is safe because LayoutId is repr(transparent) to taffy::tree::NodeId.
-                .new_with_children(taffy_style, LayoutId::to_taffy_slice(children))
-                .expect(EXPECT_MESSAGE)
-                .into()
-        };
-
-        self.record_style(node_id, &style);
-
+        let node_id = self.request_node(scope, style, rem_size, scale_factor, children, None);
+        self.record_style(node_id, style);
         node_id
     }
 
     pub fn request_measured_layout(
         &mut self,
-        style: Style,
+        scope: PathHash,
+        style: &Style,
         rem_size: Pixels,
         scale_factor: f32,
         measure: impl FnMut(
@@ -143,25 +199,99 @@ impl TaffyLayoutEngine {
         ) -> Size<Pixels>
         + 'static,
     ) -> LayoutId {
-        let taffy_style = style.to_taffy(rem_size, scale_factor);
         let measure = Box::new(measure) as Box<MeasureFn>;
         #[cfg(feature = "stacker")]
         let measure = StackSafe::new(measure);
-
-        let node_id = self
-            .taffy
-            .new_leaf_with_context(
-                taffy_style,
-                NodeContext {
-                    measure,
-                    unicode_bidi: style.effective_unicode_bidi(),
-                },
-            )
-            .expect(EXPECT_MESSAGE)
-            .into();
-        self.record_style(node_id, &style);
-
+        let context = NodeContext {
+            measure,
+            unicode_bidi: style.effective_unicode_bidi(),
+        };
+        let node_id = self.request_node(scope, style, rem_size, scale_factor, &[], Some(context));
+        self.record_style(node_id, style);
         node_id
+    }
+
+    fn request_node(
+        &mut self,
+        scope: PathHash,
+        style: &Style,
+        rem_size: Pixels,
+        scale_factor: f32,
+        children: &[LayoutId],
+        context: Option<NodeContext>,
+    ) -> LayoutId {
+        // This is safe because LayoutId is repr(transparent) to taffy::tree::NodeId.
+        let children = LayoutId::to_taffy_slice(children);
+        let taffy = &mut self.taffy;
+        let contexts = &mut self.contexts;
+        let cache = &mut self.cache;
+
+        let frame = cache.frame;
+        let scope = cache.scopes.entry(scope).or_default();
+        let ordinal = scope.requested;
+        scope.requested += 1;
+        let id = if let Some(&id) = scope.nodes.get(ordinal) {
+            let node = &mut cache.nodes[node_key(id)];
+            debug_assert_ne!(
+                node.frame, frame,
+                "layout node requested twice in one frame"
+            );
+            if node.stretched || !node.style.matches(style, rem_size, scale_factor) {
+                node.style = LayoutStyle::new(style, rem_size, scale_factor);
+                node.stretched = false;
+                let mut taffy_style = node.style.to_taffy();
+                // Direction is resolved after requests (`resolve_directions`), so keep the
+                // last resolved one rather than dirtying the node for it here.
+                taffy_style.direction = taffy.style(id).expect(EXPECT_MESSAGE).direction;
+                if taffy.style(id).expect(EXPECT_MESSAGE) != &taffy_style {
+                    taffy.set_style(id, taffy_style).expect(EXPECT_MESSAGE);
+                }
+            }
+            if !taffy.child_ids(id).eq(children.iter().copied()) {
+                taffy.set_children(id, children).expect(EXPECT_MESSAGE);
+            }
+            id
+        } else {
+            let style = LayoutStyle::new(style, rem_size, scale_factor);
+            let taffy_style = style.to_taffy();
+            let id = if let Some(id) = cache.free_nodes.pop() {
+                taffy.set_style(id, taffy_style).expect(EXPECT_MESSAGE);
+                let node = &mut cache.nodes[node_key(id)];
+                node.style = style;
+                node.stretched = false;
+                id
+            } else {
+                let id = taffy.new_leaf(taffy_style).expect(EXPECT_MESSAGE);
+                let node = CachedNode {
+                    style,
+                    frame,
+                    stretched: false,
+                };
+                cache.nodes.insert(node_key(id), node);
+                id
+            };
+            if !children.is_empty() {
+                // Unlike `new_with_children`, this detaches children from their previous parents.
+                taffy.set_children(id, children).expect(EXPECT_MESSAGE);
+            }
+            scope.nodes.push(id);
+            id
+        };
+
+        cache.nodes[node_key(id)].frame = frame;
+        // A measure function can measure anything, so the sizes Taffy cached from the
+        // node's previous one can't be kept.
+        let measure_changed = match context {
+            Some(context) => {
+                contexts.insert(node_key(id), context);
+                true
+            }
+            None => contexts.remove(node_key(id)).is_some(),
+        };
+        if measure_changed {
+            taffy.mark_dirty(id).expect(EXPECT_MESSAGE);
+        }
+        id.into()
     }
 
     fn record_style(&mut self, node_id: LayoutId, style: &Style) {
@@ -363,6 +493,11 @@ impl TaffyLayoutEngine {
         if !stretch_width && !stretch_height {
             return;
         }
+        // The next request for this node must restore its style, unless it is stretched
+        // again; it may not be a root by then.
+        if let Some(node) = self.cache.nodes.get_mut(node_key(id.0)) {
+            node.stretched = true;
+        }
         let mut style = style.clone();
         if stretch_width {
             style.size.width =
@@ -442,6 +577,19 @@ impl TaffyLayoutEngine {
         // }
         //
 
+        // A node computed as a root may still be attached to a parent from an earlier
+        // frame that no element requested in this one. Its layout must not be relative to
+        // that parent.
+        let cache = &self.cache;
+        if let Some(parent) = self.taffy.parent(id.0)
+            && cache
+                .nodes
+                .get(node_key(parent))
+                .is_none_or(|node| node.frame != cache.frame)
+        {
+            self.taffy.remove_child(parent, id.0).expect(EXPECT_MESSAGE);
+        }
+
         let changed_ids = self.resolve_directions(id, inherited_direction);
 
         for changed_id in changed_ids {
@@ -473,6 +621,7 @@ impl TaffyLayoutEngine {
         while let Some(id) = stack.pop() {
             self.absolute_layout_bounds.remove(&id);
             self.absolute_outer_origins.remove(&id);
+            self.not_laid_out.remove(&id);
             stack.extend(
                 self.taffy
                     .children(id.into())
@@ -504,11 +653,13 @@ impl TaffyLayoutEngine {
             transform(available_space.height),
         );
 
+        let contexts = &mut self.contexts;
         self.taffy
             .compute_layout_with_measure(
                 id.into(),
                 available_space.into(),
-                |input, _id, node_context, style| {
+                |input, id, _, style| {
+                    let node_context = contexts.get_mut(node_key(id));
                     taffy::compute_leaf_layout(
                         input,
                         style,
@@ -645,21 +796,20 @@ impl TaffyLayoutEngine {
             return layout;
         }
 
-        let layout = self.taffy.layout(id.into()).expect(EXPECT_MESSAGE);
+        let parent = self.taffy.parent(id.0).map(LayoutId::from);
+        let parent_origin = parent.map(|parent_id| {
+            self.layout_bounds(parent_id, scale_factor);
+            *self
+                .absolute_outer_origins
+                .get(&parent_id)
+                .expect("parent absolute outer origin should be cached")
+        });
+        let layout = self.layout_this_frame(id, parent);
         let layout_location = layout.location;
         let layout_size = layout.size;
-        let parent = self.taffy.parent(id.0);
 
-        let absolute_outer_origin = match parent {
-            Some(parent_id) => {
-                let parent_id = LayoutId::from(parent_id);
-                self.layout_bounds(parent_id, scale_factor);
-                let parent_origin = *self
-                    .absolute_outer_origins
-                    .get(&parent_id)
-                    .expect("parent absolute outer origin should be cached");
-                parent_origin + Point::from(layout_location)
-            }
+        let absolute_outer_origin = match parent_origin {
+            Some(parent_origin) => parent_origin + Point::from(layout_location),
             None => Point::from(layout_location),
         };
         self.absolute_outer_origins
@@ -681,6 +831,21 @@ impl TaffyLayoutEngine {
     /// Text uses this placement so its offset within a containing element remains stable when the
     /// element moves across the device-pixel grid. Other layout boxes continue to use absolute edge
     /// snapping through [`Self::layout_bounds`] so coincident edges still close.
+    /// The node's Taffy layout, or a new node's zero layout if no `compute_layout` reached
+    /// its tree this frame. `parent`'s bounds must already be resolved.
+    fn layout_this_frame(&mut self, id: LayoutId, parent: Option<LayoutId>) -> taffy::Layout {
+        let laid_out = match parent {
+            Some(parent) => !self.not_laid_out.contains(&parent),
+            None => self.computed_available_spaces.contains_key(&id),
+        };
+        if laid_out {
+            *self.taffy.layout(id.into()).expect(EXPECT_MESSAGE)
+        } else {
+            self.not_laid_out.insert(id);
+            taffy::Layout::new()
+        }
+    }
+
     pub(crate) fn parent_relative_layout_bounds(
         &mut self,
         node_id: LayoutId,
@@ -694,7 +859,7 @@ impl TaffyLayoutEngine {
             return self.layout_bounds(node_id, scale_factor);
         };
         let parent_bounds = self.layout_bounds(parent_id, scale_factor);
-        let layout = self.taffy.layout(node_id.into()).expect(EXPECT_MESSAGE);
+        let layout = self.layout_this_frame(node_id, Some(parent_id));
         let local_origin = Point::from(layout.location).map(round_half_toward_zero);
         let local_size = Size::from(layout.size).map(round_half_toward_zero);
 
@@ -702,6 +867,40 @@ impl TaffyLayoutEngine {
             parent_bounds.origin + (local_origin / scale_factor).map(Pixels),
             (local_size / scale_factor).map(Pixels),
         )
+    }
+}
+
+impl LayoutCache {
+    fn evict_unrequested(
+        &mut self,
+        taffy: &mut TaffyTree,
+        contexts: &mut SecondaryMap<DefaultKey, NodeContext>,
+    ) {
+        for id in self.free_nodes.drain(..) {
+            self.nodes.remove(node_key(id));
+            taffy.remove(id).expect(EXPECT_MESSAGE);
+        }
+
+        let free_nodes = &mut self.free_nodes;
+        self.scopes.retain(|_, scope| {
+            let requested = std::mem::take(&mut scope.requested);
+            free_nodes.extend(scope.nodes.drain(requested..));
+            requested > 0
+        });
+
+        // Every node an element requested this frame had its children set to nodes also
+        // requested this frame, so an unrequested node's parent is unrequested too (or it
+        // has none). Clearing their children therefore detaches all of them without
+        // touching the live tree. Measure functions can hold on to anything, so they're
+        // dropped now rather than when the node is reused or removed.
+        for &id in &self.free_nodes {
+            contexts.remove(node_key(id));
+            if taffy.child_count(id) > 0 {
+                taffy.set_children(id, &[]).expect(EXPECT_MESSAGE);
+            }
+        }
+        debug_assert!(self.free_nodes.iter().all(|&id| taffy.parent(id).is_none()));
+        self.frame += 1;
     }
 }
 
@@ -846,9 +1045,71 @@ trait ToTaffy<Output> {
     fn to_taffy(&self, rem_size: Pixels, scale_factor: f32) -> Output;
 }
 
-impl ToTaffy<taffy::style::Style> for Style {
-    fn to_taffy(&self, rem_size: Pixels, scale_factor: f32) -> taffy::style::Style {
+// Conversion reads the copied fields, not `Style`, so a field can't affect layout
+// without also being compared to decide whether to convert again.
+macro_rules! layout_style {
+    ($($field:ident: $field_type:ty),* $(,)?) => {
+        /// The fields of a [`Style`] that affect layout, and what their lengths are
+        /// resolved against.
+        #[derive(Clone, Debug)]
+        struct LayoutStyle {
+            rem_size: Pixels,
+            scale_factor: f32,
+            $($field: $field_type,)*
+        }
+
+        impl LayoutStyle {
+            fn new(style: &Style, rem_size: Pixels, scale_factor: f32) -> Self {
+                Self {
+                    rem_size,
+                    scale_factor,
+                    $($field: Clone::clone(&style.$field),)*
+                }
+            }
+
+            fn matches(&self, style: &Style, rem_size: Pixels, scale_factor: f32) -> bool {
+                self.rem_size == rem_size
+                    && self.scale_factor == scale_factor
+                    $(&& self.$field == style.$field)*
+            }
+        }
+    };
+}
+
+layout_style! {
+    display: crate::Display,
+    overflow: Point<crate::Overflow>,
+    scrollbar_width: AbsoluteLength,
+    position: crate::Position,
+    inset: Edges<Length>,
+    size: Size<Length>,
+    min_size: Size<Length>,
+    max_size: Size<Length>,
+    aspect_ratio: Option<f32>,
+    margin: Edges<Length>,
+    padding: Edges<DefiniteLength>,
+    border_widths: Edges<AbsoluteLength>,
+    align_items: Option<crate::AlignItems>,
+    align_self: Option<crate::AlignSelf>,
+    align_content: Option<crate::AlignContent>,
+    justify_content: Option<crate::JustifyContent>,
+    gap: Size<DefiniteLength>,
+    flex_direction: crate::FlexDirection,
+    flex_wrap: crate::FlexWrap,
+    flex_basis: Length,
+    flex_grow: f32,
+    flex_shrink: f32,
+    grid_rows: Option<GridTemplate>,
+    grid_cols: Option<GridTemplate>,
+    grid_location: Option<crate::GridLocation>,
+}
+
+impl LayoutStyle {
+    fn to_taffy(&self) -> taffy::style::Style {
         use taffy::style_helpers::{fr, length, minmax, repeat};
+
+        let rem_size = self.rem_size;
+        let scale_factor = self.scale_factor;
 
         fn to_grid_line(
             placement: &Range<crate::GridPlacement>,
@@ -1162,7 +1423,336 @@ impl From<Size<Pixels>> for Size<AvailableSpace> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::px;
+    use crate::{
+        AnyElement, AnyWindowHandle, AppContext as _, Context, Element, ElementId, GlobalElementId,
+        InspectorElementId, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+        Styled as _, TestAppContext, div, px, rems,
+    };
+
+    type Frame = Box<dyn Fn(&mut Window) -> AnyElement>;
+
+    struct FrameView {
+        frame: Rc<Cell<usize>>,
+        frames: Rc<Vec<Frame>>,
+    }
+
+    impl Render for FrameView {
+        fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            (self.frames[self.frame.get()])(window)
+        }
+    }
+
+    /// Draws each frame in a window that keeps its layout nodes and in one that rebuilds
+    /// them, checking that every element with a debug selector has the same bounds in
+    /// both.
+    fn assert_frames_match_uncached(cx: &mut TestAppContext, frames: Vec<Frame>) {
+        let frames = Rc::new(frames);
+        let frame = Rc::new(Cell::new(0));
+        let windows = [false, true].map(|rebuild| {
+            let frames = frames.clone();
+            let frame = frame.clone();
+            let window = cx.open_window(size(px(800.), px(600.)), move |_, _| FrameView {
+                frame,
+                frames,
+            });
+            (AnyWindowHandle::from(window), rebuild)
+        });
+        for index in 0..frames.len() {
+            frame.set(index);
+            let [cached, uncached] = windows.map(|(window, rebuild)| {
+                cx.update_window(window, |_, window, cx| {
+                    if rebuild {
+                        window.clear_layout_cache();
+                    }
+                    window.refresh();
+                    window.draw(cx).clear(cx);
+                    let mut bounds = window
+                        .rendered_frame
+                        .debug_bounds
+                        .iter()
+                        .map(|(selector, bounds)| (selector.clone(), *bounds))
+                        .collect::<Vec<_>>();
+                    bounds.sort_by(|a, b| a.0.cmp(&b.0));
+                    bounds
+                })
+                .expect("window should remain open")
+            });
+            assert!(!uncached.is_empty(), "frame {index} has no debug selectors");
+            assert_eq!(cached, uncached, "frame {index}");
+        }
+    }
+
+    fn frame(render: impl Fn(&mut Window) -> AnyElement + 'static) -> Frame {
+        Box::new(render)
+    }
+
+    /// A leaf whose size comes from its measure function, which captures it.
+    struct MeasuredLeaf(Size<Pixels>);
+
+    impl Element for MeasuredLeaf {
+        type RequestLayoutState = ();
+        type PrepaintState = ();
+
+        fn id(&self) -> Option<ElementId> {
+            None
+        }
+
+        fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+            None
+        }
+
+        fn request_layout(
+            &mut self,
+            _: Option<&GlobalElementId>,
+            _: Option<&InspectorElementId>,
+            window: &mut Window,
+            _: &mut App,
+        ) -> (LayoutId, ()) {
+            let measured = self.0;
+            let layout_id =
+                window.request_measured_layout(Style::default(), move |_, _, _, _| measured);
+            (layout_id, ())
+        }
+
+        fn prepaint(
+            &mut self,
+            _: Option<&GlobalElementId>,
+            _: Option<&InspectorElementId>,
+            _: Bounds<Pixels>,
+            _: &mut (),
+            _: &mut Window,
+            _: &mut App,
+        ) {
+        }
+
+        fn paint(
+            &mut self,
+            _: Option<&GlobalElementId>,
+            _: Option<&InspectorElementId>,
+            _: Bounds<Pixels>,
+            _: &mut (),
+            _: &mut (),
+            _: &mut Window,
+            _: &mut App,
+        ) {
+        }
+    }
+
+    impl IntoElement for MeasuredLeaf {
+        type Element = Self;
+
+        fn into_element(self) -> Self::Element {
+            self
+        }
+    }
+
+    #[crate::test]
+    fn stretched_root_style_is_restored_when_its_node_is_reused(cx: &mut TestAppContext) {
+        // Elements without IDs are matched by request order, and children request first,
+        // so the second frame's child reuses the first frame's root node.
+        assert_frames_match_uncached(
+            cx,
+            vec![
+                frame(|_| div().debug_selector(|| "root".into()).into_any_element()),
+                frame(|_| {
+                    div()
+                        .size(px(100.))
+                        .child(div().debug_selector(|| "child".into()))
+                        .into_any_element()
+                }),
+            ],
+        );
+    }
+
+    #[crate::test]
+    fn root_is_detached_from_a_parent_no_longer_requested(cx: &mut TestAppContext) {
+        // The second frame's root reuses the first frame's innermost node, whose parent
+        // sat inside padding.
+        assert_frames_match_uncached(
+            cx,
+            vec![
+                frame(|_| {
+                    div()
+                        .p(px(10.))
+                        .child(
+                            div()
+                                .p(px(7.))
+                                .child(div().size(px(5.)).debug_selector(|| "leaf".into())),
+                        )
+                        .into_any_element()
+                }),
+                frame(|_| {
+                    div()
+                        .size(px(50.))
+                        .debug_selector(|| "root".into())
+                        .into_any_element()
+                }),
+            ],
+        );
+    }
+
+    #[crate::test]
+    fn hidden_element_is_laid_out_again_when_shown(cx: &mut TestAppContext) {
+        let with_child_shown = |shown: bool| {
+            frame(move |_| {
+                let mut child = div().size(px(20.)).debug_selector(|| "child".into());
+                if !shown {
+                    child.style().display = Some(crate::Display::None);
+                }
+                div()
+                    .flex()
+                    .child(div().debug_selector(|| "wrapper".into()).child(child))
+                    .into_any_element()
+            })
+        };
+        assert_frames_match_uncached(
+            cx,
+            vec![
+                with_child_shown(false),
+                with_child_shown(false),
+                with_child_shown(true),
+                with_child_shown(false),
+                with_child_shown(true),
+            ],
+        );
+    }
+
+    #[crate::test]
+    fn rem_size_changes_resolve_lengths_again(cx: &mut TestAppContext) {
+        let with_rem_size = |rem_size: f32| {
+            frame(move |window| {
+                window.set_rem_size(px(rem_size));
+                div()
+                    .flex()
+                    .child(
+                        div()
+                            .w(rems(2.5))
+                            .h(rems(1.25))
+                            .debug_selector(|| "sized".into()),
+                    )
+                    .into_any_element()
+            })
+        };
+        assert_frames_match_uncached(
+            cx,
+            vec![with_rem_size(16.), with_rem_size(13.), with_rem_size(13.)],
+        );
+    }
+
+    #[crate::test]
+    fn direction_changes_lay_out_kept_nodes_again(cx: &mut TestAppContext) {
+        // The fork resolves `direction` after requests, on the kept Taffy style, so a
+        // reused node must follow its new direction and not keep the last frame's.
+        let row = |rtl: bool, width: f32| {
+            frame(move |_| {
+                let row = div().flex().w(px(width)).h(px(10.));
+                let row = if rtl { row.rtl() } else { row.ltr() };
+                row.child(div().size(px(10.)).debug_selector(|| "first".into()))
+                    .child(div().size(px(20.)).debug_selector(|| "second".into()))
+                    .into_any_element()
+            })
+        };
+        assert_frames_match_uncached(
+            cx,
+            vec![
+                row(true, 200.),
+                row(true, 200.),
+                row(false, 200.),
+                row(true, 150.),
+                row(false, 150.),
+            ],
+        );
+    }
+
+    #[crate::test]
+    fn element_ids_reused_by_different_elements(cx: &mut TestAppContext) {
+        // One ID names a measured leaf, then nothing, then a container whose children
+        // have no IDs, then a measured leaf again.
+        let leaf = || {
+            frame(|_| {
+                div()
+                    .flex()
+                    .child(
+                        div()
+                            .id("reused")
+                            .debug_selector(|| "reused".into())
+                            .child(MeasuredLeaf(size(px(12.), px(9.)))),
+                    )
+                    .into_any_element()
+            })
+        };
+        assert_frames_match_uncached(
+            cx,
+            vec![
+                leaf(),
+                frame(|_| {
+                    div()
+                        .flex()
+                        .child(div().size(px(3.)).debug_selector(|| "other".into()))
+                        .into_any_element()
+                }),
+                frame(|_| {
+                    div()
+                        .flex()
+                        .child(
+                            div()
+                                .id("reused")
+                                .flex_col()
+                                .p(px(4.))
+                                .debug_selector(|| "reused".into())
+                                .child(div().size(px(20.)))
+                                .child(div().size(px(8.)).debug_selector(|| "inner".into())),
+                        )
+                        .into_any_element()
+                }),
+                leaf(),
+            ],
+        );
+    }
+
+    struct ChurningIds {
+        generation: usize,
+    }
+
+    impl Render for ChurningIds {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let generation = self.generation;
+            div().flex().flex_col().children((0..64).map(move |ix| {
+                div()
+                    .id(("item", generation * 64 + ix))
+                    .h(px(4.))
+                    .child(div().id("inner").size(px(2.)))
+            }))
+        }
+    }
+
+    #[crate::test]
+    fn evicted_nodes_do_not_accumulate_when_ids_change_every_frame(cx: &mut TestAppContext) {
+        let window = cx.open_window(size(px(800.), px(600.)), |_, _| ChurningIds {
+            generation: 0,
+        });
+        let root = window.root(cx).expect("window should have a root");
+        let mut node_counts = Vec::new();
+        for _ in 0..20 {
+            root.update(cx, |view, cx| {
+                view.generation += 1;
+                cx.notify();
+            });
+            let node_count = cx
+                .update_window(window.into(), |_, window, cx| {
+                    window.draw(cx).clear(cx);
+                    window.layout_node_count()
+                })
+                .expect("window should remain open");
+            node_counts.push(node_count);
+        }
+        // Each frame's evicted nodes are kept for the next frame to reuse, and every node
+        // a frame doesn't reuse is removed, so the tree stays the size of one frame.
+        assert!(
+            node_counts.windows(2).all(|pair| pair[0] == pair[1]),
+            "{node_counts:?}"
+        );
+    }
 
     fn direction_style(direction: LayoutDirection) -> Style {
         Style {
@@ -1175,19 +1765,22 @@ mod tests {
     fn direction_defaults_to_ltr_and_inherits_through_overrides() {
         let mut engine = TaffyLayoutEngine::new();
         let inherited_grandchild = engine.request_layout(
-            direction_style(LayoutDirection::Inherit),
+            PathHash::EMPTY,
+            &direction_style(LayoutDirection::Inherit),
             px(16.0),
             1.0,
             &[],
         );
         let rtl_child = engine.request_layout(
-            direction_style(LayoutDirection::RightToLeft),
+            PathHash::EMPTY,
+            &direction_style(LayoutDirection::RightToLeft),
             px(16.0),
             1.0,
             &[inherited_grandchild],
         );
         let root = engine.request_layout(
-            direction_style(LayoutDirection::Inherit),
+            PathHash::EMPTY,
+            &direction_style(LayoutDirection::Inherit),
             px(16.0),
             1.0,
             &[rtl_child],
@@ -1217,21 +1810,24 @@ mod tests {
     fn auto_direction_uses_first_eligible_strong_descendant() {
         let mut engine = TaffyLayoutEngine::new();
         let neutral = engine.request_layout(
-            direction_style(LayoutDirection::Inherit),
+            PathHash::EMPTY,
+            &direction_style(LayoutDirection::Inherit),
             px(16.0),
             1.0,
             &[],
         );
         engine.set_direction_text(neutral, "123 …".into());
         let arabic = engine.request_layout(
-            direction_style(LayoutDirection::Inherit),
+            PathHash::EMPTY,
+            &direction_style(LayoutDirection::Inherit),
             px(16.0),
             1.0,
             &[],
         );
         engine.set_direction_text(arabic, "مرحبا".into());
         let root = engine.request_layout(
-            direction_style(LayoutDirection::Auto),
+            PathHash::EMPTY,
+            &direction_style(LayoutDirection::Auto),
             px(16.0),
             1.0,
             &[neutral, arabic],
@@ -1253,14 +1849,16 @@ mod tests {
     fn auto_direction_excludes_directional_subtrees_and_falls_back_to_ltr() {
         let mut engine = TaffyLayoutEngine::new();
         let explicit_child = engine.request_layout(
-            direction_style(LayoutDirection::RightToLeft),
+            PathHash::EMPTY,
+            &direction_style(LayoutDirection::RightToLeft),
             px(16.0),
             1.0,
             &[],
         );
         engine.set_direction_text(explicit_child, "مرحبا".into());
         let root = engine.request_layout(
-            direction_style(LayoutDirection::Auto),
+            PathHash::EMPTY,
+            &direction_style(LayoutDirection::Auto),
             px(16.0),
             1.0,
             &[explicit_child],
@@ -1282,13 +1880,15 @@ mod tests {
     fn auto_direction_updates_when_source_text_changes() {
         let mut engine = TaffyLayoutEngine::new();
         let text = engine.request_layout(
-            direction_style(LayoutDirection::Inherit),
+            PathHash::EMPTY,
+            &direction_style(LayoutDirection::Inherit),
             px(16.0),
             1.0,
             &[],
         );
         let root = engine.request_layout(
-            direction_style(LayoutDirection::Auto),
+            PathHash::EMPTY,
+            &direction_style(LayoutDirection::Auto),
             px(16.0),
             1.0,
             &[text],
@@ -1323,7 +1923,9 @@ mod tests {
             ..Default::default()
         };
 
-        let padding = style.to_taffy(Pixels(16.0), 1.0).padding;
+        let padding = LayoutStyle::new(&style, Pixels(16.0), 1.0)
+            .to_taffy()
+            .padding;
         let expected_left = 7.0 * (2.5 / 7.5);
         assert_eq!(padding.left, LengthPercentage::length(expected_left));
         assert_eq!(padding.right, LengthPercentage::length(7.0 - expected_left));
@@ -1331,7 +1933,9 @@ mod tests {
         assert_eq!(padding.bottom, LengthPercentage::length(6.5));
 
         style.size.width = Length::Definite(Pixels(100.0).into());
-        let padding = style.to_taffy(Pixels(16.0), 1.0).padding;
+        let padding = LayoutStyle::new(&style, Pixels(16.0), 1.0)
+            .to_taffy()
+            .padding;
         assert_eq!(padding.left, LengthPercentage::length(2.0));
         assert_eq!(padding.right, LengthPercentage::length(5.0));
         assert_eq!(padding.top, LengthPercentage::length(6.5));
@@ -1340,7 +1944,9 @@ mod tests {
         style.size.width = Length::Auto;
         style.padding.top = Pixels(6.75).into();
         style.padding.bottom = Pixels(6.75).into();
-        let padding = style.to_taffy(Pixels(16.0), 2.0).padding;
+        let padding = LayoutStyle::new(&style, Pixels(16.0), 2.0)
+            .to_taffy()
+            .padding;
         assert_eq!(padding.top, LengthPercentage::length(13.5));
         assert_eq!(padding.bottom, LengthPercentage::length(13.5));
     }
