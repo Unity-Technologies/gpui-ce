@@ -859,7 +859,7 @@ mod tests {
         let focus_handle = cx.update(|_, cx| view.read(cx).focus_handle.clone());
         cx.update(|window, cx| {
             window.focus(&focus_handle, cx);
-            window.activate_window();
+            window.activate();
         });
 
         (cx, action_count, secondary_action_count)
@@ -1325,7 +1325,7 @@ mod tests {
         let focus_handle = test.update(cx, |test, _| test.focus_handle.clone());
         cx.update(|window, cx| {
             window.focus(&focus_handle, cx);
-            window.activate_window();
+            window.activate();
         });
 
         cx.simulate_keystrokes("j");
