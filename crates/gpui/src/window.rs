@@ -1020,11 +1020,10 @@ impl Hitbox {
     /// Checks whether this hitbox would be hovered at `position`, regardless of the current input
     /// modality or mouse position.
     pub fn is_hovered_at(&self, position: Point<Pixels>, window: &Window) -> bool {
-        let hit_test = window.rendered_frame.hit_test(position);
-        hit_test
-            .ids
-            .iter()
-            .take(hit_test.hover_hitbox_count)
+        window
+            .rendered_frame
+            .hit_test(position)
+            .iter_hovered()
             .any(|id| self.id == *id)
     }
 
