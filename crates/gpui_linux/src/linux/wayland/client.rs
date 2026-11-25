@@ -2264,9 +2264,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                 if let Some(window) = get_window(&mut state, &surface.id()) {
                     state.mouse_focused_window = Some(window.clone());
 
-                    if state.enter_token.is_some() {
-                        state.enter_token = None;
-                    }
+                    state.enter_token = None;
                     state.restore_cursor_after_hide();
                     if let Some(style) = state.cursor_style {
                         if let Some(cursor_shape_device) = &state.cursor_shape_device {

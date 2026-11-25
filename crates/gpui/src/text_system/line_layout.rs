@@ -657,7 +657,6 @@ pub struct ShapedTextLayout {
 
 impl ShapedTextLayout {
     /// The length of the underlying text, in utf8 bytes.
-    #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {
         self.layout.platform_layout.len()
     }

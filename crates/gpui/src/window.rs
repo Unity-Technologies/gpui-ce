@@ -8501,24 +8501,22 @@ impl Window {
                 .delta
                 .pixel_delta(px(SCROLL_PIXELS_PER_LAYER / SCROLL_LINES))
                 .y;
-            if let Some(inspector) = self.inspector.clone() {
-                inspector.update(cx, |inspector, _cx| {
-                    if let Some(depth) = inspector.pick_depth.as_mut() {
-                        *depth += f32::from(delta_y) / SCROLL_PIXELS_PER_LAYER;
-                        let max_depth = self.mouse_hit_test.entries.len() as f32 - 0.5;
-                        if *depth < 0.0 {
-                            *depth = 0.0;
-                        } else if *depth > max_depth {
-                            *depth = max_depth;
-                        }
-                        if let Some((_, inspector_id)) =
-                            self.hovered_inspector_hitbox(inspector, &self.rendered_frame)
-                        {
-                            inspector.set_active_element_id(inspector_id, self);
-                        }
+            inspector.update(cx, |inspector, _cx| {
+                if let Some(depth) = inspector.pick_depth.as_mut() {
+                    *depth += f32::from(delta_y) / SCROLL_PIXELS_PER_LAYER;
+                    let max_depth = self.mouse_hit_test.entries.len() as f32 - 0.5;
+                    if *depth < 0.0 {
+                        *depth = 0.0;
+                    } else if *depth > max_depth {
+                        *depth = max_depth;
                     }
-                });
-            }
+                    if let Some((_, inspector_id)) =
+                        self.hovered_inspector_hitbox(inspector, &self.rendered_frame)
+                    {
+                        inspector.set_active_element_id(inspector_id, self);
+                    }
+                }
+            });
         }
     }
 
@@ -11877,12 +11875,12 @@ mod content_mask_snapping_tests {
                                 window.scale_factor(),
                             );
                             let count = window.next_frame.scene.len();
-                            window.paint_quad(crate::fill(bounds, crate::red()));
-                            window.paint_quad(crate::outline(
-                                bounds,
-                                crate::red(),
-                                Default::default(),
-                            ));
+                            window.paint_quad(PaintQuad::new(bounds).background(crate::red()));
+                            window.paint_quad(
+                                PaintQuad::new(bounds)
+                                    .border_widths(1f32)
+                                    .border_color(crate::red()),
+                            );
                             assert_eq!(window.next_frame.scene.len(), count);
                         });
                     });
