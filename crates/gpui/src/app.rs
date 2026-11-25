@@ -1,7 +1,8 @@
 use crate::{
     Action, ActionBuildError, ActionRegistry, ActivityGuard, Any, AnyView, AnyWindowHandle,
     AppContext, Arena, ArenaBox, Asset, AssetRegistry, BackgroundExecutor, Bounds, ClipboardItem,
-    ClipboardReadError, ContrastPreference, CursorStyle, DispatchPhase, DisplayId, EventEmitter,
+    ClipboardReadError, ContrastPreference, CursorStyle, DispatchPhase, DisplayChanges, DisplayEvent,
+    DisplayId, EventEmitter,
     ExternalDragPayload, FocusHandle, FocusMap, ForegroundExecutor, Global, HapticFeedbackStyle,
     KeyBinding, KeyContext, Keymap, Keystroke, LayoutId, Menu, MenuItem, OwnedMenu,
     PathPromptOptions, Pixels, Platform, PlatformDisplay, PlatformKeyboardLayout,
@@ -368,6 +369,8 @@ impl Application {
 
         platform.run(Box::new(move || {
             let cx = &mut *this.borrow_mut();
+            // Some platforms only connect to their display server in `run`.
+            cx.displays_changed();
             on_finish_launching(cx);
         }));
 
@@ -439,6 +442,59 @@ impl Application {
 }
 
 type Handler = Box<dyn FnMut(&mut App) -> bool + 'static>;
+type DisplayHandler = Box<dyn FnMut(DisplayEvent, &mut App) -> bool + 'static>;
+
+/// The properties of a display that GPUI reports changes to.
+#[derive(Clone, Copy, PartialEq)]
+struct DisplayState {
+    bounds: Bounds<Pixels>,
+    refresh_interval: Option<Duration>,
+}
+
+impl DisplayState {
+    fn changes_from(&self, previous: &DisplayState) -> DisplayChanges {
+        let mut changes = DisplayChanges::empty();
+        changes.set(DisplayChanges::BOUNDS, self.bounds != previous.bounds);
+        changes.set(
+            DisplayChanges::REFRESH_INTERVAL,
+            self.refresh_interval != previous.refresh_interval,
+        );
+        changes
+    }
+}
+
+fn read_displays(platform: &dyn Platform) -> HashMap<DisplayId, DisplayState> {
+    platform
+        .displays()
+        .into_iter()
+        .map(|display| {
+            let state = DisplayState {
+                bounds: display.bounds(),
+                refresh_interval: display.refresh_interval(),
+            };
+            (display.id(), state)
+        })
+        .collect()
+}
+
+/// The events that turn one snapshot of the connected displays into the next.
+fn display_events(
+    previous: &HashMap<DisplayId, DisplayState>,
+    current: &HashMap<DisplayId, DisplayState>,
+) -> Vec<DisplayEvent> {
+    let removed = previous
+        .keys()
+        .filter(|id| !current.contains_key(id))
+        .map(|id| DisplayEvent::Removed(*id));
+    let added_or_changed = current.iter().filter_map(|(id, state)| {
+        let Some(previous_state) = previous.get(id) else {
+            return Some(DisplayEvent::Added(*id));
+        };
+        let changes = state.changes_from(previous_state);
+        (!changes.is_empty()).then_some(DisplayEvent::Changed { id: *id, changes })
+    });
+    removed.chain(added_or_changed).collect()
+}
 type Listener = Box<dyn FnMut(&dyn Any, &mut App) -> bool + 'static>;
 pub(crate) type KeystrokeObserver =
     Box<dyn FnMut(&KeystrokeEvent, &mut Window, &mut App) -> bool + 'static>;
@@ -895,6 +951,10 @@ pub struct App {
     pub(crate) contrast_preference: ContrastPreference,
     pub(crate) forced_colors: Option<SystemColors>,
     pub(crate) contrast_preference_observers: SubscriberSet<(), Handler>,
+    pub(crate) display_observers: SubscriberSet<(), DisplayHandler>,
+    /// The connected displays, as of the platform's last display change
+    /// notification.
+    displays: HashMap<DisplayId, DisplayState>,
     pub(crate) system_sleep_observers: SubscriberSet<(), Handler>,
     /// Whether the platform sleep callback is registered. It is added with the
     /// first observer, so an app with none never subscribes to sleep events.
@@ -1047,6 +1107,8 @@ impl App {
                 contrast_preference: platform.contrast_preference(),
                 forced_colors: platform.forced_colors(),
                 contrast_preference_observers: SubscriberSet::new(),
+                display_observers: SubscriberSet::new(),
+                displays: read_displays(platform.as_ref()),
                 system_sleep_observers: SubscriberSet::new(),
                 system_sleep_registered: Cell::new(false),
                 system_wake_observers: SubscriberSet::new(),
@@ -1109,6 +1171,15 @@ impl App {
                     cx.thermal_state_observers
                         .clone()
                         .retain(&(), move |callback| (callback)(cx));
+                }
+            }
+        }));
+
+        platform.on_displays_changed(Box::new({
+            let app = Rc::downgrade(&app);
+            move || {
+                if let Some(app) = app.upgrade() {
+                    app.borrow_mut().displays_changed();
                 }
             }
         }));
@@ -1909,6 +1980,57 @@ impl App {
             (),
             Box::new(move |cx| {
                 callback(cx);
+                true
+            }),
+        );
+        activate();
+        subscription
+    }
+
+    pub(crate) fn displays_changed(&mut self) {
+        let current = read_displays(self.platform.as_ref());
+        let events = display_events(&self.displays, &current);
+        self.displays = current;
+        for event in &events {
+            let DisplayEvent::Changed { id, .. } = *event else {
+                continue;
+            };
+            for handle in self.windows() {
+                self.update_window(handle, |_, window, cx| {
+                    if window.display_id == Some(id) {
+                        window.notify_display_observers(cx);
+                    }
+                })
+                .log_err();
+            }
+        }
+        for event in events {
+            self.display_observers
+                .clone()
+                .retain(&(), |callback| (callback)(event, self));
+        }
+    }
+
+    pub(crate) fn knows_display(&self, id: DisplayId) -> bool {
+        self.displays.contains_key(&id)
+    }
+
+    /// The refresh interval of a connected display, as of the platform's last
+    /// display change notification.
+    pub(crate) fn display_refresh_interval(&self, id: DisplayId) -> Option<Duration> {
+        self.displays.get(&id)?.refresh_interval
+    }
+
+    /// Invokes a handler when a display is connected, disconnected, or its
+    /// properties change.
+    pub fn observe_displays<F>(&self, mut callback: F) -> Subscription
+    where
+        F: 'static + FnMut(DisplayEvent, &mut App),
+    {
+        let (subscription, activate) = self.display_observers.insert(
+            (),
+            Box::new(move |event, cx| {
+                callback(event, cx);
                 true
             }),
         );

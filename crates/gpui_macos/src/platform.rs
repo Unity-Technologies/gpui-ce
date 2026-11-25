@@ -168,6 +168,10 @@ define_class!(
         fn thermal_state_change(&self, _: &NSNotification) {
             on_thermal_state_change(self);
         }
+        #[unsafe(method(onScreenParametersChange:))]
+        fn screen_parameters_change(&self, _: &NSNotification) {
+            on_screen_parameters_change(self);
+        }
         #[unsafe(method(onAccessibilityDisplayOptionsChange:))]
         fn accessibility_display_options_change(&self, _: &NSNotification) {
             on_contrast_preference_change(self);
@@ -210,6 +214,7 @@ pub(crate) struct MacPlatformState {
     on_keyboard_layout_change: Option<Box<dyn FnMut()>>,
     on_thermal_state_change: Option<Box<dyn FnMut()>>,
     on_contrast_preference_change: Option<Box<dyn FnMut()>>,
+    on_displays_changed: Option<Box<dyn FnMut()>>,
     on_system_sleep: Option<Box<dyn FnMut()>>,
     on_system_wake: Option<Box<dyn FnMut()>>,
     system_power_observers_registered: bool,
@@ -263,6 +268,7 @@ impl MacPlatform {
             on_keyboard_layout_change: None,
             on_thermal_state_change: None,
             on_contrast_preference_change: None,
+            on_displays_changed: None,
             on_system_sleep: None,
             on_system_wake: None,
             system_power_observers_registered: false,
@@ -664,6 +670,10 @@ impl Platform for MacPlatform {
         MacDisplay::all()
             .map(|screen| Rc::new(screen) as Rc<_>)
             .collect()
+    }
+
+    fn on_displays_changed(&self, callback: Box<dyn FnMut()>) {
+        self.0.lock().on_displays_changed = Some(callback);
     }
 
     #[cfg(feature = "screen-capture")]
@@ -1385,6 +1395,17 @@ fn did_finish_launching(this: &GPUIApplicationDelegate) {
         );
     }
 
+    // Posted when a display is connected, disconnected, rearranged, or
+    // changes mode, which includes its refresh rate.
+    let screen_parameters_name = ns_string("NSApplicationDidChangeScreenParametersNotification");
+    unsafe {
+        notification_center.addObserver_selector_name_object(
+            as_any_object(this),
+            objc2::sel!(onScreenParametersChange:),
+            Some(&screen_parameters_name),
+            None,
+        );
+    }
     let thermal_name = ns_string("NSProcessInfoThermalStateDidChangeNotification");
     let process_info = NSProcessInfo::processInfo();
     unsafe {
@@ -1510,6 +1531,28 @@ fn on_thermal_state_change(this: &GPUIApplicationDelegate) {
                 .0
                 .lock()
                 .on_thermal_state_change
+                .get_or_insert(callback);
+        }
+    }
+}
+
+fn on_screen_parameters_change(this: &GPUIApplicationDelegate) {
+    // Deferred for the same reason as `on_thermal_state_change`.
+    let platform = get_mac_platform(this);
+    let platform_ptr = platform as *const MacPlatform as *mut c_void;
+    unsafe {
+        DispatchQueue::main().exec_async_f(platform_ptr, on_screen_parameters_change);
+    }
+
+    extern "C" fn on_screen_parameters_change(context: *mut c_void) {
+        let platform = unsafe { &*(context as *const MacPlatform) };
+        let callback = platform.0.lock().on_displays_changed.take();
+        if let Some(mut callback) = callback {
+            callback();
+            platform
+                .0
+                .lock()
+                .on_displays_changed
                 .get_or_insert(callback);
         }
     }
