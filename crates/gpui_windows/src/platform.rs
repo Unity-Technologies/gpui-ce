@@ -219,11 +219,7 @@ impl WindowsPlatform {
     }
 
     pub(crate) fn window_from_hwnd(&self, hwnd: HWND) -> Option<Rc<WindowsWindowInner>> {
-        self.raw_window_handles
-            .read()
-            .iter()
-            .find(|entry| entry.as_raw() == hwnd)
-            .and_then(|hwnd| window_from_hwnd(hwnd.as_raw()))
+        self.inner.window_from_hwnd(hwnd)
     }
 
     #[inline]
@@ -370,22 +366,6 @@ impl WindowsPlatform {
     }
 }
 
-fn translate_accelerator(msg: &MSG) -> Option<()> {
-    if msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN {
-        return None;
-    }
-
-    let result = unsafe {
-        SendMessageW(
-            msg.hwnd,
-            WM_GPUI_KEYDOWN,
-            Some(msg.wParam),
-            Some(msg.lParam),
-        )
-    };
-    (result.0 == 0).then_some(())
-}
-
 fn encode_restart_arguments(arguments: &[OsString]) -> OsString {
     // `Start-Process` accepts a single native command line, so quote each argument according to
     // the Windows argv parsing rules before passing the complete string through the environment.
@@ -491,7 +471,7 @@ impl Platform for WindowsPlatform {
         let mut msg = MSG::default();
         unsafe {
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-                if translate_accelerator(&msg).is_none() {
+                if !self.inner.translate_accelerator(&msg) {
                     _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
@@ -1101,6 +1081,26 @@ impl WindowsPlatformInner {
         Some(0)
     }
 
+    fn window_from_hwnd(&self, hwnd: HWND) -> Option<Rc<WindowsWindowInner>> {
+        self.raw_window_handles
+            .upgrade()?
+            .read()
+            .iter()
+            .find(|window| window.as_raw() == hwnd)
+            .and_then(|window| window_from_hwnd(window.as_raw()))
+    }
+
+    /// Runs GPUI's keydown handling directly rather than through a private
+    /// `WM_USER` message, which foreign software could also send.
+    fn translate_accelerator(&self, msg: &MSG) -> bool {
+        if msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN {
+            return false;
+        }
+
+        self.window_from_hwnd(msg.hwnd)
+            .is_some_and(|window| window.handle_keydown_msg(msg.wParam, msg.lParam) == Some(0))
+    }
+
     fn close_one_window(&self, target_window: HWND) -> bool {
         let Some(all_windows) = self.raw_window_handles.upgrade() else {
             log::error!("Failed to upgrade raw window handles");
@@ -1140,7 +1140,7 @@ impl WindowsPlatformInner {
                     // if we don't we might not for example process window quit events
                     let mut msg = MSG::default();
                     let process_message = |msg: &_| {
-                        if translate_accelerator(msg).is_none() {
+                        if !self.translate_accelerator(msg) {
                             _ = unsafe { TranslateMessage(msg) };
                             unsafe { DispatchMessageW(msg) };
                         }
