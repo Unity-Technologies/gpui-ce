@@ -47,7 +47,6 @@ pub mod profiler;
     feature = "test-support",
     feature = "bench-support"
 ))]
-#[expect(missing_docs)]
 pub mod queue;
 /// A seeded, mutable element tree for benchmarks and tests of GPUI rendering.
 #[cfg(any(test, feature = "bench-support"))]

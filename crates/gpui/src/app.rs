@@ -1,16 +1,16 @@
 use crate::{
     Action, ActionBuildError, ActionRegistry, ActivityGuard, Any, AnyView, AnyWindowHandle,
     AppContext, Arena, ArenaBox, Asset, AssetRegistry, BackgroundExecutor, Bounds, ClipboardItem,
-    ClipboardReadError, ContrastPreference, CursorStyle, DispatchPhase, DisplayChanges, DisplayEvent,
-    DisplayId, EventEmitter,
-    ExternalDragPayload, FocusHandle, FocusMap, ForegroundExecutor, Global, HapticFeedbackStyle,
-    KeyBinding, KeyContext, Keymap, Keystroke, LayoutId, Menu, MenuItem, OwnedMenu,
-    PathPromptOptions, Pixels, Platform, PlatformDisplay, PlatformKeyboardLayout,
-    PlatformKeyboardMapper, Point, Priority, PromptBuilder, PromptButton, PromptHandle,
-    PromptLevel, Render, RenderImage, RenderablePromptHandle, Reservation, ScreenCaptureSource,
-    SharedString, SubscriberSet, Subscription, SvgRenderer, SystemColors, SystemNotification,
-    SystemNotificationResponse, Task, TextRenderingMode, TextSystem, ThermalState, Window,
-    WindowAppearance, WindowButtonLayout, WindowHandle, WindowId, WindowInvalidator,
+    ClipboardReadError, ContrastPreference, CursorStyle, DispatchPhase, DisplayChanges,
+    DisplayEvent, DisplayId, EventEmitter, ExternalDragPayload, FocusHandle, FocusMap,
+    ForegroundExecutor, Global, HapticFeedbackStyle, KeyBinding, KeyContext, Keymap, Keystroke,
+    LayoutId, Menu, MenuItem, OwnedMenu, PathPromptOptions, Pixels, Platform, PlatformDisplay,
+    PlatformKeyboardLayout, PlatformKeyboardMapper, Point, Priority, PromptBuilder, PromptButton,
+    PromptHandle, PromptLevel, Render, RenderImage, RenderablePromptHandle, Reservation,
+    ScreenCaptureSource, SharedString, SubscriberSet, Subscription, SvgRenderer, SystemColors,
+    SystemNotification, SystemNotificationResponse, Task, TextRenderingMode, TextSystem,
+    ThermalState, Window, WindowAppearance, WindowButtonLayout, WindowHandle, WindowId,
+    WindowInvalidator,
     colors::{Colors, GlobalColors},
     hash,
     http_client::{HttpClient, NullHttpClient},
@@ -75,6 +75,7 @@ pub use visual_test_context::*;
 use crate::InspectorElementRegistry;
 #[cfg(target_os = "macos")]
 use crate::MacActivationPolicy;
+use crate::subscription::SingleSubscriberSet;
 
 /// The duration for which native applications wait for futures returned from
 /// [Context::on_app_quit] before fully quitting.
@@ -639,7 +640,7 @@ impl SystemWindowTabController {
 
         let current_group = current_group?;
         // TODO: `.keys()` returns arbitrary order, what does "next" mean?
-        let mut group_ids: Vec<_> = controller.tab_groups.keys().collect();
+        let group_ids: Vec<_> = controller.tab_groups.keys().collect();
         let idx = group_ids.iter().position(|g| *g == current_group)?;
         let next_idx = (idx + 1) % group_ids.len();
 
@@ -668,7 +669,7 @@ impl SystemWindowTabController {
 
         let current_group = current_group?;
         // TODO: `.keys()` returns arbitrary order, what does "previous" mean?
-        let mut group_ids: Vec<_> = controller.tab_groups.keys().collect();
+        let group_ids: Vec<_> = controller.tab_groups.keys().collect();
         let idx = group_ids.iter().position(|g| *g == current_group)?;
         let prev_idx = if idx == 0 {
             group_ids.len() - 1
@@ -696,7 +697,7 @@ impl SystemWindowTabController {
 
     /// Sets tab visibility to `visible`, but only if it has not been set yet.
     pub fn init_visible(cx: &mut App, visible: bool) {
-        let mut controller = cx.global_mut::<SystemWindowTabController>();
+        let controller = cx.global_mut::<SystemWindowTabController>();
         if controller.visible.is_none() {
             controller.visible = Some(visible);
         }
@@ -709,13 +710,13 @@ impl SystemWindowTabController {
 
     /// Shows or hides window tabs.
     pub fn set_visible(cx: &mut App, visible: bool) {
-        let mut controller = cx.global_mut::<SystemWindowTabController>();
+        let controller = cx.global_mut::<SystemWindowTabController>();
         controller.visible = Some(visible);
     }
 
     /// Records that the window `id` is now the active tab, for ordering tab groups.
     pub fn update_last_active(cx: &mut App, id: WindowId) {
-        let mut controller = cx.global_mut::<SystemWindowTabController>();
+        let controller = cx.global_mut::<SystemWindowTabController>();
         for windows in controller.tab_groups.values_mut() {
             for tab in windows.iter_mut() {
                 if tab.id == id {
@@ -729,7 +730,7 @@ impl SystemWindowTabController {
     ///
     /// Does nothing if `ix` is out of range or the tab is already there.
     pub fn update_tab_position(cx: &mut App, id: WindowId, ix: usize) {
-        let mut controller = cx.global_mut::<SystemWindowTabController>();
+        let controller = cx.global_mut::<SystemWindowTabController>();
         for (_, windows) in controller.tab_groups.iter_mut() {
             if let Some(current_pos) = windows.iter().position(|tab| tab.id == id) {
                 if ix < windows.len() && current_pos != ix {
@@ -754,7 +755,7 @@ impl SystemWindowTabController {
             return;
         }
 
-        let mut controller = cx.global_mut::<SystemWindowTabController>();
+        let controller = cx.global_mut::<SystemWindowTabController>();
         for windows in controller.tab_groups.values_mut() {
             for tab in windows.iter_mut() {
                 if tab.id == id {
@@ -770,12 +771,12 @@ impl SystemWindowTabController {
     /// If no existing group holds exactly the other tabs, `tabs` becomes a new group.
     /// Does nothing if `tabs` does not contain `id`.
     pub fn add_tab(cx: &mut App, id: WindowId, tabs: Vec<SystemWindowTab>) {
-        let mut controller = cx.global_mut::<SystemWindowTabController>();
+        let controller = cx.global_mut::<SystemWindowTabController>();
         let Some(tab) = tabs.iter().find(|tab| tab.id == id).cloned() else {
             return;
         };
 
-        let mut expected_tab_ids: Vec<_> = tabs
+        let expected_tab_ids: Vec<_> = tabs
             .iter()
             .filter(|tab| tab.id != id)
             .map(|tab| tab.id)
@@ -805,7 +806,7 @@ impl SystemWindowTabController {
     ///
     /// A group that becomes empty is removed. Returns `None` if `id` is in no group.
     pub fn remove_tab(cx: &mut App, id: WindowId) -> Option<SystemWindowTab> {
-        let mut controller = cx.global_mut::<SystemWindowTabController>();
+        let controller = cx.global_mut::<SystemWindowTabController>();
         let mut removed_tab = None;
 
         controller.tab_groups.retain(|_, tabs| {
@@ -820,8 +821,8 @@ impl SystemWindowTabController {
 
     /// Moves the tab for window `id` out of its group into a new group of its own.
     pub fn move_tab_to_new_window(cx: &mut App, id: WindowId) {
-        let mut removed_tab = Self::remove_tab(cx, id);
-        let mut controller = cx.global_mut::<SystemWindowTabController>();
+        let removed_tab = Self::remove_tab(cx, id);
+        let controller = cx.global_mut::<SystemWindowTabController>();
 
         if let Some(tab) = removed_tab {
             let new_group_id = controller.tab_groups.keys().max().map_or(0, |k| k + 1);
@@ -831,7 +832,7 @@ impl SystemWindowTabController {
 
     /// Merges every tab group into one group, starting with the group that holds `id`.
     pub fn merge_all_windows(cx: &mut App, id: WindowId) {
-        let mut controller = cx.global_mut::<SystemWindowTabController>();
+        let controller = cx.global_mut::<SystemWindowTabController>();
         let Some(initial_tabs) = controller.tabs(id) else {
             return;
         };
@@ -849,7 +850,7 @@ impl SystemWindowTabController {
 
     /// Activates the tab after window `id`'s tab in its group, wrapping around at the end.
     pub fn select_next_tab(cx: &mut App, id: WindowId) {
-        let mut controller = cx.global_mut::<SystemWindowTabController>();
+        let controller = cx.global_mut::<SystemWindowTabController>();
         let Some(tabs) = controller.tabs(id) else {
             return;
         };
@@ -864,7 +865,7 @@ impl SystemWindowTabController {
 
     /// Activates the tab before window `id`'s tab in its group, wrapping around at the start.
     pub fn select_previous_tab(cx: &mut App, id: WindowId) {
-        let mut controller = cx.global_mut::<SystemWindowTabController>();
+        let controller = cx.global_mut::<SystemWindowTabController>();
         let Some(tabs) = controller.tabs(id) else {
             return;
         };
@@ -969,30 +970,30 @@ pub struct App {
 
     pub(crate) observers: SubscriberSet<EntityId, Handler>,
     pub(crate) event_listeners: SubscriberSet<EntityId, (TypeId, Listener)>,
-    pub(crate) keystroke_observers: SubscriberSet<(), KeystrokeObserver>,
-    pub(crate) keystroke_interceptors: SubscriberSet<(), KeystrokeObserver>,
-    pub(crate) keyboard_layout_observers: SubscriberSet<(), Handler>,
-    pub(crate) thermal_state_observers: SubscriberSet<(), Handler>,
+    pub(crate) keystroke_observers: SingleSubscriberSet<KeystrokeObserver>,
+    pub(crate) keystroke_interceptors: SingleSubscriberSet<KeystrokeObserver>,
+    pub(crate) keyboard_layout_observers: SingleSubscriberSet<Handler>,
+    pub(crate) thermal_state_observers: SingleSubscriberSet<Handler>,
     pub(crate) contrast_preference: ContrastPreference,
     pub(crate) forced_colors: Option<SystemColors>,
-    pub(crate) contrast_preference_observers: SubscriberSet<(), Handler>,
-    pub(crate) display_observers: SubscriberSet<(), DisplayHandler>,
+    pub(crate) contrast_preference_observers: SingleSubscriberSet<Handler>,
+    pub(crate) display_observers: SingleSubscriberSet<DisplayHandler>,
     /// The connected displays, as of the platform's last display change
     /// notification.
     displays: HashMap<DisplayId, DisplayState>,
-    pub(crate) system_sleep_observers: SubscriberSet<(), Handler>,
+    pub(crate) system_sleep_observers: SingleSubscriberSet<Handler>,
     /// Whether the platform sleep callback is registered. It is added with the
     /// first observer, so an app with none never subscribes to sleep events.
     system_sleep_registered: Cell<bool>,
-    pub(crate) system_wake_observers: SubscriberSet<(), Handler>,
+    pub(crate) system_wake_observers: SingleSubscriberSet<Handler>,
     /// Whether the platform wake callback is registered. It is added with the
     /// first observer, so an app with none never subscribes to wake events.
     system_wake_registered: Cell<bool>,
     pub(crate) release_listeners: SubscriberSet<EntityId, ReleaseListener>,
     pub(crate) global_observers: SubscriberSet<TypeId, Handler>,
-    pub(crate) quit_observers: SubscriberSet<(), QuitHandler>,
-    pub(crate) restart_observers: SubscriberSet<(), Handler>,
-    pub(crate) window_closed_observers: SubscriberSet<(), WindowClosedHandler>,
+    pub(crate) quit_observers: SingleSubscriberSet<QuitHandler>,
+    pub(crate) restart_observers: SingleSubscriberSet<Handler>,
+    pub(crate) window_closed_observers: SingleSubscriberSet<WindowClosedHandler>,
 
     /// Per-App element arena. This isolates element allocations between different
     /// App instances (important for tests where multiple Apps run concurrently).
@@ -1126,25 +1127,25 @@ impl App {
                 current_window_by_entity: FxHashMap::default(),
                 event_listeners: SubscriberSet::new(),
                 release_listeners: SubscriberSet::new(),
-                keystroke_observers: SubscriberSet::new(),
-                keystroke_interceptors: SubscriberSet::new(),
-                keyboard_layout_observers: SubscriberSet::new(),
-                thermal_state_observers: SubscriberSet::new(),
+                keystroke_observers: SingleSubscriberSet::new(),
+                keystroke_interceptors: SingleSubscriberSet::new(),
+                keyboard_layout_observers: SingleSubscriberSet::new(),
+                thermal_state_observers: SingleSubscriberSet::new(),
                 contrast_preference: platform.contrast_preference(),
                 forced_colors: platform.forced_colors(),
-                contrast_preference_observers: SubscriberSet::new(),
-                display_observers: SubscriberSet::new(),
+                contrast_preference_observers: SingleSubscriberSet::new(),
+                display_observers: SingleSubscriberSet::new(),
                 displays: read_displays(platform.as_ref()),
-                system_sleep_observers: SubscriberSet::new(),
+                system_sleep_observers: SingleSubscriberSet::new(),
                 system_sleep_registered: Cell::new(false),
-                system_wake_observers: SubscriberSet::new(),
+                system_wake_observers: SingleSubscriberSet::new(),
                 system_wake_registered: Cell::new(false),
                 global_observers: SubscriberSet::new(),
-                quit_observers: SubscriberSet::new(),
-                restart_observers: SubscriberSet::new(),
+                quit_observers: SingleSubscriberSet::new(),
+                restart_observers: SingleSubscriberSet::new(),
                 restart_path: None,
                 restart_arguments: Vec::new(),
-                window_closed_observers: SubscriberSet::new(),
+                window_closed_observers: SingleSubscriberSet::new(),
                 layout_id_buffer: Default::default(),
                 propagate_event: true,
                 prompt_builder: Some(PromptBuilder::Default),
@@ -1184,7 +1185,7 @@ impl App {
                     cx.keyboard_mapper = cx.platform.keyboard_mapper();
                     cx.keyboard_layout_observers
                         .clone()
-                        .retain(&(), move |callback| (callback)(cx));
+                        .retain(move |callback| (callback)(cx));
                 }
             }
         }));
@@ -1196,7 +1197,7 @@ impl App {
                     let cx = &mut app.borrow_mut();
                     cx.thermal_state_observers
                         .clone()
-                        .retain(&(), move |callback| (callback)(cx));
+                        .retain(move |callback| (callback)(cx));
                 }
             }
         }));
@@ -1303,7 +1304,7 @@ impl App {
 
         let mut futures: Vec<LocalBoxFuture<'static, ()>> = Vec::new();
 
-        for observer in self.quit_observers.remove(&()) {
+        for observer in self.quit_observers.remove() {
             futures.push(observer(self));
         }
 
@@ -1362,15 +1363,10 @@ impl App {
     where
         F: 'static + FnMut(&mut App),
     {
-        let (subscription, activate) = self.keyboard_layout_observers.insert(
-            (),
-            Box::new(move |cx| {
-                callback(cx);
-                true
-            }),
-        );
-        activate();
-        subscription
+        self.keyboard_layout_observers.insert(Box::new(move |cx| {
+            callback(cx);
+            true
+        }))
     }
 
     /// Asks the platform to quit the app, the same as choosing Quit from the app menu.
@@ -1545,7 +1541,7 @@ impl App {
     }
 
     pub(crate) fn new_observer(&mut self, key: EntityId, value: Handler) -> Subscription {
-        let (subscription, activate) = self.observers.insert(key, value);
+        let (subscription, activate) = self.observers.insert_pending(key, value);
         self.defer(move |_| activate());
         subscription
     }
@@ -1621,7 +1617,7 @@ impl App {
         key: EntityId,
         value: (TypeId, Listener),
     ) -> Subscription {
-        let (subscription, activate) = self.event_listeners.insert(key, value);
+        let (subscription, activate) = self.event_listeners.insert_pending(key, value);
         self.defer(move |_| activate());
         subscription
     }
@@ -1848,15 +1844,10 @@ impl App {
     where
         F: 'static + FnMut(&mut App),
     {
-        let (subscription, activate) = self.thermal_state_observers.insert(
-            (),
-            Box::new(move |cx| {
-                callback(cx);
-                true
-            }),
-        );
-        activate();
-        subscription
+        self.thermal_state_observers.insert(Box::new(move |cx| {
+            callback(cx);
+            true
+        }))
     }
 
     /// Returns the user's system-wide contrast setting.
@@ -1884,13 +1875,12 @@ impl App {
     where
         F: 'static + FnMut(&mut App),
     {
-        let (subscription, activate) = self.contrast_preference_observers.insert(
-            (),
-            Box::new(move |cx| {
-                callback(cx);
-                true
-            }),
-        );
+        let (subscription, activate) =
+            self.contrast_preference_observers
+                .insert_pending(Box::new(move |cx| {
+                    callback(cx);
+                    true
+                }));
         activate();
         subscription
     }
@@ -1910,7 +1900,7 @@ impl App {
         self.forced_colors = forced_colors;
         self.contrast_preference_observers
             .clone()
-            .retain(&(), |callback| (callback)(self));
+            .retain(|callback| (callback)(self));
         self.refresh_windows();
     }
 
@@ -1933,7 +1923,7 @@ impl App {
         fn notify(cx: &mut App) {
             cx.system_wake_observers
                 .clone()
-                .retain(&(), move |callback| (callback)(cx));
+                .retain(move |callback| (callback)(cx));
         }
         let app = self.this.clone();
         let executor = self.foreground_executor.clone();
@@ -1967,7 +1957,7 @@ impl App {
         fn notify(cx: &mut App) {
             cx.system_sleep_observers
                 .clone()
-                .retain(&(), move |callback| (callback)(cx));
+                .retain(move |callback| (callback)(cx));
         }
         let app = self.this.clone();
         let executor = self.foreground_executor.clone();
@@ -2002,13 +1992,12 @@ impl App {
         F: 'static + FnMut(&mut App),
     {
         self.register_system_sleep_handler();
-        let (subscription, activate) = self.system_sleep_observers.insert(
-            (),
-            Box::new(move |cx| {
-                callback(cx);
-                true
-            }),
-        );
+        let (subscription, activate) =
+            self.system_sleep_observers
+                .insert_pending(Box::new(move |cx| {
+                    callback(cx);
+                    true
+                }));
         activate();
         subscription
     }
@@ -2033,7 +2022,7 @@ impl App {
         for event in events {
             self.display_observers
                 .clone()
-                .retain(&(), |callback| (callback)(event, self));
+                .retain(|callback| (callback)(event, self));
         }
     }
 
@@ -2053,15 +2042,10 @@ impl App {
     where
         F: 'static + FnMut(DisplayEvent, &mut App),
     {
-        let (subscription, activate) = self.display_observers.insert(
-            (),
-            Box::new(move |event, cx| {
-                callback(event, cx);
-                true
-            }),
-        );
-        activate();
-        subscription
+        self.display_observers.insert(Box::new(move |event, cx| {
+            callback(event, cx);
+            true
+        }))
     }
 
     /// Calls `callback` when the system wakes from sleep.
@@ -2073,13 +2057,12 @@ impl App {
         F: 'static + FnMut(&mut App),
     {
         self.register_system_wake_handler();
-        let (subscription, activate) = self.system_wake_observers.insert(
-            (),
-            Box::new(move |cx| {
-                callback(cx);
-                true
-            }),
-        );
+        let (subscription, activate) =
+            self.system_wake_observers
+                .insert_pending(Box::new(move |cx| {
+                    callback(cx);
+                    true
+                }));
         activate();
         subscription
     }
@@ -2386,7 +2369,7 @@ impl App {
     pub fn restart(&mut self) {
         self.restart_observers
             .clone()
-            .retain(&(), |observer| observer(self));
+            .retain(|observer| observer(self));
         self.platform.restart(
             self.restart_path.take(),
             std::mem::take(&mut self.restart_arguments),
@@ -2987,7 +2970,7 @@ impl App {
         &mut self,
         mut f: impl FnMut(&mut Self) + 'static,
     ) -> Subscription {
-        let (subscription, activate) = self.global_observers.insert(
+        let (subscription, activate) = self.global_observers.insert_pending(
             TypeId::of::<G>(),
             Box::new(move |cx| {
                 f(cx);
@@ -3022,9 +3005,7 @@ impl App {
         key: TypeId,
         value: NewEntityListener,
     ) -> Subscription {
-        let (subscription, activate) = self.new_entity_observers.insert(key, value);
-        activate();
-        subscription
+        self.new_entity_observers.insert(key, value)
     }
 
     /// Calls `on_new` each time an entity of type `T` is created.
@@ -3065,15 +3046,13 @@ impl App {
     where
         T: 'static,
     {
-        let (subscription, activate) = self.release_listeners.insert(
+        self.release_listeners.insert(
             handle.entity_id(),
             Box::new(move |entity, cx| {
                 let entity = entity.downcast_mut().expect("invalid entity type");
                 on_release(entity, cx)
             }),
-        );
-        activate();
-        subscription
+        )
     }
 
     /// Calls `on_release` when the entity behind `handle` is released, inside `window`.
@@ -3105,22 +3084,11 @@ impl App {
         &mut self,
         mut f: impl FnMut(&KeystrokeEvent, &mut Window, &mut App) + 'static,
     ) -> Subscription {
-        fn inner(
-            keystroke_observers: &SubscriberSet<(), KeystrokeObserver>,
-            handler: KeystrokeObserver,
-        ) -> Subscription {
-            let (subscription, activate) = keystroke_observers.insert((), handler);
-            activate();
-            subscription
-        }
-
-        inner(
-            &self.keystroke_observers,
-            Box::new(move |event, window, cx| {
+        self.keystroke_observers
+            .insert(Box::new(move |event, window, cx| {
                 f(event, window, cx);
                 true
-            }),
-        )
+            }))
     }
 
     /// Calls `f` for every key-down that reaches any window, before it is dispatched.
@@ -3132,22 +3100,11 @@ impl App {
         &mut self,
         mut f: impl FnMut(&KeystrokeEvent, &mut Window, &mut App) + 'static,
     ) -> Subscription {
-        fn inner(
-            keystroke_interceptors: &SubscriberSet<(), KeystrokeObserver>,
-            handler: KeystrokeObserver,
-        ) -> Subscription {
-            let (subscription, activate) = keystroke_interceptors.insert((), handler);
-            activate();
-            subscription
-        }
-
-        inner(
-            &self.keystroke_interceptors,
-            Box::new(move |event, window, cx| {
+        self.keystroke_interceptors
+            .insert(Box::new(move |event, window, cx| {
                 f(event, window, cx);
                 true
-            }),
-        )
+            }))
     }
 
     /// Adds key bindings to the app's keymap and redraws the windows.
@@ -3331,30 +3288,20 @@ impl App {
     where
         Fut: 'static + Future<Output = ()>,
     {
-        let (subscription, activate) = self.quit_observers.insert(
-            (),
-            Box::new(move |cx| {
-                let future = on_quit(cx);
-                future.boxed_local()
-            }),
-        );
-        activate();
-        subscription
+        self.quit_observers.insert(Box::new(move |cx| {
+            let future = on_quit(cx);
+            future.boxed_local()
+        }))
     }
 
     /// Calls `on_restart` when the app is about to restart, before any [`App::on_app_quit`] handlers run.
     ///
     /// Keep the returned [`Subscription`] alive for the callback to run.
     pub fn on_app_restart(&self, mut on_restart: impl 'static + FnMut(&mut App)) -> Subscription {
-        let (subscription, activate) = self.restart_observers.insert(
-            (),
-            Box::new(move |cx| {
-                on_restart(cx);
-                true
-            }),
-        );
-        activate();
-        subscription
+        self.restart_observers.insert(Box::new(move |cx| {
+            on_restart(cx);
+            true
+        }))
     }
 
     /// Calls `on_closed` with the [`WindowId`] each time a window closes.
@@ -3363,11 +3310,9 @@ impl App {
     /// [`Subscription`] alive for the callback to run.
     pub fn on_window_closed(
         &self,
-        mut on_closed: impl FnMut(&mut App, WindowId) + 'static,
+        on_closed: impl FnMut(&mut App, WindowId) + 'static,
     ) -> Subscription {
-        let (subscription, activate) = self.window_closed_observers.insert((), Box::new(on_closed));
-        activate();
-        subscription
+        self.window_closed_observers.insert(Box::new(on_closed))
     }
 
     pub(crate) fn clear_pending_keystrokes(&mut self) {
@@ -3797,7 +3742,7 @@ impl App {
                         }
                     }
 
-                    cx.window_closed_observers.clone().retain(&(), |callback| {
+                    cx.window_closed_observers.clone().retain(|callback| {
                         callback(cx, window_id);
                         true
                     });
@@ -4020,7 +3965,7 @@ impl AppContext for App {
     where
         G: Global,
     {
-        let mut g = self.global::<G>();
+        let g = self.global::<G>();
         callback(g, self)
     }
 
