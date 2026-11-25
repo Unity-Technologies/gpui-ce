@@ -4354,12 +4354,16 @@ impl Window {
 
                 let prepaint_start = self.prepaint_index();
                 if let Some(mut element) = element {
+                    let content_mask =
+                        self.next_frame.deferred_draws[deferred_draw_ix].content_mask;
                     let ((), accessed_entities) = cx.detect_accessed_entities(|cx| {
                         self.with_rendered_view(current_view, |window| {
                             window.with_rem_size(Some(rem_size), |window| {
                                 window.with_absolute_element_offset(absolute_offset, |window| {
                                     crate::DeferredPriorityStackCache::push(priority, cx);
-                                    element.prepaint(window, cx);
+                                    window.with_content_mask(content_mask, |window| {
+                                        element.prepaint(window, cx);
+                                    });
                                     crate::DeferredPriorityStackCache::pop(cx);
                                 });
                             });
