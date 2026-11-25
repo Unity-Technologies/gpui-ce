@@ -12464,7 +12464,7 @@ mod content_mask_snapping_tests {
                         bounds,
                         ..Default::default()
                     };
-                    window.with_content_mask(Some(viewport.clone()), |window| {
+                    window.with_content_mask(Some(viewport), |window| {
                         window.with_content_mask(Some(mask), |window| {
                             assert!(window.content_mask().bounds.is_empty());
                             assert!(
