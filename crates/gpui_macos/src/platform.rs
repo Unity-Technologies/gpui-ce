@@ -1291,11 +1291,14 @@ impl Platform for MacPlatform {
                 // A single SecItemAdd is atomic: an existing item for this server
                 // and account fails with errSecDuplicateItem and is left as is.
                 let status = SecItemAdd(attrs.as_concrete_TypeRef(), ptr::null_mut());
-                match status {
-                    errSecSuccess => Ok(true),
-                    errSecDuplicateItem => Ok(false),
-                    errSecUserCanceled => anyhow::bail!("Keychain access was cancelled."),
-                    _ => anyhow::bail!("creating password failed: {status}"),
+                if status == errSecSuccess {
+                    Ok(true)
+                } else if status == errSecDuplicateItem {
+                    Ok(false)
+                } else if status == errSecUserCanceled {
+                    anyhow::bail!("Keychain access was cancelled.")
+                } else {
+                    anyhow::bail!("creating password failed: {status}")
                 }
             }
         })
