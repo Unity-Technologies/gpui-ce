@@ -66,6 +66,14 @@ impl MacWgpuRenderer {
 
     pub fn set_display_link_attached(&mut self, _attached: bool) {}
 
+    pub fn is_display_link_attached(&self) -> bool {
+        false
+    }
+
+    pub fn presents_with_transaction(&self) -> bool {
+        self.layer.presents_with_transaction()
+    }
+
     pub fn set_frame_drawable(
         &mut self,
         drawable: Option<metal::MetalDrawable>,
