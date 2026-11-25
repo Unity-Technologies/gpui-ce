@@ -44,7 +44,6 @@ x11 = [
   "x11rb",
   "xkbcommon/x11",
   "xim",
-  "x11-clipboard",
   "filedescriptor",
   "open",
 ]
@@ -126,10 +125,9 @@ xim = { workspace = true, optional = true, features = [
   "x11rb-xcb",
   "x11rb-client",
 ] }
-x11-clipboard = { workspace = true, optional = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }
 
 [package.metadata.cargo-shear]
-ignored = ["bitflags", "scap", "x11-clipboard"]
+ignored = ["bitflags", "scap"]

@@ -38,7 +38,6 @@ serde_json_lenient = { workspace = true, features = [
   "raw_value",
 ] }
 shlex.workspace = true
-take-until.workspace = true
 tempfile.workspace = true
 unicase.workspace = true
 url.workspace = true

@@ -44,8 +44,6 @@ pub use gpui_util::*;
 pub use path::PathExt;
 pub use path::rel_path;
 
-pub use take_until::*;
-
 #[cfg(not(target_family = "wasm"))]
 pub use self::shell::{
     get_default_system_shell, get_default_system_shell_preferring_bash, get_system_shell,

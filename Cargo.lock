@@ -2641,7 +2641,6 @@ dependencies = [
  "wayland-protocols",
  "wayland-protocols-plasma",
  "wayland-protocols-wlr",
- "x11-clipboard",
  "x11rb",
  "xkbcommon",
  "zed-xim",
@@ -2981,7 +2980,6 @@ dependencies = [
  "serde_json_lenient",
  "shlex",
  "smol",
- "take-until",
  "tempfile",
  "unicase",
  "url",
@@ -6354,12 +6352,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "take-until"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09d117d3ae1fdf9a0f537a6dd72de7d6e4c21560897d415637923268ca7a3196"
-
-[[package]]
 name = "target-features"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7698,16 +7690,6 @@ name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
-
-[[package]]
-name = "x11-clipboard"
-version = "0.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "662d74b3d77e396b8e5beb00b9cad6a9eccf40b2ef68cc858784b14c41d535a3"
-dependencies = [
- "libc",
- "x11rb",
-]
 
 [[package]]
 name = "x11rb"
