@@ -404,6 +404,8 @@ impl<E: IntoElement + 'static> Element for AnimationElement<E> {
                     .get();
                 (animation_ix, delta, true)
             } else {
+                // The chain can be shorter than on the render that handed off to this index.
+                state.animation_ix = state.animation_ix.min(self.animations.len() - 1);
                 let animation_ix = state.animation_ix;
                 let animation = &self.animations[animation_ix];
                 let elapsed = if animation.synced {
@@ -560,6 +562,25 @@ mod tests {
 
     struct AnimationSequenceTestView {
         rendered_samples: Rc<RefCell<Vec<(usize, f32)>>>,
+    }
+
+    struct AnimationChainTestView {
+        rendered_deltas: Rc<RefCell<Vec<f32>>>,
+        animations: Vec<Animation>,
+    }
+
+    impl Render for AnimationChainTestView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let rendered_deltas = self.rendered_deltas.clone();
+            div().size_full().child(div().with_animations(
+                "animation-chain",
+                self.animations.clone(),
+                move |this, _, delta| {
+                    rendered_deltas.borrow_mut().push(delta);
+                    this
+                },
+            ))
+        }
     }
 
     struct SyncedAnimationTestView {
@@ -982,6 +1003,32 @@ mod tests {
         cx.executor().advance_clock(Duration::from_millis(105));
         cx.run_until_parked();
         assert_deltas_approx_eq(&[0.0, 0.105, 0.21]);
+    }
+
+    #[gpui::test]
+    fn test_chain_can_get_shorter_after_a_hand_off(cx: &mut TestAppContext) {
+        let one_second = || Animation::new(Duration::from_secs(1));
+        let rendered_deltas = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.open_window(size(px(100.), px(100.)), {
+            let rendered_deltas = rendered_deltas.clone();
+            move |_, _| AnimationChainTestView {
+                rendered_deltas,
+                animations: vec![one_second(), one_second()],
+            }
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(1500));
+        assert_eq!(simulate_next_frame(&window, cx), 1);
+
+        cx.executor().advance_clock(Duration::from_millis(250));
+        window
+            .update(cx, |view, _, cx| {
+                view.animations = vec![one_second()];
+                cx.notify();
+            })
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(rendered_deltas.borrow().last(), Some(&0.25));
     }
 
     #[gpui::test]
