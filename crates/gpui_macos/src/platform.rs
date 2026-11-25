@@ -1,6 +1,6 @@
 use crate::{
     MacActivity, MacDispatcher, MacDisplay, MacKeyboardLayout, MacKeyboardMapper, MacWindow,
-    events::key_to_native, haptic_feedback::MacHaptics, pasteboard::Pasteboard, renderer,
+    events::key_to_menu_equivalent, haptic_feedback::MacHaptics, pasteboard::Pasteboard, renderer,
     set_active_window_cursor_style,
 };
 use anyhow::{Context as _, anyhow};
@@ -421,7 +421,7 @@ impl MacPlatform {
                                 NSMenuItem::alloc(marker),
                                 &ns_string(name),
                                 selector,
-                                &ns_string(key_to_native(keystroke.key()).as_ref()),
+                                &ns_string(key_to_menu_equivalent(keystroke.key()).as_ref()),
                             )
                         };
                         if Self::os_version() >= Version::new(12, 0, 0) {
