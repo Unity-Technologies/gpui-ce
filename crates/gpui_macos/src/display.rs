@@ -150,7 +150,8 @@ impl PlatformDisplay for MacDisplay {
             .filter(|screen| screen.respondsToSelector(sel!(maximumFramesPerSecond)))
             .map_or(0.0, |screen| {
                 // SAFETY: the screen responds to `maximumFramesPerSecond`, which returns NSInteger.
-                let frames_per_second: isize = unsafe { msg_send![&*screen, maximumFramesPerSecond] };
+                let frames_per_second: isize =
+                    unsafe { msg_send![&*screen, maximumFramesPerSecond] };
                 frames_per_second as f64
             });
         refresh_interval_from_hz(screen_hertz).or_else(|| {

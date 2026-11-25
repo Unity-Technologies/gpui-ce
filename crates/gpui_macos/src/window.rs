@@ -38,10 +38,10 @@ use objc2_app_kit::{
     NSAlert, NSAlertStyle, NSBackingStoreType, NSBeep, NSButton as Objc2NSButton,
     NSCursorFrameResizeDirections, NSCursorFrameResizePosition, NSEventModifierFlags, NSEventType,
     NSRequestUserAttentionType, NSScreen, NSTrackingArea, NSTrackingAreaOptions,
-    NSView as Objc2NSView, NSViewLayerContentsRedrawPolicy, NSVisualEffectMaterial,
-    NSVisualEffectState, NSWindow as Objc2NSWindow, NSWindowButton as Objc2NSWindowButton,
-    NSWindowCollectionBehavior, NSWindowOcclusionState, NSWindowOrderingMode, NSWindowStyleMask,
-    NSWindowTitleVisibility,
+    NSView as Objc2NSView, NSViewLayerContentsRedrawPolicy, NSVisualEffectBlendingMode,
+    NSVisualEffectMaterial, NSVisualEffectState, NSWindow as Objc2NSWindow,
+    NSWindowButton as Objc2NSWindowButton, NSWindowCollectionBehavior, NSWindowOcclusionState,
+    NSWindowOrderingMode, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{
     NSInteger, NSNotFound, NSOperatingSystemVersion, NSPoint as Objc2NSPoint, NSRange,
@@ -3845,9 +3845,10 @@ extern "C" fn step(view: *mut c_void) {
                 FrameSource::DisplayLink(Some(source)) => source.take_signal(),
                 _ => None,
             }
-            .map_or((None, FrameRequestSource::NativeCallback), |(at, source)| {
-                (Some(at), source)
-            });
+            .map_or(
+                (None, FrameRequestSource::NativeCallback),
+                |(at, source)| (Some(at), source),
+            );
             let request = lock.next_frame_request();
             drop(lock);
             callback(RequestFrameOptions {
@@ -4371,9 +4372,13 @@ unsafe extern "C" fn blurred_view_init_with_frame(
 ) -> ObjcId {
     unsafe {
         let view = msg_send![super(this, class!(NSVisualEffectView)), initWithFrame: frame];
-        // Use a colorless semantic material. The default value `AppearanceBased`, though not
-        // manually set, is deprecated.
-        let _: () = msg_send![view, setMaterial: NSVisualEffectMaterial::Selection];
+        // A window-background material, whose tint and extra saturation
+        // `blurred_view_update_layer` strips, leaving only the blur. `Selection`, used before,
+        // has no `CABackdropLayer` on macOS 27, so nothing behind the window was blurred. (Setting
+        // a material also avoids the deprecated default, `AppearanceBased`.)
+        let _: () = msg_send![view, setMaterial: NSVisualEffectMaterial::UnderWindowBackground];
+        // The default, but blurring what's behind the window is this view's whole purpose.
+        let _: () = msg_send![view, setBlendingMode: NSVisualEffectBlendingMode::BehindWindow];
         let _: () = msg_send![view, setState: NSVisualEffectState::Active];
         view
     }
