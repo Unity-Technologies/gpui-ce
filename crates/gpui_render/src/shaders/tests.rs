@@ -94,10 +94,12 @@ fn vertex_output_shape(module: &naga::Module, entry_name: &str) -> (usize, u32) 
 fn ordinary_vertex_interfaces_stay_within_compact_budgets() {
     let module = naga::front::wgsl::parse_str(&base::WGSL_SOURCE.wgsl_source().unwrap()).unwrap();
     for (entry, maximum_shape) in [
-        ("vertex_quad", (8, 29)),
-        ("vertex_shadow", (5, 17)),
-        ("vertex_polychrome_sprite", (3, 7)),
-        ("vertex_blur_composite", (2, 6)),
+        ("vertex_quad", (5, 17)),
+        ("vertex_shadow", (7, 25)),
+        ("vertex_underline", (2, 5)),
+        ("vertex_polychrome_sprite", (3, 4)),
+        ("vertex_surface", (1, 2)),
+        ("vertex_blur_composite", (1, 2)),
     ] {
         let actual_shape = vertex_output_shape(&module, entry);
         assert!(
@@ -252,4 +254,203 @@ fn linear_gradients_preserve_native_dithering() {
     let second = paint_color(paint, vec2f(11.0, 10.0), prepared);
 
     assert_ne!(first.w, second.w);
+}
+
+#[test]
+fn clip_to_mask_keeps_corners_inside_the_mask() {
+    use common::*;
+    use wgsl_rs::std::*;
+
+    let bounds = Bounds {
+        origin: vec2f(10.0, 20.0),
+        size: vec2f(40.0, 20.0),
+    };
+    let mask = Bounds {
+        origin: vec2f(20.0, 0.0),
+        size: vec2f(100.0, 30.0),
+    };
+    let top_left = clip_to_mask(vec2f(0.0, 0.0), bounds, mask);
+    assert_eq!((top_left.position.x, top_left.position.y), (20.0, 20.0));
+    assert_eq!(
+        (top_left.unit_position.x, top_left.unit_position.y),
+        (0.25, 0.0)
+    );
+    let bottom_right = clip_to_mask(vec2f(1.0, 1.0), bounds, mask);
+    assert_eq!(
+        (bottom_right.position.x, bottom_right.position.y),
+        (50.0, 30.0)
+    );
+    assert_eq!(
+        (bottom_right.unit_position.x, bottom_right.unit_position.y),
+        (1.0, 0.5)
+    );
+
+    // A mask inside the bounds becomes the geometry.
+    let inner = Bounds {
+        origin: vec2f(15.0, 25.0),
+        size: vec2f(5.0, 5.0),
+    };
+    let corner = clip_to_mask(vec2f(1.0, 0.0), bounds, inner);
+    assert_eq!((corner.position.x, corner.position.y), (20.0, 25.0));
+
+    // A disjoint mask collapses to zero area, and an empty primitive stays finite.
+    let disjoint = Bounds {
+        origin: vec2f(200.0, 200.0),
+        size: vec2f(10.0, 10.0),
+    };
+    let first = clip_to_mask(vec2f(0.0, 0.0), bounds, disjoint);
+    let last = clip_to_mask(vec2f(1.0, 1.0), bounds, disjoint);
+    assert_eq!(
+        (first.position.x, first.position.y),
+        (last.position.x, last.position.y)
+    );
+    let empty = Bounds {
+        origin: vec2f(5.0, 5.0),
+        size: vec2f(0.0, 0.0),
+    };
+    let degenerate = clip_to_mask(vec2f(1.0, 1.0), empty, mask);
+    assert!(degenerate.unit_position.x.is_finite() && degenerate.unit_position.y.is_finite());
+}
+
+#[test]
+fn simple_primitive_flag_round_trips_the_instance_index() {
+    use common::*;
+
+    for index in [0u32, 1, 4095, SIMPLE_PRIMITIVE_FLAG - 1] {
+        let simple = mark_simple_primitive(index, true);
+        assert!(is_simple_primitive(simple));
+        assert_eq!(primitive_index(simple), index);
+        let shaped = mark_simple_primitive(index, false);
+        assert!(!is_simple_primitive(shaped));
+        assert_eq!(primitive_index(shaped), index);
+    }
+}
+
+/// A dense reference for a Gaussian-blurred rounded rectangle: the exact blur along x of each
+/// horizontal slice, integrated along y with `samples` midpoint samples.
+fn integrated_shadow(
+    center_to_point: wgsl_rs::std::Vec2f,
+    half_size: wgsl_rs::std::Vec2f,
+    corner_radius: f32,
+    standard_deviation: f32,
+    samples: u32,
+) -> f32 {
+    use common::*;
+    use wgsl_rs::std::*;
+
+    let along_x = |x: f32, y: f32| {
+        let beyond = (half_size.y - corner_radius - y.abs()).min(0.0);
+        let curved = half_size.x - corner_radius
+            + (corner_radius * corner_radius - beyond * beyond)
+                .max(0.0)
+                .sqrt();
+        let bounds = vec2f(x - curved, x + curved) * (0.5f32.sqrt() / standard_deviation);
+        let integral = approximate_error_function(bounds);
+        0.5 * (integral.y - integral.x)
+    };
+    let low = center_to_point.y - half_size.y;
+    let high = center_to_point.y + half_size.y;
+    let start = (-3.0 * standard_deviation).clamp(low, high);
+    let end = (3.0 * standard_deviation).clamp(low, high);
+    let step = (end - start) / samples as f32;
+    let mut y = start + step * 0.5;
+    let mut coverage = 0.0;
+    for _ in 0..samples {
+        coverage += along_x(center_to_point.x, center_to_point.y - y)
+            * gaussian(y, standard_deviation)
+            * step;
+        y += step;
+    }
+    coverage
+}
+
+#[test]
+fn levien_shadow_tracks_the_exact_blur() {
+    use common::*;
+    use wgsl_rs::std::*;
+
+    // (width, height, radius, sigma, tolerance). Levien's fit is tight for ordinary shadows
+    // and loosest where the blur is wide against an eccentric shape.
+    for (width, height, radius, sigma, tolerance) in [
+        (50.0, 36.0, 0.0, 2.0, 0.02),
+        (50.0, 36.0, 6.0, 4.0, 0.015),
+        (200.0, 40.0, 8.0, 4.0, 0.015),
+        (300.0, 200.0, 12.0, 10.0, 0.015),
+        (40.0, 40.0, 20.0, 12.0, 0.04),
+        (50.0, 36.0, 18.0, 8.0, 0.08),
+        (50.0, 36.0, 0.0, 20.0, 0.05),
+        (120.0, 20.0, 10.0, 6.0, 0.09),
+    ] {
+        let size = vec2f(width, height);
+        let corners = Corners {
+            top_left: radius,
+            top_right: radius,
+            bottom_right: radius,
+            bottom_left: radius,
+        };
+        let prepared = prepare_blurred_rectangle(size, corners, sigma);
+        let reach = 3.0 * sigma;
+        let mut worst = 0.0f32;
+        let mut x = -width / 2.0 - reach;
+        while x <= width / 2.0 + reach {
+            let mut y = -height / 2.0 - reach;
+            while y <= height / 2.0 + reach {
+                let point = vec2f(x, y);
+                let levien = blurred_rectangle_coverage(point, prepared);
+                assert!(levien.is_finite() && (-0.001..=1.001).contains(&levien));
+                let exact = integrated_shadow(point, size / 2.0, radius, sigma, 256);
+                worst = worst.max((levien - exact).abs());
+                y += 1.5;
+            }
+            x += 1.5;
+        }
+        assert!(
+            worst < tolerance,
+            "{width}x{height} r{radius} sigma {sigma}: Levien drifts {worst} from the exact blur"
+        );
+    }
+}
+
+#[test]
+fn levien_error_function_matches_known_values() {
+    for (input, expected) in [
+        (0.0f32, 0.0f32),
+        (0.5, 0.5205),
+        (1.0, 0.8427),
+        (2.0, 0.9953),
+    ] {
+        let actual = common::levien_error_function(input);
+        assert!((actual - expected).abs() < 0.001, "erf({input}) = {actual}");
+        assert!((common::levien_error_function(-input) + expected).abs() < 0.001);
+    }
+}
+
+#[test]
+fn border_compositing_keeps_the_border_color_over_a_transparent_fill() {
+    use common::*;
+    use wgsl_rs::std::*;
+
+    // A transparent black fill under a white border: every partly covered inner-edge pixel
+    // keeps the border's color and only loses alpha, so the edge never darkens.
+    let fill = vec4f(0.0, 0.0, 0.0, 0.0);
+    for step in 0..=8 {
+        let distance = -1.0 + step as f32 * 0.25;
+        let mut border = vec4f(1.0, 1.0, 1.0, 1.0);
+        border.w *= antialiased_coverage(distance);
+        let color = over(fill, border);
+        assert!((color.w - antialiased_coverage(distance)).abs() < 1e-6);
+        if color.w > 0.0 {
+            assert!(
+                (color.x - 1.0).abs() < 1e-5,
+                "border darkened at {distance}: {color:?}"
+            );
+        }
+    }
+
+    // An opaque fill still blends linearly toward the border across the edge.
+    let fill = vec4f(0.0, 0.0, 1.0, 1.0);
+    let mut border = vec4f(1.0, 0.0, 0.0, 1.0);
+    border.w *= 0.25;
+    let color = over(fill, border);
+    assert!((color.x - 0.25).abs() < 1e-6 && (color.z - 0.75).abs() < 1e-6 && color.w == 1.0);
 }

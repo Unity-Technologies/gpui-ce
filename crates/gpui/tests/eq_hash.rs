@@ -1,8 +1,6 @@
 use std::hash::{BuildHasher, RandomState};
 
-use gpui::{
-    FontId, GlyphId, GlyphRenderMode, PreparedRasterStyle, RenderGlyphParams, point, px,
-};
+use gpui::{FontId, GlyphId, GlyphRenderMode, PreparedRasterStyle, RenderGlyphParams, point, px};
 
 #[test]
 fn pixels_hash_agrees_with_equality_on_signed_zero() {

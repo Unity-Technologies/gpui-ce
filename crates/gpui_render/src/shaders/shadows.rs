@@ -19,8 +19,6 @@ pub mod shadow {
     }
     storage!(group(1), binding(0), SHADOWS: RuntimeArray<Shadow>);
 
-    pub const SHADOW_INTEGRATION_SAMPLE_COUNT: i32 = 4;
-
     pub fn shadow_geometry(shadow: Shadow) -> Bounds {
         if is_enabled(shadow.inset) {
             return shadow.element_bounds;
@@ -42,37 +40,23 @@ pub mod shadow {
         Paint::new(shadow.color, bounds)
     }
 
-    pub fn blurred_shadow_coverage(shadow: Shadow, position: Vec2f) -> f32 {
-        let half_size = Bounds::half_size(shadow.bounds);
-        let center_to_point = position - Bounds::center(shadow.bounds);
-        let corner_radius = pick_corner_radius(center_to_point, shadow.corner_radii);
-        let vertical_minimum = center_to_point.y - half_size.y;
-        let vertical_maximum = center_to_point.y + half_size.y;
-        let integration_radius = GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS * shadow.blur_radius;
-        let integration_start = clamp(-integration_radius, vertical_minimum, vertical_maximum);
-        let integration_end = clamp(integration_radius, vertical_minimum, vertical_maximum);
-        let sample_step =
-            (integration_end - integration_start) / SHADOW_INTEGRATION_SAMPLE_COUNT as f32;
-
-        let mut coverage = 0.0;
-        let mut sample_index = 0;
-        let mut sample_position = integration_start + sample_step * 0.5;
-        while sample_index < SHADOW_INTEGRATION_SAMPLE_COUNT {
-            coverage += integrated_rounded_rectangle_coverage(
-                center_to_point.x,
-                center_to_point.y - sample_position,
-                shadow.blur_radius,
-                corner_radius,
-                half_size,
-            ) * gaussian(sample_position, shadow.blur_radius)
-                * sample_step;
-            sample_position += sample_step;
-            sample_index += 1;
-        }
-        coverage
+    pub fn prepare_shadow_blur(shadow: Shadow) -> PreparedBlurredRectangle {
+        prepare_blurred_rectangle(shadow.bounds.size, shadow.corner_radii, shadow.blur_radius)
     }
 
-    pub fn shadow_coverage(shadow: Shadow, position: Vec2f) -> f32 {
+    pub fn blurred_shadow_coverage(
+        shadow: Shadow,
+        position: Vec2f,
+        prepared: PreparedBlurredRectangle,
+    ) -> f32 {
+        blurred_rectangle_coverage(position - Bounds::center(shadow.bounds), prepared)
+    }
+
+    pub fn shadow_coverage(
+        shadow: Shadow,
+        position: Vec2f,
+        prepared_blur: PreparedBlurredRectangle,
+    ) -> f32 {
         let mut coverage = 0.0;
         if shadow.blur_radius == 0.0 {
             coverage = antialiased_coverage(rounded_rectangle_signed_distance(
@@ -81,7 +65,7 @@ pub mod shadow {
                 shadow.corner_radii,
             ));
         } else {
-            coverage = blurred_shadow_coverage(shadow, position);
+            coverage = blurred_shadow_coverage(shadow, position, prepared_blur);
         }
 
         if is_enabled(shadow.inset) {
@@ -145,7 +129,7 @@ pub mod shadow {
                 }
             }
         } else {
-            coverage = blurred_shadow_coverage(shadow, position);
+            coverage = blurred_shadow_coverage(shadow, position, prepare_shadow_blur(shadow));
         }
 
         if is_enabled(shadow.inset) {
@@ -167,7 +151,6 @@ pub mod shadow {
         pub position: Vec4f,
         pub paint: PreparedPaint,
         pub shadow_id: u32,
-        pub clip_distances: Vec4f,
     }
 
     pub fn prepare_shadow_vertex(
@@ -175,12 +158,15 @@ pub mod shadow {
         instance_id: u32,
         shadow: Shadow,
     ) -> ShadowVertexData {
-        let vertex = rectangle_vertex(vertex_id, shadow_geometry(shadow));
+        let vertex = clipped_rectangle_vertex(
+            vertex_id,
+            shadow_geometry(shadow),
+            shadow.content_mask.bounds,
+        );
         ShadowVertexData {
             position: vertex.clip_position,
             paint: prepare_paint(shadow_paint(shadow)),
             shadow_id: instance_id,
-            clip_distances: clip_distances(vertex.viewport_position, shadow.content_mask.bounds),
         }
     }
 
@@ -190,18 +176,25 @@ pub mod shadow {
         pub position: Vec4f,
         #[location(0)]
         #[interpolate(flat)]
-        pub paint_solid: Vec4f,
+        pub paint_color0: Vec4f,
         #[location(1)]
         #[interpolate(flat)]
-        pub paint_color0: Vec4f,
+        pub paint_color1: Vec4f,
         #[location(2)]
         #[interpolate(flat)]
-        pub paint_color1: Vec4f,
+        pub shadow_id: u32,
         #[location(3)]
         #[interpolate(flat)]
-        pub shadow_id: u32,
+        pub blur_shape: Vec4f,
         #[location(4)]
-        pub clip_distances: Vec4f,
+        #[interpolate(flat)]
+        pub blur_corner_radii: Vec4f,
+        #[location(5)]
+        #[interpolate(flat)]
+        pub blur_exponents: Vec4f,
+        #[location(6)]
+        #[interpolate(flat)]
+        pub blur_scales: Vec4f,
     }
 
     #[vertex]
@@ -211,31 +204,39 @@ pub mod shadow {
     ) -> ShadowVarying {
         let shadow = get!(SHADOWS)[instance_id as usize];
         let vertex = prepare_shadow_vertex(vertex_id, instance_id, shadow);
+        let blur = prepare_shadow_blur(shadow);
         ShadowVarying {
             position: vertex.position,
-            paint_solid: vertex.paint.solid,
             paint_color0: vertex.paint.color0,
             paint_color1: vertex.paint.color1,
             shadow_id: vertex.shadow_id,
-            clip_distances: vertex.clip_distances,
+            blur_shape: blur.shape,
+            blur_corner_radii: blur.corner_radii,
+            blur_exponents: blur.exponents,
+            blur_scales: blur.scales,
         }
     }
 
     #[fragment]
     pub fn fragment_shadow(input: ShadowVarying) -> Vec4f {
-        if is_clipped(input.clip_distances) {
-            return transparent();
-        }
         let shadow = get!(SHADOWS)[input.shadow_id as usize];
         let color = paint_color(
             shadow_paint(shadow),
             input.position.xy(),
-            PreparedPaint::new(input.paint_solid, input.paint_color0, input.paint_color1),
+            PreparedPaint::new(input.paint_color0, input.paint_color1),
         );
         blend_color(
             color,
-            shadow_coverage(shadow, input.position.xy())
-                * ContentMask::alpha(shadow.content_mask, input.position.xy()),
+            shadow_coverage(
+                shadow,
+                input.position.xy(),
+                PreparedBlurredRectangle {
+                    shape: input.blur_shape,
+                    corner_radii: input.blur_corner_radii,
+                    exponents: input.blur_exponents,
+                    scales: input.blur_scales,
+                },
+            ) * ContentMask::alpha(shadow.content_mask, input.position.xy()),
         )
     }
 
@@ -245,31 +246,26 @@ pub mod shadow {
         pub position: Vec4f,
         #[location(0)]
         #[interpolate(flat)]
-        pub paint_solid: Vec4f,
+        pub paint_color0: Vec4f,
         #[location(1)]
         #[interpolate(flat)]
-        pub paint_color0: Vec4f,
+        pub paint_color1: Vec4f,
         #[location(2)]
         #[interpolate(flat)]
-        pub paint_color1: Vec4f,
+        pub shadow_id: u32,
         #[location(3)]
         #[interpolate(flat)]
-        pub shadow_id: u32,
-        #[location(4)]
-        pub clip_distances: Vec4f,
-        #[location(5)]
-        #[interpolate(flat)]
         pub horizontal_corner_reaches: Vec4f,
-        #[location(6)]
+        #[location(4)]
         #[interpolate(flat)]
         pub vertical_corner_reaches: Vec4f,
-        #[location(7)]
+        #[location(5)]
         #[interpolate(flat)]
         pub element_horizontal_corner_reaches: Vec4f,
-        #[location(8)]
+        #[location(6)]
         #[interpolate(flat)]
         pub element_vertical_corner_reaches: Vec4f,
-        #[location(9)]
+        #[location(7)]
         #[interpolate(flat)]
         pub smoothing_factors: Vec4f,
     }
@@ -296,11 +292,9 @@ pub mod shadow {
 
         SmoothedShadowVarying {
             position: vertex.position,
-            paint_solid: vertex.paint.solid,
             paint_color0: vertex.paint.color0,
             paint_color1: vertex.paint.color1,
             shadow_id: vertex.shadow_id,
-            clip_distances: vertex.clip_distances,
             horizontal_corner_reaches: prepared.horizontal_reaches,
             vertical_corner_reaches: prepared.vertical_reaches,
             element_horizontal_corner_reaches: prepared_element.horizontal_reaches,
@@ -311,9 +305,6 @@ pub mod shadow {
 
     #[fragment]
     pub fn fragment_smoothed_shadow(input: SmoothedShadowVarying) -> Vec4f {
-        if is_clipped(input.clip_distances) {
-            return transparent();
-        }
         let shadow = get!(SHADOWS)[input.shadow_id as usize];
         let coverage = smoothed_shadow_coverage(
             shadow,
@@ -334,7 +325,7 @@ pub mod shadow {
         let color = paint_color(
             shadow_paint(shadow),
             input.position.xy(),
-            PreparedPaint::new(input.paint_solid, input.paint_color0, input.paint_color1),
+            PreparedPaint::new(input.paint_color0, input.paint_color1),
         );
         blend_color(
             color,
