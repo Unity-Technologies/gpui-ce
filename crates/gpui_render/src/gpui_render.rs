@@ -3,10 +3,12 @@
 pub mod artifacts;
 pub mod blur;
 mod instances;
+mod scene_depth;
 pub mod shaders;
 mod target_stack;
 
 pub use instances::InstanceRange;
+pub use scene_depth::SceneDepth;
 pub use target_stack::TargetStack;
 
 #[cfg(feature = "swash")]

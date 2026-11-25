@@ -4,9 +4,9 @@ use super::{
     filters::{FILTER_UNIFORMS_PER_COMPOSITE, FrameUniformRequirements},
 };
 use gpui::{
-    ContentMask, Corners, Edges, FilterRenderTarget, MonochromeSprite, PathCurve, PathPaint,
-    PathTile, PolychromeSprite, PrimitiveBatch, Quad, RenderCommand, Scene, ScenePlanRequirements,
-    Shadow, SubpixelSprite, Underline, quad_depth, quad_depth_scale,
+    FilterRenderTarget, MonochromeSprite, PathCurve, PathPaint, PathTile, PolychromeSprite,
+    PrimitiveBatch, Quad, RenderCommand, Scene, ScenePlanRequirements, Shadow, SubpixelSprite,
+    Underline,
 };
 use gpui_render::TargetStack;
 use gpui_render::blur::{FilterCompositeClip, FilterCompositeParameters};
@@ -329,33 +329,22 @@ struct FrameEncoder<'a> {
     instances: InstanceUpload,
 }
 
-/// Depth bookkeeping across a frame's scene passes.
-///
-/// Quad `i` of [`Scene::quads`] draws at `quad_depth(i)`. Every other batch draws at the depth
-/// of the next quad, through the viewport's depth range, so it hides behind that quad and
-/// every later one, and shows in front of earlier ones: the frame's paint order. Opaque fills
-/// write depth first, front to back, so nothing behind them is shaded.
+/// Depth bookkeeping across a frame's scene passes: the shared [`gpui_render::SceneDepth`]
+/// plus the render pass's current viewport depth range.
 pub(super) struct SceneDepth {
-    scale: f32,
-    /// Index of the next quad in paint order.
-    quad_cursor: usize,
-    scene_pass: usize,
+    pub(super) shared: gpui_render::SceneDepth,
     viewport: Option<f32>,
     width: f32,
     height: f32,
-    hides_opaque_rectangles: bool,
 }
 
 impl SceneDepth {
     fn new(renderer: &WgpuRenderer, scene: &Scene) -> Self {
         Self {
-            scale: quad_depth_scale(scene.quads.len()),
-            quad_cursor: 0,
-            scene_pass: 0,
+            shared: gpui_render::SceneDepth::new(scene),
             viewport: None,
             width: renderer.target.width() as f32,
             height: renderer.target.height() as f32,
-            hides_opaque_rectangles: scene.render_plan().requirements().opaque_quad_count > 0,
         }
     }
 
@@ -367,15 +356,6 @@ impl SceneDepth {
             pass.set_viewport(0.0, 0.0, self.width, self.height, minimum, maximum);
             self.viewport = depth;
         }
-    }
-
-    pub(super) fn quad_depth(&self, quad_index: usize) -> f32 {
-        quad_depth(quad_index, self.scale)
-    }
-
-    /// Whether the quad was drawn whole by its pass's opaque fills.
-    pub(super) fn hides(&self, quad: &Quad) -> bool {
-        self.hides_opaque_rectangles && quad.is_opaque_rectangle()
     }
 }
 
@@ -590,7 +570,7 @@ impl<'a> FrameEncoder<'a> {
         drop(pass);
         self.targets.assert_balanced();
         debug_assert_eq!(
-            self.depth.scene_pass + 1,
+            self.depth.shared.scene_pass() + 1,
             self.scene.render_plan().scene_pass_count()
         );
         Ok(())
@@ -599,7 +579,7 @@ impl<'a> FrameEncoder<'a> {
 
 impl SceneDepth {
     fn begin_scene_pass(&mut self) {
-        self.scene_pass += 1;
+        self.shared.begin_scene_pass();
         // A new pass starts with the default viewport.
         self.viewport = None;
     }
@@ -613,37 +593,16 @@ fn draw_opaque_fills(
     instances: &mut InstanceUpload,
     pass: &mut wgpu::RenderPass<'_>,
 ) -> DrawResult {
-    let opaque_quads = scene.render_plan().opaque_quads(depth.scene_pass);
-    if opaque_quads.is_empty() {
+    if scene
+        .render_plan()
+        .opaque_quads(depth.shared.scene_pass())
+        .is_empty()
+    {
         return Ok(());
     }
     depth.set_viewport(pass, None);
-    let fills = opaque_quads.iter().map(|&index| {
-        let index = index as usize;
-        let quad = &scene.quads[index];
-        // An opaque rectangle keeps its own mask, so it covers exactly the pixels it would
-        // cover blended. Other quads fill only their interior, which the blended quad
-        // then skips by failing the depth test.
-        let content_mask = if quad.is_opaque_rectangle() {
-            quad.content_mask
-        } else {
-            let fill = quad
-                .opaque_fill_bounds()
-                .expect("the scene plan lists only quads with an opaque fill");
-            ContentMask {
-                bounds: quad.content_mask.bounds.intersect(&fill),
-                fade_out: Edges::default(),
-            }
-        };
-        Quad {
-            content_mask,
-            border_widths: Edges::default(),
-            corner_radii: Corners::default(),
-            depth: depth.quad_depth(index),
-            ..*quad
-        }
-    });
-    let Some(slice) = instances.write_iter(opaque_quads.len(), fills) else {
+    let fills = depth.shared.opaque_fills(scene);
+    let Some(slice) = instances.write_iter(fills.len(), fills) else {
         return Err(DrawError::CapacityPlanningInvariant);
     };
     renderer.draw_opaque_fills(&slice, pass);
@@ -703,14 +662,8 @@ fn encode_inline_batch(
     instances: &mut InstanceUpload,
     pass: &mut wgpu::RenderPass<'_>,
 ) -> DrawResult {
-    if let PrimitiveBatch::Quads { range, .. } = batch {
-        debug_assert_eq!(range.start, depth.quad_cursor, "quads draw in index order");
-        depth.set_viewport(pass, None);
-        depth.quad_cursor = range.end;
-    } else {
-        let batch_depth = depth.quad_depth(depth.quad_cursor);
-        depth.set_viewport(pass, Some(batch_depth));
-    }
+    let batch_depth = depth.shared.enter_batch(batch);
+    depth.set_viewport(pass, batch_depth);
     match batch {
         PrimitiveBatch::Quads { range, smoothed } => renderer.draw_quads(
             &scene.quads[range.clone()],
