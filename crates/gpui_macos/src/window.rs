@@ -29,7 +29,7 @@ use futures::channel::oneshot;
 use gpui_apple::display_link::MetalFrameSource;
 use gpui_util::ResultExt;
 use objc2::{
-    AnyThread, MainThreadMarker, class, msg_send,
+    AnyThread, MainThreadMarker, Message, class, msg_send,
     rc::Retained,
     runtime::{AnyClass, AnyObject as Objc2Object, AnyProtocol, Bool, ClassBuilder, Sel},
     sel,
@@ -47,6 +47,7 @@ use objc2_foundation::{
     NSInteger, NSNotFound, NSOperatingSystemVersion, NSPoint as Objc2NSPoint, NSRange,
     NSRangePointer, NSRect as Objc2NSRect, NSSize, NSString, NSUInteger,
 };
+use objc2_uniform_type_identifiers::{UTType, UTTypeData, UTTypeFolder};
 use parking_lot::Mutex;
 use raw_window_handle as rwh;
 use smallvec::SmallVec;
@@ -2793,24 +2794,28 @@ impl PlatformWindow for MacWindow {
                 // recommendation for large item counts), and by file *type* rather than
                 // `iconForFile:`, which can synchronously hit LaunchServices, network
                 // mounts, or iCloud for every selected path and beachball drag startup.
-                // `iconForFileType:` is deprecated in favor of `iconForContentType:`,
-                // but the replacement requires macOS 11 and we target 10.15.
-                let file_type = if *is_directory {
-                    "public.folder".to_string()
-                } else {
-                    path.extension()
-                        .and_then(|extension| extension.to_str())
-                        .map(|extension| extension.to_string())
-                        .unwrap_or_else(|| "public.data".to_string())
-                };
+                let is_directory = *is_directory;
+                let extension = path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .map(String::from);
                 let provider = RcBlock::new(move || -> ObjcId {
                     let component: ObjcId = msg_send![
                         class!(NSDraggingImageComponent),
                         draggingImageComponentWithKey: NSDraggingImageComponentIconKey
                     ];
                     let workspace: ObjcId = msg_send![class!(NSWorkspace), sharedWorkspace];
-                    let file_type = ns_string(&file_type);
-                    let icon: ObjcId = msg_send![workspace, iconForFileType: &*file_type];
+                    let content_type = if is_directory {
+                        UTTypeFolder.retain()
+                    } else {
+                        extension
+                            .as_ref()
+                            .and_then(|extension| {
+                                UTType::typeWithFilenameExtension(&NSString::from_str(extension))
+                            })
+                            .unwrap_or_else(|| UTTypeData.retain())
+                    };
+                    let icon: ObjcId = msg_send![workspace, iconForContentType: &*content_type];
                     let _: () = msg_send![component, setContents: icon];
                     // Component frames are relative to the item's dragging frame.
                     let _: () = msg_send![
