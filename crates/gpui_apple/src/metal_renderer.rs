@@ -375,12 +375,14 @@ impl MetalRenderer {
         layer.set_device(&device);
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
         layer.set_maximum_drawable_count(3);
-        // Allow texture reading for visual tests (captures screenshots without ScreenCaptureKit)
+        // Allow texture reading for visual tests, benches and `render-to-image`
+        // (captures without ScreenCaptureKit). `test-support` alone only pays the
+        // presentation cost in debug builds, so it is safe to compile in.
         #[cfg(any(
             test,
             feature = "bench-support",
-            feature = "test-support",
-            feature = "render-to-image"
+            feature = "render-to-image",
+            all(feature = "test-support", debug_assertions)
         ))]
         layer.set_framebuffer_only(false);
 

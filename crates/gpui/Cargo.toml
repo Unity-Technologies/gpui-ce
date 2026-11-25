@@ -28,7 +28,6 @@ default = ["font-kit", "wayland", "x11", "windows-manifest"]
 custom-gpu = []
 wgpu-surfaces = []
 test-support = [
-  "leak-detection",
   "collections/test-support",
   "wayland",
   "x11",
@@ -42,7 +41,9 @@ bench-support = ["profiler", "dep:criterion"]
 # Preserve the published feature name while consumers migrate to `bench-support`.
 bench = ["bench-support"]
 inspector = ["gpui_macros/inspector"]
-leak-detection = ["backtrace"]
+# Tracks every entity handle so tests can assert nothing leaked. Also enabled
+# by setting `GPUI_LEAK_DETECTION` when building; see `build.rs`.
+leak-detection = []
 wayland = ["gpui_platform/wayland"]
 x11 = ["gpui_platform/x11"]
 screen-capture = ["dep:windows-capture"]
@@ -62,7 +63,7 @@ doctest = false
 accesskit.workspace = true
 anyhow.workspace = true
 async-task.workspace = true
-backtrace = { workspace = true, optional = true }
+backtrace.workspace = true
 bitflags.workspace = true
 
 collections.workspace = true
