@@ -668,8 +668,8 @@ mod logging_tests {
         }
 
         fn log(&self, record: &Record<'_>) {
-            assert_eq!(record.target(), "gpui_util::lib");
-            assert_eq!(record.module_path(), Some("crates/gpui_util/src/lib.rs"));
+            assert_eq!(record.target(), "gpui_ce_util::lib");
+            assert_eq!(record.module_path(), Some("crates/gpui_ce_util/src/lib.rs"));
             assert_eq!(record.file(), Some(file!()));
             assert_eq!(record.level(), Level::Error);
             RECORDS.with_borrow_mut(|records| {
