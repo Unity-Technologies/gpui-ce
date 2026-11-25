@@ -44,6 +44,10 @@ pub struct ScenePlanRequirements {
     pub isolated_target_count: usize,
     pub uses_offscreen_target: bool,
     pub uses_blur_target: bool,
+    /// Quads that [`ScenePlan::opaque_quads`] lists across every scene pass.
+    pub opaque_quad_count: usize,
+    /// Scene passes with at least one opaque quad.
+    pub opaque_quad_pass_count: usize,
 }
 
 /// A compiled scene command stream, built by [`Scene::finish`] and shared by every renderer.
@@ -53,6 +57,9 @@ pub struct ScenePlan {
     pub(super) commands: Vec<RenderCommand>,
     requirements: ScenePlanRequirements,
     scene_lengths: SceneLengths,
+    // Indices into `Scene::quads`, grouped by scene pass and front to back within a pass.
+    opaque_quads: Vec<u32>,
+    opaque_quad_passes: Vec<Range<usize>>,
 }
 
 impl ScenePlan {
@@ -60,11 +67,20 @@ impl ScenePlan {
         self.commands.clear();
         self.requirements = ScenePlanRequirements::default();
         self.scene_lengths = SceneLengths::default();
+        self.opaque_quads.clear();
+        self.opaque_quad_passes.clear();
     }
 
-    pub(super) fn build(scene: &Scene, mut commands: Vec<RenderCommand>) -> Self {
+    pub(super) fn build(scene: &Scene, storage: ScenePlanStorage) -> Self {
+        let ScenePlanStorage {
+            mut commands,
+            mut opaque_quads,
+            mut opaque_quad_passes,
+        } = storage;
         commands.clear();
         commands.reserve(scene.len());
+        opaque_quads.clear();
+        opaque_quad_passes.clear();
         let mut matched_starts =
             SmallVec::<[bool; 8]>::from_elem(false, scene.filter_boundaries.len());
         let mut pending_starts = SmallVec::<[usize; 4]>::new();
@@ -135,11 +151,57 @@ impl ScenePlan {
         }
 
         requirements.command_count = commands.len();
+        collect_opaque_quads(scene, &commands, &mut opaque_quads, &mut opaque_quad_passes);
+        requirements.opaque_quad_count = opaque_quads.len();
+        requirements.opaque_quad_pass_count = opaque_quad_passes
+            .iter()
+            .filter(|pass| !pass.is_empty())
+            .count();
         Self {
             commands,
             requirements,
             scene_lengths: SceneLengths::for_scene(scene),
+            opaque_quads,
+            opaque_quad_passes,
         }
+    }
+
+    /// Moves the plan's allocations out so the next frame's plan can reuse them.
+    pub(super) fn take_storage(&mut self) -> ScenePlanStorage {
+        ScenePlanStorage {
+            commands: std::mem::take(&mut self.commands),
+            opaque_quads: std::mem::take(&mut self.opaque_quads),
+            opaque_quad_passes: std::mem::take(&mut self.opaque_quad_passes),
+        }
+    }
+
+    /// Number of scene passes: one, plus one after every command for which
+    /// [`RenderCommand::ends_scene_pass`] holds.
+    pub fn scene_pass_count(&self) -> usize {
+        self.opaque_quad_passes.len()
+    }
+
+    /// The quads of one scene pass with an opaque fill region, front to back, as indices
+    /// into [`Scene::quads`]. A depth-buffered renderer draws each one's
+    /// [`Quad::opaque_fill_bounds`](super::Quad::opaque_fill_bounds) first, writing depth,
+    /// then leaves [opaque rectangles](super::Quad::is_opaque_rectangle) out of the pass's
+    /// ordinary quad batches.
+    pub fn opaque_quads(&self, scene_pass: usize) -> &[u32] {
+        self.opaque_quad_passes
+            .get(scene_pass)
+            .map_or(&[], |range| &self.opaque_quads[range.clone()])
+    }
+
+    /// Drops the opaque fill lists, so a depth-buffered renderer draws every quad blended.
+    /// Tests compare both renders to prove the opaque pre-pass changes no pixel.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn forget_opaque_quads(&mut self) {
+        self.opaque_quads.clear();
+        for pass in &mut self.opaque_quad_passes {
+            *pass = 0..0;
+        }
+        self.requirements.opaque_quad_count = 0;
+        self.requirements.opaque_quad_pass_count = 0;
     }
 
     /// Returns the ordered rendering commands.
@@ -159,6 +221,44 @@ impl ScenePlan {
             "scene primitive storage changed after Scene::finish"
         );
     }
+}
+
+/// Allocations a [`ScenePlan`] keeps across frames.
+#[derive(Debug, Default)]
+pub(super) struct ScenePlanStorage {
+    commands: Vec<RenderCommand>,
+    opaque_quads: Vec<u32>,
+    opaque_quad_passes: Vec<Range<usize>>,
+}
+
+/// Groups the opaque quads by scene pass. A scene pass draws into one target with one depth
+/// buffer, so an opaque quad may only hide primitives of its own pass: a backdrop filter
+/// samples what the pass drew before it, and an isolated group composites its own target.
+fn collect_opaque_quads(
+    scene: &Scene,
+    commands: &[RenderCommand],
+    opaque_quads: &mut Vec<u32>,
+    opaque_quad_passes: &mut Vec<Range<usize>>,
+) {
+    let depth_sorted = scene.quads.len() <= super::MAX_DEPTH_SORTED_QUADS;
+    let mut pass_start = 0;
+    for command in commands {
+        if depth_sorted && let RenderCommand::Batch(PrimitiveBatch::Quads { range, .. }) = command {
+            opaque_quads.extend(
+                range
+                    .clone()
+                    .filter(|&index| scene.quads[index].opaque_fill_bounds().is_some())
+                    .map(|index| index as u32),
+            );
+        }
+        if command.ends_scene_pass() {
+            opaque_quads[pass_start..].reverse();
+            opaque_quad_passes.push(pass_start..opaque_quads.len());
+            pass_start = opaque_quads.len();
+        }
+    }
+    opaque_quads[pass_start..].reverse();
+    opaque_quad_passes.push(pass_start..opaque_quads.len());
 }
 
 impl ScenePlanRequirements {
@@ -281,6 +381,18 @@ pub enum RenderCommand {
 }
 
 impl RenderCommand {
+    /// Whether a renderer ends its scene pass at this command and starts a new one after it:
+    /// a backdrop filter reads the target, and an isolated group switches targets on entry
+    /// and exit. Depth-buffered renderers clear depth at the start of every scene pass.
+    pub fn ends_scene_pass(&self) -> bool {
+        match self {
+            Self::Batch(batch) => matches!(batch, PrimitiveBatch::BackdropFilters(_)),
+            Self::BeginFilter { target, .. } | Self::EndFilter { target, .. } => {
+                target.is_isolated()
+            }
+        }
+    }
+
     /// Returns the opening filter boundary carried by a filter command.
     pub fn boundary<'a>(&self, scene: &'a Scene) -> Option<&'a FilterBoundary> {
         match self {

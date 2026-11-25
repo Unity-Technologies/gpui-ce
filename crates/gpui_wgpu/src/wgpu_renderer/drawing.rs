@@ -13,10 +13,14 @@ use super::{
 };
 
 impl WgpuRenderer {
+    /// Draws quads `first_index..` of the scene at their depths, leaving out the opaque
+    /// rectangles the pass's opaque fills already drew.
     pub(super) fn draw_quads(
         &self,
         quads: &[Quad],
+        first_index: usize,
         smoothed: bool,
+        depth: &frame::SceneDepth,
         instances: &mut InstanceUpload,
         pass: &mut wgpu::RenderPass<'_>,
     ) -> frame::DrawResult {
@@ -26,7 +30,42 @@ impl WgpuRenderer {
         } else {
             &pipelines.quads
         };
-        self.draw_instances(quads, pipeline, instances, pass)
+        let count = quads.iter().filter(|quad| !depth.hides(quad)).count();
+        if count == 0 {
+            return Ok(());
+        }
+        let blended = quads
+            .iter()
+            .enumerate()
+            .filter(|(_, quad)| !depth.hides(quad))
+            .map(|(offset, quad)| Quad {
+                depth: depth.quad_depth(first_index + offset),
+                ..*quad
+            });
+        let Some(slice) = instances.write_iter(count, blended) else {
+            return Err(frame::DrawError::CapacityPlanningInvariant);
+        };
+        self.draw_bound_slice(
+            pipeline,
+            self.resources().instances.bind_group(),
+            &slice,
+            pass,
+        );
+        Ok(())
+    }
+
+    pub(super) fn draw_opaque_fills(
+        &self,
+        fills: &InstanceSlice<Quad>,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) {
+        let resources = self.resources();
+        self.draw_bound_slice(
+            &resources.pipelines.opaque_quads,
+            resources.instances.bind_group(),
+            fills,
+            pass,
+        );
     }
 
     pub(super) fn draw_shadows(

@@ -100,6 +100,7 @@ macro_rules! define_pipelines {
 define_pipelines! {
     QUADS: "quads", vertex_quad, fragment_quad, TriangleStrip, Instances, Rectangle;
     SMOOTHED_QUADS: "smoothed_quads", vertex_smoothed_quad, fragment_smoothed_quad, TriangleStrip, Instances, Rectangle;
+    OPAQUE_QUADS: "opaque_quads", vertex_opaque_quad, fragment_opaque_quad, TriangleStrip, Instances, Rectangle;
     SHADOWS: "shadows", vertex_shadow, fragment_shadow, TriangleStrip, Instances, Rectangle;
     SMOOTHED_SHADOWS: "smoothed_shadows", vertex_smoothed_shadow, fragment_smoothed_shadow, TriangleStrip, Instances, Rectangle;
     PATH_TILES: "path_tiles", vertex_path_tile, fragment_path_tile, TriangleStrip, PathTiles, Rectangle;

@@ -91,7 +91,7 @@ pub const SCENE_BUFFER_LAYOUTS: &[SceneBufferLayout] = &[
         corner_radii,
         border_widths,
         corner_smoothing,
-        padding
+        depth
     ),
     layout!(
         Shadow,

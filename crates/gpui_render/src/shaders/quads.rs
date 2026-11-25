@@ -17,7 +17,7 @@ pub mod quad {
         pub corner_radii: Corners,
         pub border_widths: Edges,
         pub corner_smoothing: f32,
-        pub padding: u32,
+        pub depth: f32,
     }
     storage!(group(1), binding(0), QUADS: RuntimeArray<Quad>);
 
@@ -512,7 +512,13 @@ pub mod quad {
     pub fn prepare_quad_vertex(vertex_id: u32, instance_id: u32, quad: Quad) -> QuadVertexData {
         let vertex = clipped_rectangle_vertex(vertex_id, quad.bounds, quad.content_mask.bounds);
         QuadVertexData {
-            position: vertex.clip_position,
+            // The renderer's depth for this quad; zero without a depth buffer.
+            position: vec4f(
+                vertex.clip_position.x,
+                vertex.clip_position.y,
+                quad.depth,
+                vertex.clip_position.w,
+            ),
             border: prepare_paint(Paint::new(quad.border_color, quad.bounds)),
             quad_id: instance_id,
             fill: prepare_paint(Paint::new(quad.background, quad.bounds)),
@@ -601,6 +607,36 @@ pub mod quad {
             color = over(fill_color, border_color);
         }
         blend_color(color, antialiased_coverage(distances.outer) * fade)
+    }
+
+    #[derive(Wgsl)]
+    pub struct OpaqueQuadVarying {
+        #[builtin(position)]
+        pub position: Vec4f,
+        #[location(0)]
+        #[interpolate(flat)]
+        pub color: Vec4f,
+    }
+
+    /// Draws a quad's opaque fill region unblended, writing depth, before the blended
+    /// primitives of its pass. The renderer narrows the content mask to that region and
+    /// clears the border and corners, so the color matches `fragment_quad`'s simple path.
+    #[vertex]
+    pub fn vertex_opaque_quad(
+        #[builtin(vertex_index)] vertex_id: u32,
+        #[builtin(instance_index)] instance_id: u32,
+    ) -> OpaqueQuadVarying {
+        let quad = get!(QUADS)[instance_id as usize];
+        let vertex = prepare_quad_vertex(vertex_id, instance_id, quad);
+        OpaqueQuadVarying {
+            position: vertex.position,
+            color: vertex.fill.color0,
+        }
+    }
+
+    #[fragment]
+    pub fn fragment_opaque_quad(input: OpaqueQuadVarying) -> Vec4f {
+        blend_color(input.color, 1.0)
     }
 
     #[derive(Wgsl)]
