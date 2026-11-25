@@ -10220,14 +10220,9 @@ mod tests {
 
         impl Render for NotifiesOnMouseMove {
             fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-                // The fork throttles only next-frame demand, not plain invalidation
-                // (the frame-pacing port owns that), so the input also asks for one.
                 div()
                     .size_full()
-                    .on_mouse_move(cx.listener(|_, _, window, cx| {
-                        window.on_next_frame(|_, _| {});
-                        cx.notify();
-                    }))
+                    .on_mouse_move(cx.listener(|_, _, _, cx| cx.notify()))
             }
         }
 
