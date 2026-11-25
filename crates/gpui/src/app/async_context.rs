@@ -485,6 +485,7 @@ impl AsyncWindowContext {
     /// Returns an error if the window has closed, or if the app is quitting or already
     /// borrowed.
     #[inline(always)]
+    #[track_caller]
     pub fn update<R>(&mut self, update: impl FnOnce(&mut Window, &mut App) -> R) -> Result<R> {
         self.app
             .update_window(self.window, |_, window, cx| update(window, cx))
@@ -496,6 +497,7 @@ impl AsyncWindowContext {
     ///
     /// Returns an error under the same conditions as [`AsyncWindowContext::update`].
     #[inline(always)]
+    #[track_caller]
     pub fn update_root<R>(
         &mut self,
         update: impl FnOnce(AnyView, &mut Window, &mut App) -> R,

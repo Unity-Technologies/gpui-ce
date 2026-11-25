@@ -32,7 +32,7 @@ use slotmap::SlotMap;
 use smallvec::SmallVec;
 use std::{
     any::{TypeId, type_name},
-    cell::{BorrowMutError, Cell, Ref, RefCell, RefMut},
+    cell::{Cell, Ref, RefCell, RefMut},
     ffi::OsString,
     marker::PhantomData,
     mem,
@@ -109,22 +109,42 @@ fn note_app_borrow(delta: isize) {
     APP_BORROWS.with(|borrows| borrows.set(borrows.get().saturating_add_signed(delta)));
 }
 
-impl AppCell {
-    #[cold]
-    #[track_caller]
-    fn borrow_failed(&self, kind: &str) -> ! {
-        let attempted = std::panic::Location::caller();
-        if let Some((origin, existing_kind)) = self.borrow_origin.get() {
-            panic!(
-                "RefCell already borrowed: attempted {kind} App borrow at {attempted}; \
-                 existing {existing_kind} borrow group began at {origin}"
-            );
-        }
-        panic!(
-            "RefCell already borrowed: attempted {kind} App borrow at {attempted}; origin unavailable"
-        );
-    }
+struct AppBorrowError {
+    attempted: &'static std::panic::Location<'static>,
+    kind: &'static str,
+    origin: Option<(&'static std::panic::Location<'static>, &'static str)>,
+}
 
+impl std::fmt::Display for AppBorrowError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            attempted,
+            kind,
+            origin,
+        } = self;
+        write!(
+            formatter,
+            "RefCell already borrowed: attempted {kind} App borrow at {attempted}; "
+        )?;
+        match origin {
+            Some((origin, existing_kind)) => write!(
+                formatter,
+                "existing {existing_kind} borrow group began at {origin}"
+            ),
+            None => write!(formatter, "origin unavailable"),
+        }
+    }
+}
+
+impl std::fmt::Debug for AppBorrowError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, formatter)
+    }
+}
+
+impl std::error::Error for AppBorrowError {}
+
+impl AppCell {
     #[doc(hidden)]
     #[track_caller]
     pub fn borrow(&self) -> AppRef<'_> {
@@ -135,10 +155,16 @@ impl AppCell {
         // Keep the first origin across overlapping shared borrows. The old
         // origin may remain after release; the next group replaces it.
         let starts_borrow_group = self.app.try_borrow_mut().is_ok();
-        let borrow = match self.app.try_borrow() {
-            Ok(borrow) => borrow,
-            Err(_) => self.borrow_failed("shared"),
-        };
+        let attempted = std::panic::Location::caller();
+        let borrow = self
+            .app
+            .try_borrow()
+            .map_err(|_error| AppBorrowError {
+                attempted,
+                kind: "shared",
+                origin: self.borrow_origin.get(),
+            })
+            .unwrap();
         if starts_borrow_group {
             self.borrow_origin
                 .set(Some((std::panic::Location::caller(), "shared")));
@@ -150,20 +176,27 @@ impl AppCell {
     #[doc(hidden)]
     #[track_caller]
     pub fn borrow_mut(&self) -> AppRefMut<'_> {
-        match self.try_borrow_mut() {
-            Ok(borrow) => borrow,
-            Err(_) => self.borrow_failed("mutable"),
-        }
+        self.try_borrow_mut().unwrap()
     }
 
     #[doc(hidden)]
     #[track_caller]
-    pub fn try_borrow_mut(&self) -> Result<AppRefMut<'_>, BorrowMutError> {
+    pub fn try_borrow_mut(&self) -> Result<AppRefMut<'_>> {
         if option_env!("TRACK_THREAD_BORROWS").is_some() {
             let thread_id = std::thread::current().id();
             eprintln!("borrowed {thread_id:?}");
         }
-        let borrow = self.app.try_borrow_mut()?;
+        let borrow = match self.app.try_borrow_mut() {
+            Ok(borrow) => borrow,
+            Err(_error) => {
+                return Err(AppBorrowError {
+                    attempted: std::panic::Location::caller(),
+                    kind: "mutable",
+                    origin: self.borrow_origin.get(),
+                }
+                .into());
+            }
+        };
         self.borrow_origin
             .set(Some((std::panic::Location::caller(), "mutable")));
         note_app_borrow(1);
@@ -4498,7 +4531,19 @@ mod test {
         let first = app.borrow();
         let second = app.borrow();
         drop(first);
-        assert!(app.try_borrow_mut().is_err());
+        // A refused fallible borrow reports where it was attempted and which
+        // borrow group holds the app, so callers that log it stay diagnosable.
+        let refused_line = line!() + 1;
+        let refused = app.try_borrow_mut().err().expect("conflicting borrow");
+        let refused = refused.to_string();
+        assert!(refused.contains(&format!(
+            "attempted mutable App borrow at {}:{refused_line}:",
+            file!()
+        )));
+        assert!(refused.contains(&format!(
+            "shared borrow group began at {}:{first_line}:",
+            file!()
+        )));
         let attempted_line = line!() + 1;
         let panic = catch_unwind(AssertUnwindSafe(|| drop(app.borrow_mut())));
         let message = *panic
