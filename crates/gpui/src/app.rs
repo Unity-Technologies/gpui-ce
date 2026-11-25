@@ -1506,14 +1506,9 @@ impl App {
         &mut self,
         callback: impl FnOnce(&mut App) -> R,
     ) -> (R, FxHashSet<EntityId>) {
-        let outer = mem::take(self.entities.accessed_entities.get_mut());
+        self.entities.push_access_scope();
         let result = callback(self);
-        let accessed = mem::replace(self.entities.accessed_entities.get_mut(), outer);
-        self.entities
-            .accessed_entities
-            .get_mut()
-            .extend(accessed.iter().copied());
-        (result, accessed)
+        (result, self.entities.pop_access_scope())
     }
 
     pub(crate) fn record_entities_accessed(

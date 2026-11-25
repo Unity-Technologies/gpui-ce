@@ -412,6 +412,8 @@ struct ViewElementState {
     prepaint_range: Range<PrepaintStateIndex>,
     paint_range: Range<PaintIndex>,
     cache_key: ViewElementCacheKey,
+    /// The entities the view accessed while it was last drawn, in any phase,
+    /// restored when its prepaint is reused so the window stays subscribed.
     accessed_entities: FxHashSet<EntityId>,
     /// Element states the view's subtree read while the direction probe
     /// rendered it in `request_layout`, before `prepaint_range` began. A reuse
@@ -603,7 +605,7 @@ impl<V: View> Element for ViewElement<V> {
                                 .accessed_element_states
                                 .extend(element_state.layout_element_states.iter().cloned());
                             cx.entities
-                                .extend_accessed(&element_state.accessed_entities);
+                                .extend_accessed(element_state.accessed_entities.iter().copied());
                             window.next_frame.record_view_dependencies(
                                 entity_id,
                                 &element_state.accessed_entities,
@@ -758,7 +760,12 @@ fn paint_view(
 
                     if let Some(element) = element {
                         let refreshing = mem::replace(&mut window.refreshing, true);
-                        element.paint(window, cx);
+                        let ((), accessed_entities) =
+                            cx.detect_accessed_entities(|cx| element.paint(window, cx));
+                        window
+                            .next_frame
+                            .record_view_dependencies(entity_id, &accessed_entities);
+                        element_state.accessed_entities.extend(accessed_entities);
                         window.refreshing = refreshing;
                     } else {
                         window.reuse_paint(element_state.paint_range.clone());
