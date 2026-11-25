@@ -20,6 +20,7 @@ bench-support = [
   "gpui_macos/bench-support",
 ]
 font-kit = ["gpui_macos/font-kit"]
+inspector = ["gpui/inspector"]
 test-support = [
   "gpui/test-support",
   "gpui_apple/test-support",
@@ -50,6 +51,11 @@ windows-wgpu = ["gpui_windows/wgpu"]
 wayland = ["gpui_linux/wayland"]
 x11 = ["gpui_linux/x11"]
 
+[[bench]]
+name = "inspector_render"
+harness = false
+required-features = ["bench-support"]
+
 [dependencies]
 gpui = { workspace = true, default-features = false }
 
@@ -58,6 +64,7 @@ gpui_fonts = { path = "../gpui_ce_fonts", package = "gpui-ce-fonts" }
 gpui_parley.workspace = true
 gpui_render = { workspace = true, features = ["swash"] }
 image = { workspace = true, features = ["png"] }
+criterion.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui_apple.workspace = true
