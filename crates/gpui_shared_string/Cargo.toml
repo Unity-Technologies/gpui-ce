@@ -12,7 +12,7 @@ path = "gpui_shared_string.rs"
 [dependencies]
 schemars.workspace = true
 serde.workspace = true
-smol_str.workspace = true
+smol_str = { workspace = true, features = ["serde"] }
 
 [lints]
 workspace = true
