@@ -1,7 +1,7 @@
 use crate::{
     ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem, ContrastPreference,
-    CursorStyle, DevicePixels, DisplayId, DummyKeyboardMapper, ForegroundExecutor, Keymap, OwnedMenu,
-    Platform, PlatformDisplay, PlatformHeadlessRenderer, PlatformKeyboardLayout,
+    CursorStyle, DevicePixels, DisplayId, DummyKeyboardMapper, ForegroundExecutor, Keymap,
+    OwnedMenu, Platform, PlatformDisplay, PlatformHeadlessRenderer, PlatformKeyboardLayout,
     PlatformKeyboardMapper, PlatformTextSystem, PromptButton, ScreenCaptureFrame,
     ScreenCaptureSource, ScreenCaptureStream, SharedString, SourceMetadata, SystemColors,
     SystemNotification, SystemNotificationResponse, Task, TestDisplay, TestWindow, ThermalState,

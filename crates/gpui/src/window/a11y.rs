@@ -783,8 +783,12 @@ mod tests {
     fn accessibility_enabled_is_independent_of_activation() {
         for force_disabled in [false, true] {
             for active in [false, true] {
-                let mut a11y =
-                    A11y::new(Arc::new(AtomicBool::new(active)), force_disabled, false, None);
+                let mut a11y = A11y::new(
+                    Arc::new(AtomicBool::new(active)),
+                    force_disabled,
+                    false,
+                    None,
+                );
                 a11y.sync_active_flag();
 
                 assert_eq!(a11y.is_enabled(), !force_disabled);
