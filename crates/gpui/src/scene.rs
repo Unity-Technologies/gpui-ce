@@ -291,16 +291,20 @@ impl Scene {
     }
 
     pub fn finish(&mut self) {
-        self.shadows.sort_by_key(|shadow| shadow.order);
-        self.quads.sort_by_key(|quad| quad.order);
+        let keys = &mut Vec::new();
+        sort_in_place(&mut self.shadows, keys, |shadow| (shadow.order, 0));
+        sort_in_place(&mut self.quads, keys, |quad| (quad.order, 0));
         self.paths.sort_by_key(|path| path.order);
-        self.underlines.sort_by_key(|underline| underline.order);
-        self.monochrome_sprites
-            .sort_by_key(|sprite| (sprite.order, sprite.tile.texture_id.index));
-        self.subpixel_sprites
-            .sort_by_key(|sprite| (sprite.order, sprite.tile.texture_id.index));
-        self.polychrome_sprites
-            .sort_by_key(|sprite| (sprite.order, sprite.tile.texture_id.index));
+        sort_in_place(&mut self.underlines, keys, |underline| (underline.order, 0));
+        sort_in_place(&mut self.monochrome_sprites, keys, |sprite| {
+            (sprite.order, sprite.tile.texture_id.index)
+        });
+        sort_in_place(&mut self.subpixel_sprites, keys, |sprite| {
+            (sprite.order, sprite.tile.texture_id.index)
+        });
+        sort_in_place(&mut self.polychrome_sprites, keys, |sprite| {
+            (sprite.order, sprite.tile.texture_id.index)
+        });
         self.surfaces.sort_by_key(|surface| surface.order);
         self.surface_opacities.resize(self.surfaces.len(), 1.0);
         self.backdrop_filters.sort_by_key(|filter| filter.order);
@@ -363,6 +367,46 @@ impl Scene {
     /// Whether rendering needs an offscreen scene target for filters or grouped opacity.
     pub fn requires_offscreen_rendering(&self) -> bool {
         self.render_plan().requirements().uses_offscreen_target
+    }
+}
+
+/// Sorts small `(key, index)` pairs instead of the primitives themselves, then moves each
+/// primitive into place once. Primitives are large, so a comparison sort that shuffles them
+/// directly spends most of its time copying. Ties keep insertion order, as `sort_by_key`
+/// does, because the index is part of what is sorted.
+fn sort_in_place<T: Copy>(
+    primitives: &mut [T],
+    keys: &mut Vec<(u64, u32)>,
+    key: impl Fn(&T) -> (u32, u32),
+) {
+    if primitives.is_sorted_by_key(&key) {
+        return;
+    }
+    keys.clear();
+    keys.extend(primitives.iter().enumerate().map(|(index, primitive)| {
+        let (major, minor) = key(primitive);
+        ((major as u64) << 32 | minor as u64, index as u32)
+    }));
+    keys.sort_unstable();
+
+    // `keys[target].1` is the source index for `target`. Follow each cycle of that
+    // permutation, marking visited slots by pointing them at themselves.
+    for start in 0..primitives.len() {
+        if keys[start].1 as usize == start {
+            continue;
+        }
+        let displaced = primitives[start];
+        let mut target = start;
+        loop {
+            let source = keys[target].1 as usize;
+            keys[target].1 = target as u32;
+            if source == start {
+                primitives[target] = displaced;
+                break;
+            }
+            primitives[target] = primitives[source];
+            target = source;
+        }
     }
 }
 
@@ -1340,6 +1384,27 @@ mod tests {
 
     fn scaled(value: f32) -> ScaledPixels {
         ScaledPixels(value)
+    }
+
+    /// The permutation sort must match a stable `sort_by_key`: ties keep insertion order.
+    #[test]
+    fn sort_in_place_matches_stable_sort_by_key() {
+        let mut keys = Vec::new();
+        let mut seed = 0x9e37_79b9_u32;
+        for len in [0usize, 1, 2, 7, 64, 513] {
+            let mut items = (0..len as u32)
+                .map(|index| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    (seed % 8, seed % 3, index)
+                })
+                .collect::<Vec<_>>();
+            let mut expected = items.clone();
+            expected.sort_by_key(|&(major, minor, _)| (major, minor));
+            sort_in_place(&mut items, &mut keys, |&(major, minor, _)| (major, minor));
+            assert_eq!(items, expected, "len {len}");
+        }
     }
 
     /// Default primitives overlap so their draw orders follow insertion order.
