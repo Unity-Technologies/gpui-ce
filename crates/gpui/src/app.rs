@@ -893,6 +893,10 @@ pub struct App {
     pub(crate) contrast_preference: ContrastPreference,
     pub(crate) forced_colors: Option<SystemColors>,
     pub(crate) contrast_preference_observers: SubscriberSet<(), Handler>,
+    pub(crate) system_sleep_observers: SubscriberSet<(), Handler>,
+    /// Whether the platform sleep callback is registered. It is added with the
+    /// first observer, so an app with none never subscribes to sleep events.
+    system_sleep_registered: Cell<bool>,
     pub(crate) system_wake_observers: SubscriberSet<(), Handler>,
     /// Whether the platform wake callback is registered. It is added with the
     /// first observer, so an app with none never subscribes to wake events.
@@ -1041,6 +1045,8 @@ impl App {
                 contrast_preference: platform.contrast_preference(),
                 forced_colors: platform.forced_colors(),
                 contrast_preference_observers: SubscriberSet::new(),
+                system_sleep_observers: SubscriberSet::new(),
+                system_sleep_registered: Cell::new(false),
                 system_wake_observers: SubscriberSet::new(),
                 system_wake_registered: Cell::new(false),
                 global_observers: SubscriberSet::new(),
@@ -1820,6 +1826,59 @@ impl App {
                 }
             }
         }));
+    }
+
+    fn register_system_sleep_handler(&self) {
+        if self.system_sleep_registered.replace(true) {
+            return;
+        }
+        fn notify(cx: &mut App) {
+            cx.system_sleep_observers
+                .clone()
+                .retain(&(), move |callback| (callback)(cx));
+        }
+        let app = self.this.clone();
+        let executor = self.foreground_executor.clone();
+        self.platform.on_system_sleep(Box::new(move || {
+            let Some(strong) = app.upgrade() else {
+                return;
+            };
+            match strong.try_borrow_mut() {
+                Ok(mut cx) => notify(&mut cx),
+                Err(_) => {
+                    // Same nested-pump case as the wake handler: run the
+                    // observers once the App is free.
+                    let app = app.clone();
+                    executor
+                        .spawn(async move {
+                            if let Some(app) = app.upgrade() {
+                                notify(&mut app.borrow_mut());
+                            }
+                        })
+                        .detach();
+                }
+            }
+        }));
+    }
+
+    /// Invokes a handler when the system is about to sleep.
+    ///
+    /// The platform gives the process only a short time before suspending, so
+    /// handlers should record state or cancel work rather than start it.
+    pub fn on_system_sleep<F>(&self, mut callback: F) -> Subscription
+    where
+        F: 'static + FnMut(&mut App),
+    {
+        self.register_system_sleep_handler();
+        let (subscription, activate) = self.system_sleep_observers.insert(
+            (),
+            Box::new(move |cx| {
+                callback(cx);
+                true
+            }),
+        );
+        activate();
+        subscription
     }
 
     /// Calls `callback` when the system wakes from sleep.

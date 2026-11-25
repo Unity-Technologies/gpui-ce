@@ -7,7 +7,8 @@ use crate::{
     Platform, PlatformHeadlessRenderer, PlatformTextSystem, Point, Render, Result, SharedString,
     Size, SystemColors, SystemNotification, SystemNotificationResponse, Task, TestDispatcher,
     TestPlatform, TestScreenCaptureSource, TestTextSystem, TestWindow, TextSystem, VisualContext,
-    Window, WindowBounds, WindowHandle, WindowOptions, app::GpuiMode, window::ElementArenaScope,
+    Window, WindowBounds, WindowHandle, WindowOptions, WindowVisibility, app::GpuiMode,
+    window::ElementArenaScope,
 };
 use anyhow::{anyhow, bail};
 use futures::{Stream, StreamExt, channel::oneshot};
@@ -604,6 +605,16 @@ impl TestAppContext {
         self.test_window(window_handle).simulate_resize(size);
     }
 
+    /// Simulates a change in whether the platform is presenting the window.
+    pub fn simulate_window_visibility_change(
+        &self,
+        window_handle: AnyWindowHandle,
+        visibility: WindowVisibility,
+    ) {
+        self.test_window(window_handle)
+            .simulate_visibility_change(visibility);
+    }
+
     /// Simulates visible viewport changes without resizing the window's layout area.
     pub fn simulate_window_visual_viewport_change(
         &self,
@@ -1173,6 +1184,11 @@ impl VisualTestContext {
     /// This doesn't paint the window. Call [`VisualTestContext::draw`] to paint at the new size.
     pub fn simulate_resize(&self, size: Size<Pixels>) {
         self.simulate_window_resize(self.window, size)
+    }
+
+    /// Simulates a change in whether the platform is presenting this window.
+    pub fn simulate_visibility_change(&self, visibility: WindowVisibility) {
+        self.simulate_window_visibility_change(self.window, visibility);
     }
 
     /// Changes the window's scale factor, as if it moved to a display with another density.
