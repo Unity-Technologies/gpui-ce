@@ -1780,6 +1780,8 @@ impl Window {
             is_movable,
             app_owns_titlebar_drag,
             inactive_frame_interval,
+            low_power_frame_interval,
+            thermal_frame_interval,
             is_resizable,
             is_minimizable,
             display_id,
@@ -2112,6 +2114,8 @@ impl Window {
                     should_throttle,
                     inactive_without_high_rate_input,
                     inactive_frame_interval,
+                    low_power_frame_interval,
+                    thermal_frame_interval,
                     thermal_state,
                     power_mode,
                 );
@@ -2152,9 +2156,13 @@ impl Window {
                         Instant::now(),
                         if animation_limited {
                             profiler::journal::FrameSkipReason::AnimationFrameRateLimit
-                        } else if inactive_without_high_rate_input {
+                        } else if inactive_without_high_rate_input
+                            && inactive_frame_interval == min_frame_interval
+                        {
                             profiler::journal::FrameSkipReason::InactiveFrameRateLimit
-                        } else if power_mode == crate::PowerMode::LowPower {
+                        } else if power_mode == crate::PowerMode::LowPower
+                            && low_power_frame_interval == min_frame_interval
+                        {
                             profiler::journal::FrameSkipReason::LowPowerFrameRateLimit
                         } else {
                             profiler::journal::FrameSkipReason::ThermalFrameRateLimit
@@ -9196,11 +9204,6 @@ mod pointer_tests;
 /// presents at half the intended rate.
 const FRAME_INTERVAL_TOLERANCE: Duration = Duration::from_millis(1);
 
-/// Frame interval under thermal pressure (~60fps).
-const CONSTRAINED_FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
-/// Frame interval in Low Power Mode (~30fps).
-const LOW_POWER_FRAME_INTERVAL: Duration = Duration::from_micros(33_333);
-
 /// Keeps throttled frames on a stable cadence despite callback delivery jitter.
 #[derive(Default)]
 struct FramePacer {
@@ -9232,38 +9235,35 @@ impl FramePacer {
 }
 
 /// The minimum interval between presented frames, or `None` for no cap.
-/// - Inactive window without high-rate input: `inactive_frame_interval`,
-///   never faster than the Low Power Mode cap while that mode is on.
-/// - Low Power Mode: ~30fps.
-/// - Thermal pressure (Serious/Critical): ~60fps.
+/// Each enabled limit that applies contributes its interval and the longest
+/// wins: the inactive-window, Low Power Mode and thermal-pressure intervals
+/// configured on [`WindowOptions`].
 fn minimum_frame_interval(
     should_throttle: bool,
     inactive_without_high_rate_input: bool,
     inactive_frame_interval: Option<Duration>,
+    low_power_frame_interval: Option<Duration>,
+    thermal_frame_interval: Option<Duration>,
     thermal_state: ThermalState,
     power_mode: crate::PowerMode,
 ) -> Option<Duration> {
-    let low_power_mode_enabled = power_mode == crate::PowerMode::LowPower;
     if !should_throttle {
-        None
-    } else if inactive_without_high_rate_input {
-        match (inactive_frame_interval, low_power_mode_enabled) {
-            (Some(inactive_frame_interval), true) => {
-                Some(inactive_frame_interval.max(LOW_POWER_FRAME_INTERVAL))
-            }
-            (inactive_frame_interval, false) => inactive_frame_interval,
-            (None, true) => Some(LOW_POWER_FRAME_INTERVAL),
-        }
-    } else if low_power_mode_enabled {
-        Some(LOW_POWER_FRAME_INTERVAL)
-    } else if matches!(
-        thermal_state,
-        ThermalState::Critical | ThermalState::Serious
-    ) {
-        Some(CONSTRAINED_FRAME_INTERVAL)
-    } else {
-        None
+        return None;
     }
+
+    [
+        inactive_frame_interval.filter(|_| inactive_without_high_rate_input),
+        low_power_frame_interval.filter(|_| power_mode == crate::PowerMode::LowPower),
+        thermal_frame_interval.filter(|_| {
+            matches!(
+                thermal_state,
+                ThermalState::Critical | ThermalState::Serious
+            )
+        }),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
 }
 
 #[cfg(test)]
@@ -9274,8 +9274,8 @@ mod frame_limiter_tests {
     fn frame_throttle_tracks_display_refreshes() {
         let start = Instant::now();
         for (elapsed, interval) in [
-            (Duration::from_micros(16_666), CONSTRAINED_FRAME_INTERVAL),
-            (Duration::from_micros(33_332), LOW_POWER_FRAME_INTERVAL),
+            (Duration::from_micros(16_666), Duration::from_micros(16_667)),
+            (Duration::from_micros(33_332), Duration::from_micros(33_333)),
         ] {
             let mut pacer = FramePacer::default();
             assert!(!pacer.should_defer(start, Some(interval)));
@@ -9287,7 +9287,7 @@ mod frame_limiter_tests {
     #[test]
     fn frame_throttle_preserves_cadence_without_catching_up_after_stalls() {
         let start = Instant::now();
-        let interval = LOW_POWER_FRAME_INTERVAL;
+        let interval = Duration::from_micros(33_333);
         let mut pacer = FramePacer::default();
         assert!(!pacer.should_defer(start, Some(interval)));
         let delayed_frame = start + interval + Duration::from_millis(5);
@@ -9308,74 +9308,110 @@ mod frame_limiter_tests {
 
     #[test]
     fn power_modes_preserve_frame_limits() {
+        let options = WindowOptions::default();
         for (power_mode, active_interval, thermal_interval) in [
             (
                 crate::PowerMode::LowPower,
-                Some(LOW_POWER_FRAME_INTERVAL),
-                LOW_POWER_FRAME_INTERVAL,
+                Some(Duration::from_micros(33_333)),
+                Duration::from_micros(33_333),
             ),
-            (crate::PowerMode::Unknown, None, CONSTRAINED_FRAME_INTERVAL),
-            (crate::PowerMode::Balanced, None, CONSTRAINED_FRAME_INTERVAL),
+            (
+                crate::PowerMode::Unknown,
+                None,
+                Duration::from_micros(16_667),
+            ),
+            (
+                crate::PowerMode::Balanced,
+                None,
+                Duration::from_micros(16_667),
+            ),
             (
                 crate::PowerMode::HighPower,
                 None,
-                CONSTRAINED_FRAME_INTERVAL,
+                Duration::from_micros(16_667),
             ),
         ] {
             assert_eq!(
-                minimum_frame_interval(true, false, None, ThermalState::Nominal, power_mode),
-                active_interval,
-            );
-            assert_eq!(
-                minimum_frame_interval(true, false, None, ThermalState::Serious, power_mode),
-                Some(thermal_interval),
-            );
-            let inactive_interval = Duration::from_millis(100);
-            assert_eq!(
                 minimum_frame_interval(
                     true,
-                    true,
-                    Some(inactive_interval),
+                    false,
+                    options.inactive_frame_interval,
+                    options.low_power_frame_interval,
+                    options.thermal_frame_interval,
                     ThermalState::Nominal,
                     power_mode,
                 ),
-                Some(inactive_interval),
+                active_interval,
+            );
+            assert_eq!(
+                minimum_frame_interval(
+                    true,
+                    false,
+                    options.inactive_frame_interval,
+                    options.low_power_frame_interval,
+                    options.thermal_frame_interval,
+                    ThermalState::Serious,
+                    power_mode,
+                ),
+                Some(thermal_interval),
             );
         }
     }
 
     #[test]
-    fn low_power_mode_never_lets_an_inactive_window_run_faster() {
-        let fast_inactive = Some(Duration::from_millis(10));
-        assert_eq!(
-            minimum_frame_interval(
-                true,
-                true,
-                fast_inactive,
-                ThermalState::Nominal,
-                crate::PowerMode::LowPower,
-            ),
-            Some(LOW_POWER_FRAME_INTERVAL),
-        );
-        assert_eq!(
-            minimum_frame_interval(
-                true,
-                true,
-                None,
-                ThermalState::Nominal,
-                crate::PowerMode::LowPower,
-            ),
-            Some(LOW_POWER_FRAME_INTERVAL),
-        );
+    fn frame_limits_combine_enabled_intervals() {
+        let short = Some(Duration::from_millis(10));
+        let long = Some(Duration::from_millis(100));
+        for (inactive, low_power, thermal, expected) in [
+            (long, short, short, long),
+            (short, long, short, long),
+            (short, short, long, long),
+            (long, None, None, long),
+            (None, long, None, long),
+            (None, None, long, long),
+            (None, None, None, None),
+        ] {
+            assert_eq!(
+                minimum_frame_interval(
+                    true,
+                    true,
+                    inactive,
+                    low_power,
+                    thermal,
+                    ThermalState::Critical,
+                    crate::PowerMode::LowPower,
+                ),
+                expected,
+            );
+        }
         assert_eq!(
             minimum_frame_interval(
                 false,
                 true,
-                fast_inactive,
+                long,
+                long,
+                long,
                 ThermalState::Critical,
                 crate::PowerMode::LowPower,
             ),
             None,
+        );
+    }
+
+    #[test]
+    fn low_power_mode_never_lets_an_inactive_window_run_faster() {
+        let options = WindowOptions::default();
+        assert_eq!(
+            minimum_frame_interval(
+                true,
+                true,
+                Some(Duration::from_millis(10)),
+                options.low_power_frame_interval,
+                options.thermal_frame_interval,
+                ThermalState::Nominal,
+                crate::PowerMode::LowPower,
+            ),
+            options.low_power_frame_interval,
         );
     }
 }
@@ -10773,6 +10809,38 @@ mod tests {
         cx.simulate_power_mode(crate::PowerMode::Balanced);
         test_window.simulate_frame_request(RequestFrameOptions::default());
         assert_eq!(frames.get(), 2, "leaving Low Power Mode lifts the cap");
+    }
+
+    /// A window that disables the Low Power Mode limit keeps its full rate.
+    #[gpui::test]
+    fn test_low_power_frame_interval_can_be_disabled(cx: &mut TestAppContext) {
+        let window = cx
+            .app
+            .borrow_mut()
+            .open_window(
+                WindowOptions {
+                    low_power_frame_interval: None,
+                    ..Default::default()
+                },
+                |_, cx| cx.new(|_| EmptyView),
+            )
+            .expect("open test window");
+        let test_window = cx.test_window(window.into());
+        test_window.simulate_active_status_change(true);
+        test_window.simulate_frame_request(RequestFrameOptions::default());
+        cx.simulate_power_mode(crate::PowerMode::LowPower);
+
+        let frames = Rc::new(Cell::new(0));
+        for expected in 1..=2 {
+            let frames_handle = frames.clone();
+            window
+                .update(cx, |_, window, _| {
+                    window.on_next_frame(move |_, _| frames_handle.set(frames_handle.get() + 1))
+                })
+                .unwrap();
+            test_window.simulate_frame_request(RequestFrameOptions::default());
+            assert_eq!(frames.get(), expected, "no Low Power Mode limit applies");
+        }
     }
 
     /// Frame limits apply to plain redraws too, not only to next-frame
