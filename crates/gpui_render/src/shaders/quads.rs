@@ -525,23 +525,17 @@ pub mod quad {
         pub position: Vec4f,
         #[location(0)]
         #[interpolate(flat)]
-        pub border_solid: Vec4f,
+        pub quad_id: u32,
         #[location(1)]
         #[interpolate(flat)]
-        pub quad_id: u32,
+        pub fill_color0: Vec4f,
         #[location(2)]
         #[interpolate(flat)]
-        pub fill_solid: Vec4f,
+        pub fill_color1: Vec4f,
         #[location(3)]
         #[interpolate(flat)]
-        pub fill_color0: Vec4f,
-        #[location(4)]
-        #[interpolate(flat)]
-        pub fill_color1: Vec4f,
-        #[location(5)]
-        #[interpolate(flat)]
         pub border_color0: Vec4f,
-        #[location(6)]
+        #[location(4)]
         #[interpolate(flat)]
         pub border_color1: Vec4f,
     }
@@ -553,11 +547,13 @@ pub mod quad {
     ) -> QuadVarying {
         let quad = get!(QUADS)[instance_id as usize];
         let vertex = prepare_quad_vertex(vertex_id, instance_id, quad);
+        let simple = quad.background.tag == BackgroundTag::Solid
+            && Edges::is_zero(quad.border_widths)
+            && Corners::is_zero(quad.corner_radii)
+            && !ContentMask::has_fade(quad.content_mask);
         QuadVarying {
             position: vertex.position,
-            border_solid: vertex.border.solid,
-            quad_id: vertex.quad_id,
-            fill_solid: vertex.fill.solid,
+            quad_id: mark_simple_primitive(vertex.quad_id, simple),
             fill_color0: vertex.fill.color0,
             fill_color1: vertex.fill.color1,
             border_color0: vertex.border.color0,
@@ -567,12 +563,17 @@ pub mod quad {
 
     #[fragment]
     pub fn fragment_quad(input: QuadVarying) -> Vec4f {
-        let quad = get!(QUADS)[input.quad_id as usize];
+        if is_simple_primitive(input.quad_id) {
+            return blend_color(input.fill_color0, 1.0);
+        }
+        // The downlevel transport rewrites only a plain index expression.
+        let index = primitive_index(input.quad_id);
+        let quad = get!(QUADS)[index as usize];
         let fade = ContentMask::alpha(quad.content_mask, input.position.xy());
         let fill_color = paint_color(
             Paint::new(quad.background, quad.bounds),
             input.position.xy(),
-            PreparedPaint::new(input.fill_solid, input.fill_color0, input.fill_color1),
+            PreparedPaint::new(input.fill_color0, input.fill_color1),
         );
         if Edges::is_zero(quad.border_widths) && Corners::is_zero(quad.corner_radii) {
             return blend_color(fill_color, fade);
@@ -589,7 +590,7 @@ pub mod quad {
             let mut border_color = paint_color(
                 Paint::new(quad.border_color, quad.bounds),
                 input.position.xy(),
-                PreparedPaint::new(input.border_solid, input.border_color0, input.border_color1),
+                PreparedPaint::new(input.border_color0, input.border_color1),
             );
             if quad.border_style == BorderStyle::Dashed {
                 border_color.w *= dashed_border_alpha(quad, geometry);
@@ -611,38 +612,32 @@ pub mod quad {
         pub position: Vec4f,
         #[location(0)]
         #[interpolate(flat)]
-        pub border_solid: Vec4f,
+        pub quad_id: u32,
         #[location(1)]
         #[interpolate(flat)]
-        pub quad_id: u32,
+        pub fill_color0: Vec4f,
         #[location(2)]
         #[interpolate(flat)]
-        pub fill_solid: Vec4f,
+        pub fill_color1: Vec4f,
         #[location(3)]
         #[interpolate(flat)]
-        pub fill_color0: Vec4f,
+        pub horizontal_corner_reaches: Vec4f,
         #[location(4)]
         #[interpolate(flat)]
-        pub fill_color1: Vec4f,
+        pub vertical_corner_reaches: Vec4f,
         #[location(5)]
         #[interpolate(flat)]
-        pub horizontal_corner_reaches: Vec4f,
+        pub corner_lengths: Vec4f,
         #[location(6)]
         #[interpolate(flat)]
-        pub vertical_corner_reaches: Vec4f,
+        pub smoothing_factors: Vec4f,
         #[location(7)]
         #[interpolate(flat)]
-        pub corner_lengths: Vec4f,
+        pub superellipse_power: f32,
         #[location(8)]
         #[interpolate(flat)]
-        pub smoothing_factors: Vec4f,
-        #[location(9)]
-        #[interpolate(flat)]
-        pub superellipse_power: f32,
-        #[location(10)]
-        #[interpolate(flat)]
         pub border_color0: Vec4f,
-        #[location(11)]
+        #[location(9)]
         #[interpolate(flat)]
         pub border_color1: Vec4f,
     }
@@ -663,9 +658,7 @@ pub mod quad {
 
         SmoothedQuadVarying {
             position: vertex.position,
-            border_solid: vertex.border.solid,
             quad_id: vertex.quad_id,
-            fill_solid: vertex.fill.solid,
             fill_color0: vertex.fill.color0,
             fill_color1: vertex.fill.color1,
             horizontal_corner_reaches: prepared.horizontal_reaches,
@@ -685,7 +678,7 @@ pub mod quad {
         let fill_color = paint_color(
             Paint::new(quad.background, quad.bounds),
             input.position.xy(),
-            PreparedPaint::new(input.fill_solid, input.fill_color0, input.fill_color1),
+            PreparedPaint::new(input.fill_color0, input.fill_color1),
         );
         let prepared = PreparedCorners {
             horizontal_reaches: input.horizontal_corner_reaches,
@@ -785,7 +778,7 @@ pub mod quad {
             let mut border_color = paint_color(
                 Paint::new(quad.border_color, quad.bounds),
                 input.position.xy(),
-                PreparedPaint::new(input.border_solid, input.border_color0, input.border_color1),
+                PreparedPaint::new(input.border_color0, input.border_color1),
             );
             if quad.border_style == BorderStyle::Dashed {
                 border_color.w *= smoothed_dashed_border_alpha(

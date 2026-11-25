@@ -24,6 +24,10 @@ mod source {
     pub const GRADIENT_DITHER_MULTIPLIER_A: f32 = 43758.5453;
     pub const GRADIENT_DITHER_MULTIPLIER_B: f32 = 24634.6345;
     pub const DIAGONAL_STRIPE_ANGLE: f32 = PI / 4.0;
+    /// Set in a varying instance id when the fragment stage can paint the primitive from its
+    /// interpolated values alone, skipping the instance fetch.
+    pub const SIMPLE_PRIMITIVE_FLAG: u32 = 2147483648u32;
+    pub const PRIMITIVE_INDEX_MASK: u32 = 2147483647u32;
     pub const REC_601_LUMA_WEIGHTS: Vec3f = vec3f(0.30, 0.59, 0.11);
     pub const LINEAR_RGB_LUMA_WEIGHTS: Vec3f = vec3f(0.2126, 0.7152, 0.0722);
     pub const SRGB_DECODE_CUTOFF: f32 = 0.04045;
@@ -146,6 +150,10 @@ mod source {
     }
 
     impl ContentMask {
+        pub fn has_fade(content_mask: ContentMask) -> bool {
+            !Edges::is_zero(content_mask.fade_out)
+        }
+
         /// The mask's coverage at the given window-space position: 1 inside,
         /// 0 outside, and a linear ramp to 0 across each edge's fade distance.
         pub fn alpha(content_mask: ContentMask, position: Vec2f) -> f32 {
@@ -274,6 +282,18 @@ mod source {
     pub struct FullscreenVertex {
         pub texture_coordinates: Vec2f,
         pub clip_position: Vec4f,
+    }
+
+    pub fn mark_simple_primitive(instance_id: u32, simple: bool) -> u32 {
+        instance_id | select(0u32, SIMPLE_PRIMITIVE_FLAG, simple)
+    }
+
+    pub fn is_simple_primitive(marked_id: u32) -> bool {
+        (marked_id & SIMPLE_PRIMITIVE_FLAG) != 0u32
+    }
+
+    pub fn primitive_index(marked_id: u32) -> u32 {
+        marked_id & PRIMITIVE_INDEX_MASK
     }
 
     pub fn is_enabled(value: ShaderBool) -> bool {
@@ -649,25 +669,23 @@ mod source {
         }
     }
 
+    /// Per-primitive paint inputs, computed once per vertex. A solid, pattern or checkerboard
+    /// paint keeps its color in `color0`; a gradient keeps both endpoints, already converted to
+    /// its interpolation space.
     #[derive(Clone, Copy, Wgsl)]
     pub struct PreparedPaint {
-        pub solid: Vec4f,
         pub color0: Vec4f,
         pub color1: Vec4f,
     }
 
     impl PreparedPaint {
-        pub fn new(solid: Vec4f, color0: Vec4f, color1: Vec4f) -> PreparedPaint {
-            PreparedPaint {
-                solid,
-                color0,
-                color1,
-            }
+        pub fn new(color0: Vec4f, color1: Vec4f) -> PreparedPaint {
+            PreparedPaint { color0, color1 }
         }
     }
 
     pub fn prepare_paint(paint: Paint) -> PreparedPaint {
-        let mut prepared = PreparedPaint::new(transparent(), transparent(), transparent());
+        let mut prepared = PreparedPaint::new(transparent(), transparent());
 
         if paint.background.tag == BackgroundTag::LinearGradient {
             prepared.color0 = hsla_to_rgba(paint.background.colors[0usize].color);
@@ -680,7 +698,7 @@ mod source {
                 prepared.color1 = linear_srgb_to_oklab(prepared.color1);
             }
         } else {
-            prepared.solid = hsla_to_rgba(paint.background.solid);
+            prepared.color0 = hsla_to_rgba(paint.background.solid);
         }
 
         prepared
@@ -743,11 +761,9 @@ mod source {
         let pattern_interval = (encoded % PATTERN_PACKING_RADIX) / PATTERN_COMPONENT_SCALE;
         let pattern_height = pattern_width + pattern_interval;
         let period = pattern_height * sin(DIAGONAL_STRIPE_ANGLE);
-        let rotation = mat2x2f(
-            vec2f(cos(DIAGONAL_STRIPE_ANGLE), -sin(DIAGONAL_STRIPE_ANGLE)),
-            vec2f(sin(DIAGONAL_STRIPE_ANGLE), cos(DIAGONAL_STRIPE_ANGLE)),
-        );
-        let pattern = (rotation * (position - paint.bounds.origin)).x % period;
+        // Only the rotated x coordinate is used, which reduces the rotation to one dot product.
+        let stripe_direction = vec2f(cos(DIAGONAL_STRIPE_ANGLE), sin(DIAGONAL_STRIPE_ANGLE));
+        let pattern = dot(position - paint.bounds.origin, stripe_direction) % period;
         let distance =
             min(pattern, period - pattern) - period * (pattern_width / pattern_height) / 2.0;
         let mut color = solid;
@@ -765,20 +781,20 @@ mod source {
     }
 
     pub fn paint_color(paint: Paint, position: Vec2f, prepared: PreparedPaint) -> Vec4f {
-        let mut color = prepared.solid;
+        let mut color = prepared.color0;
         #[wgsl_allow(non_literal_match_statement_patterns)]
         match paint.background.tag {
             BackgroundTag::Solid => {
-                color = prepared.solid;
+                color = prepared.color0;
             }
             BackgroundTag::LinearGradient => {
                 color = linear_gradient_color(paint, position, prepared);
             }
             BackgroundTag::PatternSlash => {
-                color = slash_pattern_color(paint, position, prepared.solid);
+                color = slash_pattern_color(paint, position, prepared.color0);
             }
             BackgroundTag::Checkerboard => {
-                color = checkerboard_color(paint, position, prepared.solid);
+                color = checkerboard_color(paint, position, prepared.color0);
             }
         }
         color

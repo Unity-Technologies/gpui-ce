@@ -51,16 +51,22 @@ pub mod underline {
         let underline = get!(UNDERLINES)[instance_id as usize];
         let vertex =
             clipped_rectangle_vertex(vertex_id, underline.bounds, underline.content_mask.bounds);
+        let simple = !is_enabled(underline.wavy) && !ContentMask::has_fade(underline.content_mask);
         UnderlineVarying {
             position: vertex.clip_position,
             color: hsla_to_rgba(underline.color),
-            underline_id: instance_id,
+            underline_id: mark_simple_primitive(instance_id, simple),
         }
     }
 
     #[fragment]
     pub fn fragment_underline(input: UnderlineVarying) -> Vec4f {
-        let underline = get!(UNDERLINES)[input.underline_id as usize];
+        if is_simple_primitive(input.underline_id) {
+            return blend_color(input.color, 1.0);
+        }
+        // The downlevel transport rewrites only a plain index expression.
+        let index = primitive_index(input.underline_id);
+        let underline = get!(UNDERLINES)[index as usize];
         if !is_enabled(underline.wavy) {
             return blend_color(
                 input.color,
@@ -221,6 +227,9 @@ pub mod polychrome_sprite {
         #[location(1)]
         #[interpolate(flat)]
         pub sprite_id: u32,
+        #[location(2)]
+        #[interpolate(flat)]
+        pub opacity: f32,
     }
 
     #[vertex]
@@ -230,20 +239,35 @@ pub mod polychrome_sprite {
     ) -> PolychromeSpriteVarying {
         let sprite = get!(POLYCHROME_SPRITES)[instance_id as usize];
         let vertex = prepare_polychrome_vertex(vertex_id, instance_id, sprite);
+        let simple = Corners::is_zero(sprite.corner_radii)
+            && !is_enabled(sprite.grayscale)
+            && !ContentMask::has_fade(sprite.content_mask);
         PolychromeSpriteVarying {
             position: vertex.position,
             tile_position: vertex.tile_position,
-            sprite_id: vertex.sprite_id,
+            sprite_id: mark_simple_primitive(vertex.sprite_id, simple),
+            opacity: sprite.opacity,
         }
     }
 
     #[fragment]
     pub fn fragment_polychrome_sprite(input: PolychromeSpriteVarying) -> Vec4f {
-        let sprite = get!(POLYCHROME_SPRITES)[input.sprite_id as usize];
+        if is_simple_primitive(input.sprite_id) {
+            let sample = texture_sample_level(
+                POLYCHROME_TEXTURE,
+                POLYCHROME_SAMPLER,
+                input.tile_position,
+                0.0,
+            );
+            return blend_color(sample, input.opacity);
+        }
+        // The downlevel transport rewrites only a plain index expression.
+        let index = primitive_index(input.sprite_id);
+        let sprite = get!(POLYCHROME_SPRITES)[index as usize];
         let color = polychrome_color(sprite, input.tile_position);
         blend_color(
             color,
-            sprite.opacity
+            input.opacity
                 * antialiased_coverage(rounded_rectangle_signed_distance(
                     input.position.xy(),
                     sprite.bounds,

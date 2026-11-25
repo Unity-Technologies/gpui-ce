@@ -94,10 +94,10 @@ fn vertex_output_shape(module: &naga::Module, entry_name: &str) -> (usize, u32) 
 fn ordinary_vertex_interfaces_stay_within_compact_budgets() {
     let module = naga::front::wgsl::parse_str(&base::WGSL_SOURCE.wgsl_source().unwrap()).unwrap();
     for (entry, maximum_shape) in [
-        ("vertex_quad", (7, 25)),
-        ("vertex_shadow", (4, 13)),
+        ("vertex_quad", (5, 17)),
+        ("vertex_shadow", (3, 9)),
         ("vertex_underline", (2, 5)),
-        ("vertex_polychrome_sprite", (2, 3)),
+        ("vertex_polychrome_sprite", (3, 4)),
         ("vertex_surface", (1, 2)),
         ("vertex_blur_composite", (1, 2)),
     ] {
@@ -310,4 +310,18 @@ fn clip_to_mask_keeps_corners_inside_the_mask() {
     };
     let degenerate = clip_to_mask(vec2f(1.0, 1.0), empty, mask);
     assert!(degenerate.unit_position.x.is_finite() && degenerate.unit_position.y.is_finite());
+}
+
+#[test]
+fn simple_primitive_flag_round_trips_the_instance_index() {
+    use common::*;
+
+    for index in [0u32, 1, 4095, SIMPLE_PRIMITIVE_FLAG - 1] {
+        let simple = mark_simple_primitive(index, true);
+        assert!(is_simple_primitive(simple));
+        assert_eq!(primitive_index(simple), index);
+        let shaped = mark_simple_primitive(index, false);
+        assert!(!is_simple_primitive(shaped));
+        assert_eq!(primitive_index(shaped), index);
+    }
 }

@@ -192,14 +192,11 @@ pub mod shadow {
         pub position: Vec4f,
         #[location(0)]
         #[interpolate(flat)]
-        pub paint_solid: Vec4f,
+        pub paint_color0: Vec4f,
         #[location(1)]
         #[interpolate(flat)]
-        pub paint_color0: Vec4f,
-        #[location(2)]
-        #[interpolate(flat)]
         pub paint_color1: Vec4f,
-        #[location(3)]
+        #[location(2)]
         #[interpolate(flat)]
         pub shadow_id: u32,
     }
@@ -213,7 +210,6 @@ pub mod shadow {
         let vertex = prepare_shadow_vertex(vertex_id, instance_id, shadow);
         ShadowVarying {
             position: vertex.position,
-            paint_solid: vertex.paint.solid,
             paint_color0: vertex.paint.color0,
             paint_color1: vertex.paint.color1,
             shadow_id: vertex.shadow_id,
@@ -226,7 +222,7 @@ pub mod shadow {
         let color = paint_color(
             shadow_paint(shadow),
             input.position.xy(),
-            PreparedPaint::new(input.paint_solid, input.paint_color0, input.paint_color1),
+            PreparedPaint::new(input.paint_color0, input.paint_color1),
         );
         blend_color(
             color,
@@ -241,29 +237,26 @@ pub mod shadow {
         pub position: Vec4f,
         #[location(0)]
         #[interpolate(flat)]
-        pub paint_solid: Vec4f,
+        pub paint_color0: Vec4f,
         #[location(1)]
         #[interpolate(flat)]
-        pub paint_color0: Vec4f,
+        pub paint_color1: Vec4f,
         #[location(2)]
         #[interpolate(flat)]
-        pub paint_color1: Vec4f,
+        pub shadow_id: u32,
         #[location(3)]
         #[interpolate(flat)]
-        pub shadow_id: u32,
+        pub horizontal_corner_reaches: Vec4f,
         #[location(4)]
         #[interpolate(flat)]
-        pub horizontal_corner_reaches: Vec4f,
+        pub vertical_corner_reaches: Vec4f,
         #[location(5)]
         #[interpolate(flat)]
-        pub vertical_corner_reaches: Vec4f,
+        pub element_horizontal_corner_reaches: Vec4f,
         #[location(6)]
         #[interpolate(flat)]
-        pub element_horizontal_corner_reaches: Vec4f,
-        #[location(7)]
-        #[interpolate(flat)]
         pub element_vertical_corner_reaches: Vec4f,
-        #[location(8)]
+        #[location(7)]
         #[interpolate(flat)]
         pub smoothing_factors: Vec4f,
     }
@@ -290,7 +283,6 @@ pub mod shadow {
 
         SmoothedShadowVarying {
             position: vertex.position,
-            paint_solid: vertex.paint.solid,
             paint_color0: vertex.paint.color0,
             paint_color1: vertex.paint.color1,
             shadow_id: vertex.shadow_id,
@@ -324,7 +316,7 @@ pub mod shadow {
         let color = paint_color(
             shadow_paint(shadow),
             input.position.xy(),
-            PreparedPaint::new(input.paint_solid, input.paint_color0, input.paint_color1),
+            PreparedPaint::new(input.paint_color0, input.paint_color1),
         );
         blend_color(
             color,
