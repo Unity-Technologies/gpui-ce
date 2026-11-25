@@ -2,25 +2,22 @@
 //!
 //! A headless window has no compositor surface and no GPU: layout, text
 //! shaping, and entity plumbing run normally, `draw` discards the scene, and
-//! the sprite atlas hands out tiles without uploading pixels (mirroring
-//! GPUI's `TestWindow`/`TestAtlas`). This lets command-line tools drive real
-//! `Window`-based code paths without a display server.
+//! the sprite atlas hands out tiles without uploading pixels (the same
+//! `HeadlessAtlas` GPUI's `TestWindow` uses). This lets command-line tools
+//! drive real `Window`-based code paths without a display server.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use collections::HashMap;
-use parking_lot::Mutex;
 use uuid::Uuid;
 
 use gpui::{
-    AtlasKey, AtlasTextureId, AtlasTile, Bounds, Capslock, DevicePixels, DispatchEventResult,
-    DisplayId, GlyphAtlasCache, GlyphAtlasEntry, GpuSpecs, Modifiers, Pixels, PlatformAtlas,
-    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton,
-    PromptLevel, RenderGlyphParams, RequestFrameOptions, Scene, Size, TileId,
-    ValidatedRasterizedGlyph, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
-    WindowControlArea, WindowParams, WindowVisibility, px,
+    Bounds, Capslock, DispatchEventResult, DisplayId, GpuSpecs, HeadlessAtlas, Modifiers, Pixels,
+    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
+    PromptButton, PromptLevel, RequestFrameOptions, Scene, Size, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowParams, WindowVisibility,
+    px,
 };
 
 #[derive(Debug)]
@@ -239,97 +236,5 @@ impl PlatformWindow for HeadlessWindow {
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
         None
-    }
-}
-
-/// Allocates atlas tiles without uploading pixels, so glyph and sprite
-/// painting completes headlessly.
-#[derive(Default)]
-struct HeadlessAtlas(Mutex<HeadlessAtlasState>);
-
-#[derive(Default)]
-struct HeadlessAtlasState {
-    next_id: u32,
-    tiles: HashMap<AtlasKey, AtlasTile>,
-    glyph_cache: GlyphAtlasCache,
-}
-
-impl HeadlessAtlasState {
-    fn insert_tile(&mut self, key: AtlasKey, size: Size<DevicePixels>) -> AtlasTile {
-        self.next_id += 1;
-        let texture_id = self.next_id;
-        self.next_id += 1;
-        let tile_id = self.next_id;
-        let tile = AtlasTile {
-            texture_id: AtlasTextureId {
-                index: texture_id,
-                kind: key.texture_kind(),
-            },
-            tile_id: TileId(tile_id),
-            padding: 0,
-            bounds: Bounds {
-                origin: Point::default(),
-                size,
-            },
-        };
-
-        self.tiles.insert(key, tile);
-
-        tile
-    }
-}
-
-impl PlatformAtlas for HeadlessAtlas {
-    fn get_or_insert_with<'a>(
-        &self,
-        key: &AtlasKey,
-        build: &mut dyn FnMut() -> anyhow::Result<
-            Option<(Size<DevicePixels>, std::borrow::Cow<'a, [u8]>)>,
-        >,
-    ) -> anyhow::Result<Option<AtlasTile>> {
-        {
-            let state = self.0.lock();
-            if let Some(&tile) = state.tiles.get(key) {
-                return Ok(Some(tile));
-            }
-        }
-
-        let Some((size, _)) = build()? else {
-            return Ok(None);
-        };
-
-        let mut state = self.0.lock();
-        let tile = state.insert_tile(key.clone(), size);
-
-        Ok(Some(tile))
-    }
-
-    fn get_or_insert_glyph_with(
-        &self,
-        params: &RenderGlyphParams,
-        build: &mut dyn FnMut() -> anyhow::Result<ValidatedRasterizedGlyph>,
-    ) -> anyhow::Result<GlyphAtlasEntry> {
-        if let Some(entry) = self.0.lock().glyph_cache.get(params) {
-            return Ok(entry);
-        }
-
-        let glyph = build()?;
-
-        let mut state = self.0.lock();
-        let tile = if glyph.size == Size::default() {
-            None
-        } else {
-            let key = (params.clone(), glyph.format).into();
-
-            Some(state.insert_tile(key, glyph.size))
-        };
-
-        Ok(state.glyph_cache.insert(params, &glyph, tile))
-    }
-
-    fn remove(&self, key: &AtlasKey) {
-        let mut state = self.0.lock();
-        state.glyph_cache.remove(key);
-        state.tiles.remove(key);
     }
 }

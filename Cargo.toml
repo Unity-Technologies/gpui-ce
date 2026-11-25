@@ -132,11 +132,21 @@ core-foundation = "0.10"
 core-foundation-sys = "0.8.6"
 core-graphics = "0.24"
 core-text = "21"
-core-video = { version = "0.6.0", features = ["metal"] }
-foreign-types = "0.5"
-media = { path = "crates/gpui_media", version = "=0.4.0-unity.20261112", registry = "unity", package = "gpui_ce_media" }
 objc = "0.2"
 objc2 = "0.6"
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std"] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "CVBuffer",
+  "CVImageBuffer",
+  "CVPixelBuffer",
+] }
+objc2-io-surface = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "IOSurfaceRef",
+  "objc2-core-foundation",
+] }
 objc2-foundation = { version = "=0.3.2", default-features = false, features = [
   "NSArray",
   "NSAutoreleasePool",
@@ -166,9 +176,13 @@ objc2-foundation = { version = "=0.3.2", default-features = false, features = [
   "objc2-core-foundation",
   "std",
 ] }
+objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = [
+  "std",
+  "UTCoreTypes",
+  "UTType",
+] }
 objc2-user-notifications = "0.3"
 mach2 = "0.7"
-metal = "0.33"
 windows-capture = "2.0.1"
 env_logger = "0.11"
 unicode-segmentation = "1.10"

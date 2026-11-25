@@ -1,4 +1,3 @@
-use collections::FxHashMap;
 use etagere::BucketedAtlasAllocator;
 use parking_lot::Mutex;
 use windows::Win32::Graphics::{
@@ -10,21 +9,19 @@ use windows::Win32::Graphics::{
 };
 
 use gpui::{
-    AtlasKey, AtlasTextureId, AtlasTextureKind, AtlasTextureList, AtlasTile, Bounds, DevicePixels,
-    GlyphAtlasCache, GlyphAtlasEntry, PlatformAtlas, Point, RenderGlyphParams, Size,
-    ValidatedRasterizedGlyph,
+    AtlasBackend, AtlasKey, AtlasState, AtlasTextureId, AtlasTextureKind, AtlasTextureList,
+    AtlasTile, Bounds, DevicePixels, GlyphAtlasEntry, PlatformAtlas, Point, RenderGlyphParams,
+    Size, ValidatedRasterizedGlyph,
 };
 
-pub(crate) struct DirectXAtlas(Mutex<DirectXAtlasState>);
+pub(crate) struct DirectXAtlas(Mutex<AtlasState<DirectXAtlasTextures>>);
 
-struct DirectXAtlasState {
+struct DirectXAtlasTextures {
     device: ID3D11Device,
     device_context: ID3D11DeviceContext,
     monochrome_textures: AtlasTextureList<DirectXAtlasTexture>,
     polychrome_textures: AtlasTextureList<DirectXAtlasTexture>,
     subpixel_textures: AtlasTextureList<DirectXAtlasTexture>,
-    tiles_by_key: FxHashMap<AtlasKey, AtlasTile>,
-    glyph_cache: GlyphAtlasCache,
 }
 
 struct DirectXAtlasTexture {
@@ -38,15 +35,13 @@ struct DirectXAtlasTexture {
 
 impl DirectXAtlas {
     pub(crate) fn new(device: &ID3D11Device, device_context: &ID3D11DeviceContext) -> Self {
-        DirectXAtlas(Mutex::new(DirectXAtlasState {
+        DirectXAtlas(Mutex::new(AtlasState::new(DirectXAtlasTextures {
             device: device.clone(),
             device_context: device_context.clone(),
             monochrome_textures: Default::default(),
             polychrome_textures: Default::default(),
             subpixel_textures: Default::default(),
-            tiles_by_key: Default::default(),
-            glyph_cache: Default::default(),
-        }))
+        })))
     }
 
     pub(crate) fn get_texture_view(
@@ -54,7 +49,7 @@ impl DirectXAtlas {
         id: AtlasTextureId,
     ) -> Option<[Option<ID3D11ShaderResourceView>; 1]> {
         let lock = self.0.lock();
-        Some(lock.texture(id)?.view.clone())
+        Some(lock.backend.texture(id)?.view.clone())
     }
 
     pub(crate) fn handle_device_lost(
@@ -62,39 +57,34 @@ impl DirectXAtlas {
         device: &ID3D11Device,
         device_context: &ID3D11DeviceContext,
     ) {
-        let mut lock = self.0.lock();
-        lock.device = device.clone();
-        lock.device_context = device_context.clone();
-        lock.monochrome_textures = AtlasTextureList::default();
-        lock.polychrome_textures = AtlasTextureList::default();
-        lock.subpixel_textures = AtlasTextureList::default();
-        lock.tiles_by_key.clear();
-        lock.glyph_cache.clear();
+        self.0.lock().clear(|textures| {
+            textures.device = device.clone();
+            textures.device_context = device_context.clone();
+            textures.monochrome_textures = AtlasTextureList::default();
+            textures.polychrome_textures = AtlasTextureList::default();
+            textures.subpixel_textures = AtlasTextureList::default();
+        });
     }
 }
 
 impl PlatformAtlas for DirectXAtlas {
     fn get_or_insert_with<'a>(
         &self,
-        key: &AtlasKey,
+        key: AtlasKey,
         build: &mut dyn FnMut() -> anyhow::Result<
             Option<(Size<DevicePixels>, std::borrow::Cow<'a, [u8]>)>,
         >,
     ) -> anyhow::Result<Option<AtlasTile>> {
-        let mut lock = self.0.lock();
-        if let Some(tile) = lock.tiles_by_key.get(key) {
-            return Ok(Some(*tile));
-        }
-
-        let Some((size, bytes)) = build()? else {
-            return Ok(None);
-        };
+        let kind = key.texture_kind();
         // Validate before allocation: a rejected bitmap must never leave a cached,
         // uninitialized tile that every later glyph/SVG lookup treats as successful.
-        key.texture_kind().validate_upload(size, &bytes)?;
-        let tile = lock.insert_tile(key.clone(), size, &bytes)?;
-
-        Ok(Some(tile))
+        self.0.lock().get_or_insert_with(key, &mut || {
+            let built = build()?;
+            if let Some((size, bytes)) = &built {
+                kind.validate_upload(*size, bytes)?;
+            }
+            Ok(built)
+        })
     }
 
     fn get_or_insert_glyph_with(
@@ -102,35 +92,41 @@ impl PlatformAtlas for DirectXAtlas {
         params: &RenderGlyphParams,
         build: &mut dyn FnMut() -> anyhow::Result<ValidatedRasterizedGlyph>,
     ) -> anyhow::Result<GlyphAtlasEntry> {
-        let mut lock = self.0.lock();
-        if let Some(entry) = lock.glyph_cache.get(params) {
-            return Ok(entry);
-        }
-
-        let glyph = build()?;
-        let tile = if glyph.size == Size::default() {
-            None
-        } else {
-            let key = AtlasKey::from((params.clone(), glyph.format));
-            Some(lock.insert_tile(key, glyph.size, &glyph.pixels)?)
-        };
-        Ok(lock.glyph_cache.insert(params, &glyph, tile))
+        self.0.lock().get_or_insert_glyph_with(params, build)
     }
 
     fn remove(&self, key: &AtlasKey) {
-        let mut lock = self.0.lock();
+        self.0.lock().remove(key);
+    }
+}
 
-        lock.glyph_cache.remove(key);
+impl AtlasBackend for DirectXAtlasTextures {
+    fn insert(
+        &mut self,
+        kind: AtlasTextureKind,
+        size: Size<DevicePixels>,
+        bytes: &[u8],
+    ) -> anyhow::Result<AtlasTile> {
+        anyhow::ensure!(
+            size.width.0 <= 16384 && size.height.0 <= 16384,
+            "atlas tile {size:?} exceeds the Direct3D 11 texture limit"
+        );
+        let tile = self
+            .allocate(size, kind)
+            .ok_or_else(|| anyhow::anyhow!("failed to allocate"))?;
+        self.texture(tile.texture_id)
+            .ok_or_else(|| anyhow::anyhow!("atlas texture missing right after allocation"))?
+            .upload(&self.device_context, tile.bounds, bytes);
+        Ok(tile)
+    }
 
-        let Some(tile) = lock.tiles_by_key.remove(key) else {
-            return;
-        };
+    fn remove(&mut self, tile: AtlasTile) {
         let id = tile.texture_id;
 
         let textures = match id.kind {
-            AtlasTextureKind::Monochrome => &mut lock.monochrome_textures,
-            AtlasTextureKind::Polychrome => &mut lock.polychrome_textures,
-            AtlasTextureKind::Subpixel => &mut lock.subpixel_textures,
+            AtlasTextureKind::Monochrome => &mut self.monochrome_textures,
+            AtlasTextureKind::Polychrome => &mut self.polychrome_textures,
+            AtlasTextureKind::Subpixel => &mut self.subpixel_textures,
         };
 
         let Some(texture_slot) = textures.textures.get_mut(id.index as usize) else {
@@ -149,28 +145,7 @@ impl PlatformAtlas for DirectXAtlas {
     }
 }
 
-impl DirectXAtlasState {
-    fn insert_tile(
-        &mut self,
-        key: AtlasKey,
-        size: Size<DevicePixels>,
-        bytes: &[u8],
-    ) -> anyhow::Result<AtlasTile> {
-        anyhow::ensure!(
-            size.width.0 <= 16384 && size.height.0 <= 16384,
-            "atlas tile {size:?} exceeds the Direct3D 11 texture limit"
-        );
-        let tile = self
-            .allocate(size, key.texture_kind())
-            .ok_or_else(|| anyhow::anyhow!("failed to allocate"))?;
-        self.texture(tile.texture_id)
-            .ok_or_else(|| anyhow::anyhow!("atlas texture missing right after allocation"))?
-            .upload(&self.device_context, tile.bounds, bytes);
-        self.tiles_by_key.insert(key, tile);
-
-        Ok(tile)
-    }
-
+impl DirectXAtlasTextures {
     fn allocate(
         &mut self,
         size: Size<DevicePixels>,
@@ -392,7 +367,7 @@ mod tests {
 
     fn insert_tile(atlas: &DirectXAtlas, key: &AtlasKey, size: Size<DevicePixels>) -> AtlasTile {
         atlas
-            .get_or_insert_with(key, &mut || {
+            .get_or_insert_with(key.clone(), &mut || {
                 let byte_count = (size.width.0 as usize) * (size.height.0 as usize) * 4;
                 Ok(Some((size, Cow::Owned(vec![0u8; byte_count]))))
             })

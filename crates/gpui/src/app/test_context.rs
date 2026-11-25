@@ -1551,11 +1551,11 @@ impl AnyWindowHandle {
 #[cfg(test)]
 mod tests {
     use crate::{
-        AssetSource, Context, ContrastPreference, DevicePixels, IntoElement, ParentElement as _,
-        PathPromptOptions, PlatformAtlas, PlatformHeadlessRenderer, Render, Scene, SharedString,
-        Size, Styled as _, SystemColors, SystemNotification, SystemNotificationAction,
-        SystemNotificationResponse, TestAppContext, TestAtlas, TestDispatcher, TestTextSystem,
-        VisualTestContext, Window, div, px, size,
+        AssetSource, Context, ContrastPreference, DevicePixels, HeadlessAtlas, IntoElement,
+        ParentElement as _, PathPromptOptions, PlatformAtlas, PlatformHeadlessRenderer, Render,
+        Scene, SharedString, Size, Styled as _, SystemColors, SystemNotification,
+        SystemNotificationAction, SystemNotificationResponse, TestAppContext, TestDispatcher,
+        TestTextSystem, VisualTestContext, Window, div, px, size,
     };
     use image::RgbaImage;
     use std::borrow::Cow;
@@ -1575,7 +1575,7 @@ mod tests {
     /// Records the device size of every frame and reads back a blank image of that size.
     struct RecordingRenderer {
         frame_sizes: Rc<RefCell<Vec<Size<DevicePixels>>>>,
-        sprite_atlas: Arc<TestAtlas>,
+        sprite_atlas: Arc<HeadlessAtlas>,
     }
 
     impl PlatformHeadlessRenderer for RecordingRenderer {
@@ -1649,7 +1649,7 @@ mod tests {
                 move || {
                     Some(Box::new(RecordingRenderer {
                         frame_sizes: frame_sizes.clone(),
-                        sprite_atlas: Arc::new(TestAtlas::new()),
+                        sprite_atlas: Arc::new(HeadlessAtlas::default()),
                     }) as Box<dyn PlatformHeadlessRenderer>)
                 }
             },

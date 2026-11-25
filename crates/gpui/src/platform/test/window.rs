@@ -1,13 +1,11 @@
 use crate::{
-    AnyWindowHandle, AtlasKey, AtlasTextureId, AtlasTile, Bounds, Decorations, DevicePixels,
-    DispatchEventResult, DisplayId, GlyphAtlasCache, GlyphAtlasEntry, GpuSpecs, Pixels, Platform,
-    PlatformAtlas, PlatformDisplay, PlatformHeadlessRenderer, PlatformInput, PlatformInputHandler,
-    PlatformWindow, Point, PromptButton, RenderGlyphParams, RequestFrameOptions, Scene, Size,
-    TestDisplay, TestPlatform, TextInputConfiguration, TextInputStateChange, TileId,
-    ValidatedRasterizedGlyph, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
-    WindowControlArea, WindowInsets, WindowParams, WindowVisibility,
+    AnyWindowHandle, Bounds, Decorations, DevicePixels, DispatchEventResult, DisplayId, GpuSpecs,
+    HeadlessAtlas, Pixels, Platform, PlatformAtlas, PlatformDisplay, PlatformHeadlessRenderer,
+    PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton, RequestFrameOptions,
+    Scene, Size, TestDisplay, TestPlatform, TextInputConfiguration, TextInputStateChange,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowInsets,
+    WindowParams, WindowVisibility,
 };
-use collections::HashMap;
 use gpui_util::ResultExt as _;
 #[cfg(any(test, feature = "test-support"))]
 use image::RgbaImage;
@@ -96,7 +94,7 @@ impl TestWindow {
     ) -> Self {
         let sprite_atlas: Arc<dyn PlatformAtlas> = match &renderer {
             Some(r) => r.sprite_atlas(),
-            None => Arc::new(TestAtlas::new()),
+            None => Arc::new(HeadlessAtlas::default()),
         };
         Self(Rc::new(Mutex::new(TestWindowState {
             bounds: params.bounds,
@@ -659,119 +657,5 @@ impl PlatformWindow for TestWindow {
 
     fn window_decorations(&self) -> Decorations {
         self.0.lock().decorations
-    }
-}
-
-pub(crate) struct TestAtlasState {
-    next_id: u32,
-    tiles: HashMap<AtlasKey, AtlasTile>,
-    glyph_cache: GlyphAtlasCache,
-}
-
-pub(crate) struct TestAtlas(Mutex<TestAtlasState>);
-
-impl TestAtlasState {
-    fn insert_tile(&mut self, key: AtlasKey, size: Size<DevicePixels>) -> AtlasTile {
-        self.next_id += 1;
-        let texture_id = self.next_id;
-        self.next_id += 1;
-        let tile_id = self.next_id;
-        let tile = AtlasTile {
-            texture_id: AtlasTextureId {
-                index: texture_id,
-                kind: key.texture_kind(),
-            },
-            tile_id: TileId(tile_id),
-            padding: 0,
-            bounds: Bounds {
-                origin: Point::default(),
-                size,
-            },
-        };
-
-        self.tiles.insert(key, tile);
-
-        tile
-    }
-}
-
-impl TestAtlas {
-    pub fn new() -> Self {
-        TestAtlas(Mutex::new(TestAtlasState {
-            next_id: 0,
-            tiles: HashMap::default(),
-            glyph_cache: GlyphAtlasCache::default(),
-        }))
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn clear(&self) {
-        let mut state = self.0.lock();
-        state.tiles.clear();
-        state.glyph_cache.clear();
-    }
-}
-
-impl PlatformAtlas for TestAtlas {
-    fn get_or_insert_with<'a>(
-        &self,
-        key: &crate::AtlasKey,
-        build: &mut dyn FnMut() -> anyhow::Result<
-            Option<(Size<crate::DevicePixels>, std::borrow::Cow<'a, [u8]>)>,
-        >,
-    ) -> anyhow::Result<Option<crate::AtlasTile>> {
-        let mut state = self.0.lock();
-        if let Some(&tile) = state.tiles.get(key) {
-            return Ok(Some(tile));
-        }
-        drop(state);
-
-        let Some((size, _)) = build()? else {
-            return Ok(None);
-        };
-
-        let mut state = self.0.lock();
-
-        Ok(Some(state.insert_tile(key.clone(), size)))
-    }
-
-    fn get_or_insert_glyph_with(
-        &self,
-        params: &RenderGlyphParams,
-        build: &mut dyn FnMut() -> anyhow::Result<ValidatedRasterizedGlyph>,
-    ) -> anyhow::Result<GlyphAtlasEntry> {
-        if let Some(entry) = self.0.lock().glyph_cache.get(params) {
-            return Ok(entry);
-        }
-
-        let glyph = build()?;
-
-        let mut state = self.0.lock();
-        let tile = if glyph.size == Size::default() {
-            None
-        } else {
-            let key = (params.clone(), glyph.format).into();
-
-            Some(state.insert_tile(key, glyph.size))
-        };
-
-        Ok(state.glyph_cache.insert(params, &glyph, tile))
-    }
-
-    fn remove(&self, key: &AtlasKey) {
-        let mut state = self.0.lock();
-        state.glyph_cache.remove(key);
-        state.tiles.remove(key);
-    }
-
-    fn contains(&self, key: &AtlasKey) -> bool {
-        let state = self.0.lock();
-        match key {
-            AtlasKey::Glyph { params, format } => state
-                .glyph_cache
-                .get(params)
-                .is_some_and(|entry| entry.format == *format),
-            _ => state.tiles.contains_key(key),
-        }
     }
 }

@@ -5761,7 +5761,7 @@ impl Window {
 
         let Some(tile) =
             self.sprite_atlas
-                .get_or_insert_with(&params.clone().into(), &mut || {
+                .get_or_insert_with(params.clone().into(), &mut || {
                     let Some((size, bytes)) = cx.svg_renderer.render_alpha_mask(&params, data)?
                     else {
                         return Ok(None);
@@ -5851,7 +5851,7 @@ impl Window {
 
         let tile = self
             .sprite_atlas
-            .get_or_insert_with(&params.into(), &mut || {
+            .get_or_insert_with(params.into(), &mut || {
                 let bytes = data
                     .as_bytes(frame_index)
                     .expect("It's the caller's job to pass a valid frame index");

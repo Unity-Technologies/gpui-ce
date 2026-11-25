@@ -57,13 +57,13 @@
 
 use anyhow::Result;
 use core_graphics::display::CGDirectDisplayID;
-use core_video::host_time;
 use dispatch2::{
     _dispatch_source_type_data_add, DispatchObject, DispatchQueue, DispatchRetained, DispatchSource,
 };
 use gpui::{FrameRequestSource, PlatformFrameSignal};
 use gpui_apple::display_link::MetalFrameSource;
 use gpui_util::ResultExt;
+use objc2_core_video::{CVGetCurrentHostTime, CVGetHostClockFrequency};
 use scheduler::Instant;
 use std::{
     cell::{Cell, RefCell},
@@ -142,9 +142,9 @@ unsafe extern "C" fn display_link_output_callback(
 ) -> i32 {
     let signal_at = PlatformFrameSignal::capture(|| {
         // Instant cannot be constructed from Mach ticks, so sample both clock domains.
-        let current_host_time = host_time::get_current_host_time();
+        let current_host_time = CVGetCurrentHostTime();
         let received_at = Instant::now();
-        let host_clock_frequency = host_time::get_host_clock_frequency();
+        let host_clock_frequency = CVGetHostClockFrequency();
         // SAFETY: CoreVideo owns this timestamp for the lifetime of the callback.
         let current_time = unsafe { current_time.as_ref() };
         frame_request_instant(
@@ -442,20 +442,36 @@ mod sys {
 
     use anyhow::Result;
     use core_graphics::display::CGDirectDisplayID;
-    use foreign_types::{ForeignType, foreign_type};
     use std::{
         ffi::c_void,
         fmt::{self, Debug, Formatter},
+        ptr::NonNull,
     };
 
     #[derive(Debug)]
     pub enum CVDisplayLink {}
 
-    foreign_type! {
-        pub unsafe type DisplayLink {
-            type CType = CVDisplayLink;
-            fn drop = CVDisplayLinkRelease;
-            fn clone = CVDisplayLinkRetain;
+    /// An owned `CVDisplayLinkRef`, released on drop.
+    pub struct DisplayLink(NonNull<CVDisplayLink>);
+
+    impl DisplayLink {
+        fn as_ptr(&self) -> *mut CVDisplayLink {
+            self.0.as_ptr()
+        }
+    }
+
+    impl Clone for DisplayLink {
+        fn clone(&self) -> Self {
+            // SAFETY: `self` holds a live reference; the retain adds the clone's own.
+            unsafe { CVDisplayLinkRetain(self.as_ptr()) };
+            Self(self.0)
+        }
+    }
+
+    impl Drop for DisplayLink {
+        fn drop(&mut self) {
+            // SAFETY: `self` owns one reference, from `CVDisplayLinkCreate...`.
+            unsafe { CVDisplayLinkRelease(self.as_ptr()) }
         }
     }
 
@@ -548,16 +564,16 @@ mod sys {
             display_link_out: *mut *mut CVDisplayLink,
         ) -> i32;
         pub fn CVDisplayLinkSetCurrentCGDisplay(
-            display_link: &mut DisplayLinkRef,
+            display_link: *mut CVDisplayLink,
             display_id: u32,
         ) -> i32;
         pub fn CVDisplayLinkSetOutputCallback(
-            display_link: &mut DisplayLinkRef,
+            display_link: *mut CVDisplayLink,
             callback: CVDisplayLinkOutputCallback,
             user_info: *mut c_void,
         ) -> i32;
-        pub fn CVDisplayLinkStart(display_link: &mut DisplayLinkRef) -> i32;
-        pub fn CVDisplayLinkStop(display_link: &mut DisplayLinkRef) -> i32;
+        pub fn CVDisplayLinkStart(display_link: *mut CVDisplayLink) -> i32;
+        pub fn CVDisplayLinkStop(display_link: *mut CVDisplayLink) -> i32;
         pub fn CVDisplayLinkRelease(display_link: *mut CVDisplayLink);
         pub fn CVDisplayLinkRetain(display_link: *mut CVDisplayLink) -> *mut CVDisplayLink;
     }
@@ -575,12 +591,16 @@ mod sys {
                 let code = CVDisplayLinkCreateWithActiveCGDisplays(&mut display_link);
                 anyhow::ensure!(code == 0, "could not create display link, code: {}", code);
 
-                let mut display_link = DisplayLink::from_ptr(display_link);
+                let display_link = DisplayLink(
+                    NonNull::new(display_link)
+                        .ok_or_else(|| anyhow::anyhow!("CoreVideo returned no display link"))?,
+                );
 
-                let code = CVDisplayLinkSetOutputCallback(&mut display_link, callback, user_info);
+                let code =
+                    CVDisplayLinkSetOutputCallback(display_link.as_ptr(), callback, user_info);
                 anyhow::ensure!(code == 0, "could not set output callback, code: {}", code);
 
-                let code = CVDisplayLinkSetCurrentCGDisplay(&mut display_link, display_id);
+                let code = CVDisplayLinkSetCurrentCGDisplay(display_link.as_ptr(), display_id);
                 anyhow::ensure!(
                     code == 0,
                     "could not assign display to display link, code: {}",
@@ -592,11 +612,11 @@ mod sys {
         }
     }
 
-    impl DisplayLinkRef {
+    impl DisplayLink {
         /// Apple docs: [CVDisplayLinkStart](https://developer.apple.com/documentation/corevideo/1457193-cvdisplaylinkstart?language=objc)
         pub unsafe fn start(&mut self) -> Result<()> {
             unsafe {
-                let code = CVDisplayLinkStart(self);
+                let code = CVDisplayLinkStart(self.as_ptr());
                 anyhow::ensure!(code == 0, "could not start display link, code: {}", code);
                 Ok(())
             }
@@ -605,7 +625,7 @@ mod sys {
         /// Apple docs: [CVDisplayLinkStop](https://developer.apple.com/documentation/corevideo/1457281-cvdisplaylinkstop?language=objc)
         pub unsafe fn stop(&mut self) -> Result<()> {
             unsafe {
-                let code = CVDisplayLinkStop(self);
+                let code = CVDisplayLinkStop(self.as_ptr());
                 anyhow::ensure!(code == 0, "could not stop display link, code: {}", code);
                 Ok(())
             }
@@ -648,9 +668,8 @@ mod tests {
     #[cfg(not(feature = "wgpu"))]
     #[test]
     fn a_renderer_draws_and_screenshots_around_its_display_link() {
-        use foreign_types::ForeignTypeRef as _;
         use objc2::AnyThread as _;
-        use objc2_quartz_core::{CAMetalDisplayLink, CAMetalLayer};
+        use objc2_quartz_core::CAMetalDisplayLink;
 
         if !MetalFrameSource::is_available() {
             return;
@@ -661,8 +680,6 @@ mod tests {
             crate::renderer::MetalRenderer::new(Default::default(), false, false).unwrap();
         renderer.update_drawable_size(gpui::size(gpui::DevicePixels(64), gpui::DevicePixels(64)));
         let layer = renderer.layer().expect("window renderer has a layer");
-        // SAFETY: metal-rs and objc2 both wrap the same `CAMetalLayer` object.
-        let layer = unsafe { &*(layer.as_ptr() as *const CAMetalLayer) };
         // The link is never added to a run loop: attaching it to the layer is
         // the state under test.
         let link = CAMetalDisplayLink::initWithMetalLayer(CAMetalDisplayLink::alloc(), layer);

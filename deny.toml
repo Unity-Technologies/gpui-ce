@@ -58,7 +58,13 @@ workspace-default-features = "allow"
 external-default-features = "allow"
 allow = []
 allow-workspace = true
-deny = []
+# The macOS renderer is on objc2. `block` 0.1 carries a future-incompat warning, and
+# `metal`/`core-video` would pull it back in (ported from zed#65942's dependency test).
+deny = [
+  { crate = "block", reason = "use block2; block 0.1 trips a rustc future-incompat lint" },
+  { crate = "metal", reason = "use objc2-metal; metal depends on block 0.1" },
+  { crate = "core-video", reason = "use objc2-core-video; core-video depends on block 0.1" },
+]
 skip = []
 skip-tree = []
 

@@ -62,7 +62,7 @@ rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 global-min-publish-age = "3 days"
 
 [env]
-MACOSX_DEPLOYMENT_TARGET = "10.15.7"
+MACOSX_DEPLOYMENT_TARGET = "12.0"
 
 # The component workspace is independently resolved, but CI runs some of its
 # checks from this repository root. Keep its unpublished GPUI CE dependencies
