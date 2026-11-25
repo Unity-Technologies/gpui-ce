@@ -1,7 +1,7 @@
 use crate::{
     Action, AnyView, AnyWindowHandle, App, AppCell, AppContext, AssetRegistry, AssetSource,
     AsyncApp, AvailableSpace, BackgroundExecutor, BorrowAppContext, Bounds, Capslock,
-    ClipboardItem, ContrastPreference, DEFAULT_TEST_SCALE_FACTOR, DisplayId, DrawPhase, Drawable,
+    ClipboardItem, ContrastPreference, Decorations, DEFAULT_TEST_SCALE_FACTOR, DisplayId, DrawPhase, Drawable,
     Element, Empty, EntityId, EventEmitter, ForegroundExecutor, Global, InputEvent, Keystroke,
     Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     Pixels, Platform, PlatformHeadlessRenderer, PlatformTextSystem, Point, Render, Result,
@@ -618,6 +618,16 @@ impl TestAppContext {
     ) {
         self.test_window(window_handle)
             .simulate_visibility_change(visibility);
+    }
+
+    /// Simulates the platform changing how the window is decorated.
+    pub fn simulate_window_decorations_change(
+        &self,
+        window_handle: AnyWindowHandle,
+        decorations: Decorations,
+    ) {
+        self.test_window(window_handle)
+            .simulate_decorations_change(decorations);
     }
 
     /// Simulates connecting a display.

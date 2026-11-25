@@ -692,8 +692,16 @@ unsafe fn build_window_class(
             window_will_enter_fullscreen as unsafe extern "C" fn(_, _, _),
         );
         decl.add_method(
+            sel!(windowDidFailToEnterFullScreen:),
+            window_did_fail_to_enter_fullscreen as unsafe extern "C" fn(_, _, _),
+        );
+        decl.add_method(
             sel!(windowWillExitFullScreen:),
             window_will_exit_fullscreen as unsafe extern "C" fn(_, _, _),
+        );
+        decl.add_method(
+            sel!(windowDidFailToExitFullScreen:),
+            window_did_fail_to_exit_fullscreen as unsafe extern "C" fn(_, _, _),
         );
         decl.add_method(
             sel!(windowDidExitFullScreen:),
@@ -934,6 +942,7 @@ struct MacWindowState {
     last_left_mouse_down_event: Option<Retained<Objc2Object>>,
     synthetic_drag_counter: usize,
     traffic_light_position: Option<Point<Pixels>>,
+    native_titlebar_visible: bool,
     traffic_light_frames: Option<TrafficLightFrames>,
     // True from windowWillExitFullScreen until windowDidExitFullScreen. AppKit
     // owns the standard buttons during that animation; moving them mid-flight
@@ -974,6 +983,10 @@ impl MacWindowState {
     }
 
     fn move_traffic_light(&mut self) {
+        if !self.native_titlebar_visible {
+            self.update_native_titlebar_visibility();
+        }
+
         if let Some(traffic_light_position) = self.traffic_light_position {
             if self.exiting_fullscreen {
                 return;
@@ -1063,6 +1076,48 @@ impl MacWindowState {
             minimize: window.standardWindowButton(Objc2NSWindowButton::MiniaturizeButton)?,
             zoom: window.standardWindowButton(Objc2NSWindowButton::ZoomButton)?,
         })
+    }
+
+    fn update_native_titlebar_visibility(&self) {
+        let Some(close_button) = self
+            .native_window()
+            .standardWindowButton(Objc2NSWindowButton::CloseButton)
+        else {
+            return;
+        };
+        if let Some(titlebar_container) = Self::titlebar_container(&close_button) {
+            titlebar_container.setHidden(!self.native_titlebar_visible);
+        }
+    }
+
+    fn apply_fullscreen_titlebar_opacity(&self) {
+        let min_version = NSOperatingSystemVersion {
+            majorVersion: 15,
+            minorVersion: 3,
+            patchVersion: 0,
+        };
+
+        if is_macos_version_at_least(min_version) {
+            unsafe {
+                self.native_window
+                    .setTitlebarAppearsTransparent_(Bool::new(false));
+            }
+        }
+    }
+
+    fn restore_windowed_titlebar_transparency(&self) {
+        let min_version = NSOperatingSystemVersion {
+            majorVersion: 15,
+            minorVersion: 3,
+            patchVersion: 0,
+        };
+
+        if is_macos_version_at_least(min_version) && self.transparent_titlebar {
+            unsafe {
+                self.native_window
+                    .setTitlebarAppearsTransparent_(Bool::new(true));
+            }
+        }
     }
 
     fn titlebar_container(close_button: &Objc2NSButton) -> Option<Retained<Objc2NSView>> {
@@ -1437,6 +1492,7 @@ impl MacWindow {
                     .and_then(|titlebar| titlebar.traffic_light_position),
                 traffic_light_frames: None,
                 exiting_fullscreen: false,
+                native_titlebar_visible: true,
                 transparent_titlebar: titlebar
                     .as_ref()
                     .is_none_or(|titlebar| titlebar.appears_transparent),
@@ -1926,6 +1982,12 @@ impl PlatformWindow for MacWindow {
             }
             let _: () = msg_send![unarchiver, release];
         }
+    }
+
+    fn set_native_titlebar_visibility(&self, visible: bool) {
+        let mut state = self.0.lock();
+        state.native_titlebar_visible = visible;
+        state.update_native_titlebar_visibility();
     }
 
     fn set_traffic_light_position(&self, position: Point<Pixels>) {
@@ -3512,38 +3574,31 @@ unsafe extern "C" fn window_will_enter_fullscreen(this: &Objc2Object, _: Sel, _:
     lock.fullscreen_restore_bounds = lock.bounds();
     lock.exiting_fullscreen = false;
     lock.restore_traffic_light();
+    lock.apply_fullscreen_titlebar_opacity();
+}
 
-    let min_version = NSOperatingSystemVersion {
-        majorVersion: 15,
-        minorVersion: 3,
-        patchVersion: 0,
-    };
-
-    if is_macos_version_at_least(min_version) {
-        unsafe {
-            lock.native_window
-                .setTitlebarAppearsTransparent_(Bool::new(false));
-        }
-    }
+unsafe extern "C" fn window_did_fail_to_enter_fullscreen(this: &Objc2Object, _: Sel, _: ObjcId) {
+    let window_state = unsafe { get_window_state(this) };
+    let mut lock = window_state.as_ref().lock();
+    lock.restore_windowed_titlebar_transparency();
+    lock.move_traffic_light();
 }
 
 unsafe extern "C" fn window_will_exit_fullscreen(this: &Objc2Object, _: Sel, _: ObjcId) {
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.as_ref().lock();
     lock.exiting_fullscreen = true;
+    lock.restore_windowed_titlebar_transparency();
+}
 
-    let min_version = NSOperatingSystemVersion {
-        majorVersion: 15,
-        minorVersion: 3,
-        patchVersion: 0,
-    };
-
-    if is_macos_version_at_least(min_version) && lock.transparent_titlebar {
-        unsafe {
-            lock.native_window
-                .setTitlebarAppearsTransparent_(Bool::new(true));
-        }
+unsafe extern "C" fn window_did_fail_to_exit_fullscreen(this: &Objc2Object, _: Sel, _: ObjcId) {
+    let window_state = unsafe { get_window_state(this) };
+    let mut lock = window_state.as_ref().lock();
+    lock.exiting_fullscreen = false;
+    if lock.is_fullscreen() {
+        lock.apply_fullscreen_titlebar_opacity();
     }
+    lock.restore_traffic_light();
 }
 
 unsafe extern "C" fn window_did_exit_fullscreen(this: &Objc2Object, _: Sel, _: ObjcId) {
