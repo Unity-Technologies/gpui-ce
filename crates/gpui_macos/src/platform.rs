@@ -1285,7 +1285,10 @@ impl Platform for MacPlatform {
                 let status = SecItemCopyMatching(attrs.as_concrete_TypeRef(), &mut result);
                 match status {
                     security::errSecSuccess => {}
-                    security::errSecItemNotFound | security::errSecUserCanceled => return Ok(None),
+                    security::errSecItemNotFound => return Ok(None),
+                    // A cancelled prompt is not "no credentials": callers that
+                    // then write new ones could overwrite a shared secret.
+                    security::errSecUserCanceled => anyhow::bail!("Keychain access was cancelled."),
                     _ => anyhow::bail!("reading password failed: {status}"),
                 }
 
