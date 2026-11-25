@@ -1912,17 +1912,19 @@ impl PlatformWindow for MacWindow {
                 error: &mut error as *mut ObjcId
             ];
             if unarchiver.is_null() {
-                log::warn!("failed to unarchive the native window state: {}", unsafe {
+                log::warn!(
+                    "failed to unarchive the native window state: {}",
                     ns_error_description(error)
-                });
+                );
                 return;
             }
             let _: () = msg_send![native_window, restoreStateWithCoder: unarchiver];
             let error: ObjcId = msg_send![unarchiver, error];
             if !error.is_null() {
-                log::warn!("failed to restore the native window state: {}", unsafe {
+                log::warn!(
+                    "failed to restore the native window state: {}",
                     ns_error_description(error)
-                });
+                );
             }
             let _: () = msg_send![unarchiver, release];
         }
