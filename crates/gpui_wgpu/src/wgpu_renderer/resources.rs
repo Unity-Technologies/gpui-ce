@@ -20,7 +20,6 @@ use super::{
     buffers::{DynamicUniformBuffer, InstanceBufferArena},
     filters::FrameUniformRequirements,
     pipelines::{WgpuBindGroupLayouts, WgpuPipelines},
-    settings::RenderingParameters,
     surfaces::SurfaceCache,
 };
 
@@ -53,12 +52,7 @@ pub(super) struct WgpuResources {
     blur_bind_groups: RefCell<BlurBindGroups>,
     pub(super) globals_buffer: wgpu::Buffer,
     pub(super) globals_bind_group: wgpu::BindGroup,
-    pub(super) path_globals_bind_group: wgpu::BindGroup,
     pub(super) instances: InstanceBufferArena,
-    pub(super) path_intermediate_texture: Option<wgpu::Texture>,
-    pub(super) path_intermediate_view: Option<wgpu::TextureView>,
-    pub(super) path_msaa_texture: Option<wgpu::Texture>,
-    pub(super) path_msaa_view: Option<wgpu::TextureView>,
     pub(super) scene_color_texture: Option<wgpu::Texture>,
     pub(super) scene_color_view: Option<wgpu::TextureView>,
     pub(super) backdrop_snapshot_texture: Option<wgpu::Texture>,
@@ -83,7 +77,6 @@ pub(super) struct ResourceMetadata {
 }
 
 pub(super) struct GlobalBufferLayout {
-    pub(super) path_offset: u64,
     pub(super) font_offset: u64,
     pub(super) maximum_uniform_buffer_size: u64,
 }
@@ -93,7 +86,6 @@ impl WgpuResources {
         context: &WgpuContext,
         surface: Option<wgpu::Surface<'static>>,
         surface_config: &wgpu::SurfaceConfiguration,
-        rendering: &RenderingParameters,
         dual_source_blending: bool,
     ) -> anyhow::Result<(Self, ResourceMetadata)> {
         let device = Arc::clone(&context.device);
@@ -105,7 +97,6 @@ impl WgpuResources {
             &bind_group_layouts,
             surface_config.format,
             surface_config.alpha_mode,
-            rendering.path_sample_count,
             dual_source_blending,
             renderer_tier,
         );
@@ -135,8 +126,7 @@ impl WgpuResources {
         );
         let globals_size = std::mem::size_of::<GlobalUniforms>() as u64;
         let gamma_size = std::mem::size_of::<FontRasterizationUniforms>() as u64;
-        let path_globals_offset = globals_size.next_multiple_of(uniform_alignment);
-        let gamma_offset = (path_globals_offset + globals_size).next_multiple_of(uniform_alignment);
+        let gamma_offset = globals_size.next_multiple_of(uniform_alignment);
         let globals_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("globals_buffer"),
             size: gamma_offset + gamma_size,
@@ -160,14 +150,11 @@ impl WgpuResources {
             )
         };
         let globals_bind_group = create_globals("globals_bind_group", 0);
-        let path_globals_bind_group =
-            create_globals("path_globals_bind_group", path_globals_offset);
         let last_error = context.uncaptured_error_slot();
         let surface_cache = SurfaceCache::new(&device)?;
 
         let metadata = ResourceMetadata {
             globals: GlobalBufferLayout {
-                path_offset: path_globals_offset,
                 font_offset: gamma_offset,
                 maximum_uniform_buffer_size: device.limits().max_buffer_size.min(u32::MAX as u64),
             },
@@ -189,11 +176,6 @@ impl WgpuResources {
             blur_bind_groups: RefCell::default(),
             globals_buffer,
             globals_bind_group,
-            path_globals_bind_group,
-            path_intermediate_texture: None,
-            path_intermediate_view: None,
-            path_msaa_texture: None,
-            path_msaa_view: None,
             scene_color_texture: None,
             scene_color_view: None,
             backdrop_snapshot_texture: None,
@@ -211,10 +193,6 @@ impl WgpuResources {
     pub(super) fn invalidate_intermediate_textures(&mut self) {
         self.instances.invalidate_texture_bindings();
         self.blur_bind_groups.get_mut().groups.clear();
-        self.path_intermediate_texture = None;
-        self.path_intermediate_view = None;
-        self.path_msaa_texture = None;
-        self.path_msaa_view = None;
         self.scene_color_texture = None;
         self.scene_color_view = None;
         self.backdrop_snapshot_texture = None;
@@ -259,26 +237,6 @@ impl WgpuResources {
 }
 
 impl WgpuRenderer {
-    pub(super) fn ensure_path_textures(&mut self) {
-        if self.resources().path_intermediate_texture.is_some() {
-            return;
-        }
-        let format = self.target.format();
-        let width = self.target.width();
-        let height = self.target.height();
-        let sample_count = self.rendering_params.path_sample_count;
-        let resources = self.resources_mut();
-        let (texture, view) = sampled_render_texture(&resources.device, format, width, height);
-        resources.path_intermediate_texture = Some(texture);
-        resources.path_intermediate_view = Some(view);
-        if let Some((texture, view)) =
-            msaa_texture(&resources.device, format, width, height, sample_count)
-        {
-            resources.path_msaa_texture = Some(texture);
-            resources.path_msaa_view = Some(view);
-        }
-    }
-
     pub(super) fn ensure_filter_textures(&mut self, requirements: &ScenePlanRequirements) {
         let format = self.target.format();
         let width = self.target.width();
@@ -382,32 +340,4 @@ fn sampled_render_texture(
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     (texture, view)
-}
-
-fn msaa_texture(
-    device: &wgpu::Device,
-    format: wgpu::TextureFormat,
-    width: u32,
-    height: u32,
-    sample_count: u32,
-) -> Option<(wgpu::Texture, wgpu::TextureView)> {
-    if sample_count <= 1 {
-        return None;
-    }
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("path_msaa"),
-        size: wgpu::Extent3d {
-            width: width.max(1),
-            height: height.max(1),
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        view_formats: &[],
-    });
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    Some((texture, view))
 }

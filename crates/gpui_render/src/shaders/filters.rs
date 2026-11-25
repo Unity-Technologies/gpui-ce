@@ -47,28 +47,21 @@ pub mod surface {
         pub position: Vec4f,
         #[location(0)]
         pub texture_position: Vec2f,
-        #[location(3)]
-        pub clip_distances: Vec4f,
     }
 
     #[vertex]
     pub fn vertex_surface(#[builtin(vertex_index)] vertex_id: u32) -> SurfaceVarying {
-        let vertex = rectangle_vertex(vertex_id, get!(SURFACE_LOCALS).bounds);
+        let locals = get!(SURFACE_LOCALS);
+        let vertex = clipped_rectangle_vertex(vertex_id, locals.bounds, locals.content_mask.bounds);
         SurfaceVarying {
             position: vertex.clip_position,
+            // The whole texture maps to the unclipped bounds.
             texture_position: vertex.unit_position,
-            clip_distances: clip_distances(
-                vertex.viewport_position,
-                get!(SURFACE_LOCALS).content_mask.bounds,
-            ),
         }
     }
 
     #[fragment]
     pub fn fragment_surface(input: SurfaceVarying) -> Vec4f {
-        if is_clipped(input.clip_distances) {
-            return transparent();
-        }
         let locals = get!(SURFACE_LOCALS);
         let fade = ContentMask::alpha(locals.content_mask, input.position.xy());
         if locals.color_format == SurfaceColorFormat::Yuv {
@@ -118,18 +111,17 @@ pub mod blur {
     pub struct BlurCompositeVertexData {
         pub position: Vec4f,
         pub texture_coordinates: Vec2f,
-        pub clip_distances: Vec4f,
     }
 
     pub fn prepare_blur_composite_vertex(vertex_id: u32) -> BlurCompositeVertexData {
-        let vertex = rectangle_vertex(vertex_id, get!(BLUR_LOCALS).bounds);
+        let vertex = clipped_rectangle_vertex(
+            vertex_id,
+            get!(BLUR_LOCALS).bounds,
+            get!(BLUR_LOCALS).content_mask,
+        );
         BlurCompositeVertexData {
             position: vertex.clip_position,
             texture_coordinates: vertex.unit_position,
-            clip_distances: clip_distances(
-                vertex.viewport_position,
-                get!(BLUR_LOCALS).content_mask,
-            ),
         }
     }
 
@@ -155,8 +147,6 @@ pub mod blur {
         pub position: Vec4f,
         #[location(0)]
         pub texture_coordinates: Vec2f,
-        #[location(3)]
-        pub clip_distances: Vec4f,
     }
 
     #[vertex]
@@ -165,7 +155,6 @@ pub mod blur {
         BlurVarying {
             position: vertex.clip_position,
             texture_coordinates: vertex.texture_coordinates,
-            clip_distances: unclipped_distances(),
         }
     }
 
@@ -217,15 +206,11 @@ pub mod blur {
         BlurVarying {
             position: vertex.position,
             texture_coordinates: vertex.texture_coordinates,
-            clip_distances: vertex.clip_distances,
         }
     }
 
     #[fragment]
     pub fn fragment_blur_composite(input: BlurVarying) -> Vec4f {
-        if is_clipped(input.clip_distances) {
-            return transparent();
-        }
         let coverage = select(
             1.0,
             antialiased_coverage(rounded_rectangle_signed_distance(
@@ -251,11 +236,9 @@ pub mod blur {
         #[interpolate(flat)]
         pub vertical_corner_reaches: Vec4f,
         #[location(3)]
-        pub clip_distances: Vec4f,
-        #[location(4)]
         #[interpolate(flat)]
         pub smoothing_factors: Vec4f,
-        #[location(5)]
+        #[location(4)]
         #[interpolate(flat)]
         pub superellipse_power: f32,
     }
@@ -276,7 +259,6 @@ pub mod blur {
             texture_coordinates: vertex.texture_coordinates,
             horizontal_corner_reaches: prepared.horizontal_reaches,
             vertical_corner_reaches: prepared.vertical_reaches,
-            clip_distances: vertex.clip_distances,
             smoothing_factors: prepared.smoothing_factors,
             superellipse_power: prepared.superellipse_power,
         }
@@ -284,9 +266,6 @@ pub mod blur {
 
     #[fragment]
     pub fn fragment_smoothed_blur_composite(input: SmoothedBlurVarying) -> Vec4f {
-        if is_clipped(input.clip_distances) {
-            return transparent();
-        }
         let coverage = select(
             1.0,
             antialiased_coverage(prepared_corner_signed_distance(

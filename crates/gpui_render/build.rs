@@ -5,9 +5,6 @@
 //! against the Naga versions its consumers require. Dialect gaps close via mechanical
 //! transforms here, never per-backend hand edits.
 
-#[path = "src/path_types.rs"]
-#[allow(dead_code)]
-mod path_types;
 #[path = "src/shaders/mod.rs"]
 mod shaders;
 
@@ -20,6 +17,8 @@ use std::ffi::CString;
 const DATA_TEXTURE_WIDTH: u32 = 1024;
 /// Group-1 binding carrying the per-draw batch base for the downlevel transport.
 const DOWNLEVEL_RANGE_BINDING: u32 = 4;
+/// Metal buffer slot of Naga's runtime-array sizes. Group-1 buffers take slots 2 to 4.
+const MSL_SIZES_BUFFER_SLOT: u8 = 5;
 
 #[derive(Clone, Copy)]
 enum NagaCompatibility {
@@ -84,6 +83,10 @@ struct NativeShaderModule {
 struct StorageArray {
     name: String,
     element_type: String,
+    /// The binding-0 array whose data texture also carries this one, for an array declared
+    /// at a later binding. Its indices are absolute elements of that texture, not relative to
+    /// `DATA_RANGE`, so the host aligns its region to the element stride.
+    shares_texture_of: Option<String>,
 }
 
 fn main() {
@@ -113,6 +116,7 @@ fn main() {
     downlevel.validate_and_write(&out_dir);
 
     let quad = shader_source("quad interface", &shaders::quad::WGSL_SOURCE);
+    let path_tile = shader_source("path tile interface", &shaders::path_tile::WGSL_SOURCE);
     let monochrome = shader_source(
         "monochrome sprite interface",
         &shaders::monochrome_sprite::WGSL_SOURCE,
@@ -131,6 +135,7 @@ fn main() {
     let surface = shader_source("surface interface", &shaders::surface::WGSL_SOURCE);
     let blur = shader_source("blur interface", &shaders::blur::WGSL_SOURCE);
     let downlevel_quad = downlevel_dialect("quad interface", &quad);
+    let downlevel_path_tile = downlevel_dialect("path tile interface", &path_tile);
     let downlevel_polychrome = downlevel_dialect("polychrome sprite interface", &polychrome);
     let downlevel_surface = downlevel_dialect("surface interface", &surface);
     let downlevel_blur = downlevel_dialect("blur interface", &blur);
@@ -145,6 +150,12 @@ fn main() {
         BindingLayout {
             constant: "INSTANCE_BINDINGS",
             source: &quad,
+            group: shaders::interface::DATA_BIND_GROUP,
+            dialect: ReflectionDialect::Modern,
+        },
+        BindingLayout {
+            constant: "PATH_TILE_BINDINGS",
+            source: &path_tile,
             group: shaders::interface::DATA_BIND_GROUP,
             dialect: ReflectionDialect::Modern,
         },
@@ -183,6 +194,12 @@ fn main() {
         BindingLayout {
             constant: "DOWNLEVEL_INSTANCE_BINDINGS",
             source: &downlevel_quad,
+            group: shaders::interface::DATA_BIND_GROUP,
+            dialect: ReflectionDialect::Downlevel,
+        },
+        BindingLayout {
+            constant: "DOWNLEVEL_PATH_TILE_BINDINGS",
+            source: &downlevel_path_tile,
             group: shaders::interface::DATA_BIND_GROUP,
             dialect: ReflectionDialect::Downlevel,
         },
@@ -263,13 +280,25 @@ fn downlevel_dialect(name: &str, source: &str) -> String {
     let mut transformed = String::with_capacity(source.len() + 4096);
     let mut arrays = Vec::new();
 
+    let mut primary: Option<String> = None;
     for line in source.lines() {
         let trimmed = line.trim();
-        if let Some(array) = parse_storage_array_decl(trimmed) {
-            transformed.push_str(&format!(
-                "@group(1) @binding(0) var {}_DATA: texture_2d<u32>;\n",
-                array.name
-            ));
+        if let Some((binding, mut array)) = parse_storage_array_decl(trimmed) {
+            if binding == 0 {
+                transformed.push_str(&format!(
+                    "@group(1) @binding(0) var {}_DATA: texture_2d<u32>;\n",
+                    array.name
+                ));
+                primary = Some(array.name.clone());
+            } else {
+                let shared = primary.clone().unwrap_or_else(|| {
+                    panic!(
+                        "{name}: storage array {} at binding {binding} follows no binding-0 array",
+                        array.name
+                    )
+                });
+                array.shares_texture_of = Some(shared);
+            }
             arrays.push(array);
         } else {
             transformed.push_str(line);
@@ -292,8 +321,10 @@ fn downlevel_dialect(name: &str, source: &str) -> String {
     }
 }
 
-fn parse_storage_array_decl(line: &str) -> Option<StorageArray> {
-    let rest = line.strip_prefix("@group(1) @binding(0) var<storage, read> ")?;
+fn parse_storage_array_decl(line: &str) -> Option<(u32, StorageArray)> {
+    let rest = line.strip_prefix("@group(1) @binding(")?;
+    let (binding, rest) = rest.split_once(") var<storage, read> ")?;
+    let binding: u32 = binding.parse().ok()?;
     let (name, rest) = rest.split_once(": array<")?;
     let type_name = rest
         .strip_suffix(';')?
@@ -304,10 +335,14 @@ fn parse_storage_array_decl(line: &str) -> Option<StorageArray> {
         !type_name.is_empty(),
         "storage array declaration has no element type"
     );
-    Some(StorageArray {
-        name: name.trim().to_string(),
-        element_type: type_name,
-    })
+    Some((
+        binding,
+        StorageArray {
+            name: name.trim().to_string(),
+            element_type: type_name,
+            shares_texture_of: None,
+        },
+    ))
 }
 
 /// Rewrites `NAME[u32(expr)]` accesses into `dl_load_NAME(expr)` calls.
@@ -383,10 +418,14 @@ fn emit_downlevel_runtime(name: &str, base_source: &str, arrays: &[StorageArray]
         let handle = find_type(&module, &array.element_type, name);
         emit_type_decoder(&module, &layouter, handle, &mut runtime, &mut emitted);
         let words = words_per_element(&layouter, handle);
+        let (texture, base) = match &array.shares_texture_of {
+            Some(primary) => (primary.as_str(), ""),
+            None => (array.name.as_str(), "DATA_RANGE.base_texel * 4u + "),
+        };
         writeln!(
             runtime,
             "fn dl_load_{array_name}(i: u32) -> {type_name} {{
-    return dl_load_{type_name}_impl({array_name}_DATA, DATA_RANGE.base_texel * 4u + i * {words}u);
+    return dl_load_{type_name}_impl({texture}_DATA, {base}i * {words}u);
 }}",
             array_name = array.name,
             type_name = array.element_type,
@@ -796,15 +835,9 @@ fn write_native_shaders(out_dir: &std::path::Path) {
             requires_dual_source_lowering: false,
         },
         NativeShaderModule {
-            pipeline: &PATH_RASTERIZATION,
-            pipeline_path: "PATH_RASTERIZATION",
-            source: &shaders::path_rasterization::WGSL_SOURCE,
-            requires_dual_source_lowering: false,
-        },
-        NativeShaderModule {
-            pipeline: &PATHS,
-            pipeline_path: "PATHS",
-            source: &shaders::path::WGSL_SOURCE,
+            pipeline: &PATH_TILES,
+            pipeline_path: "PATH_TILES",
+            source: &shaders::path_tile::WGSL_SOURCE,
             requires_dual_source_lowering: false,
         },
         NativeShaderModule {
@@ -1210,6 +1243,7 @@ fn dx11_draw_constants_register(pipeline: &shaders::interface::Pipeline) -> Opti
     use shaders::interface::DataLayout;
     match pipeline.data_layout {
         DataLayout::Instances
+        | DataLayout::PathTiles
         | DataLayout::TexturedInstances
         | DataLayout::MonochromeSprites
         | DataLayout::SubpixelSprites => Some(shaders::interface::DX11_DRAW_CONSTANTS_REGISTER),
@@ -1328,7 +1362,7 @@ fn write_msl(module: &naga::Module, info: &naga::valid::ModuleInfo, label: &str)
     }
     let entry_resources = naga::back::msl::EntryPointResources {
         resources,
-        sizes_buffer: Some(3),
+        sizes_buffer: Some(MSL_SIZES_BUFFER_SLOT),
         ..Default::default()
     };
     let per_entry_point_map = module

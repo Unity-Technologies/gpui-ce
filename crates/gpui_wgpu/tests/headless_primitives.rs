@@ -33,9 +33,11 @@ fn filled_path_resolves_without_invalidating_the_frame() {
     builder.line_to(gpui::point(gpui::px(80.0), gpui::px(20.0)));
     builder.line_to(gpui::point(gpui::px(50.0), gpui::px(80.0)));
     builder.close();
-    let mut path = builder.build().expect("triangle").scale(1.0);
-    path.content_mask = full_mask();
-    path.color = solid_background(gpui::white());
+    let path = painted(
+        builder.build().expect("triangle"),
+        full_mask(),
+        solid_background(gpui::white()),
+    );
     scene.insert_primitive(path);
     scene.finish();
 
@@ -100,9 +102,11 @@ fn triangle_scene() -> Scene {
     builder.line_to(gpui::point(gpui::px(80.0), gpui::px(20.0)));
     builder.line_to(gpui::point(gpui::px(50.0), gpui::px(80.0)));
     builder.close();
-    let mut path = builder.build().expect("triangle").scale(1.0);
-    path.content_mask = full_mask();
-    path.color = solid_background(gpui::white());
+    let path = painted(
+        builder.build().expect("triangle"),
+        full_mask(),
+        solid_background(gpui::white()),
+    );
     scene.insert_primitive(path);
     scene.finish();
     scene
@@ -207,11 +211,11 @@ fn every_primitive_kind_renders() {
         order: 0,
         blur_radius: ScaledPixels(0.0),
         bounds: shadow_bounds,
-        corner_radii: Default::default(),
+        corner_radii: Corners::default(),
         content_mask: full_mask(),
         color: blue.into(),
-        element_bounds: shadow_bounds,
-        element_corner_radii: Default::default(),
+        shape_bounds: shadow_bounds,
+        shape_corner_radii: Default::default(),
         inset: ShaderBool::Disabled,
         corner_smoothing: 0.0,
     });
@@ -273,23 +277,23 @@ fn every_primitive_kind_renders() {
         order: 0,
         blur_radius: ScaledPixels(0.0),
         bounds: gradient_drop_bounds,
-        corner_radii: Default::default(),
+        corner_radii: Corners::default(),
         content_mask: full_mask(),
         color: gradient,
-        element_bounds: gradient_drop_bounds,
-        element_corner_radii: Default::default(),
+        shape_bounds: gradient_drop_bounds,
+        shape_corner_radii: Default::default(),
         inset: ShaderBool::Disabled,
         corner_smoothing: 0.0,
     });
     scene.insert_primitive(Shadow {
         order: 0,
         blur_radius: ScaledPixels(0.0),
-        bounds: bounds(266.0, 16.0, 28.0, 28.0),
+        bounds: bounds(260.0, 10.0, 40.0, 40.0),
         corner_radii: Default::default(),
         content_mask: full_mask(),
         color: gradient,
-        element_bounds: bounds(260.0, 10.0, 40.0, 40.0),
-        element_corner_radii: Default::default(),
+        shape_bounds: bounds(266.0, 16.0, 28.0, 28.0),
+        shape_corner_radii: Default::default(),
         inset: ShaderBool::Enabled,
         corner_smoothing: 0.0,
     });
@@ -450,12 +454,12 @@ fn smoothed_primitives_share_one_contour() {
     scene.insert_primitive(Shadow {
         order: 0,
         blur_radius: ScaledPixels(5.0),
-        bounds: bounds(25.0, 101.0, 50.0, 44.0),
-        corner_radii: Corners::all(ScaledPixels(15.0)),
+        bounds: bounds(25.0, 101.0, 50.0, 44.0).dilate(ScaledPixels(5.0) * 3.0),
+        corner_radii: Corners::default(),
         content_mask,
         color: blue.into(),
-        element_bounds: drop_element,
-        element_corner_radii: Corners::all(ScaledPixels(15.0)),
+        shape_bounds: bounds(25.0, 101.0, 50.0, 44.0),
+        shape_corner_radii: Corners::all(ScaledPixels(15.0)),
         inset: ShaderBool::Disabled,
         corner_smoothing: 0.6,
     });
@@ -480,12 +484,12 @@ fn smoothed_primitives_share_one_contour() {
     scene.insert_primitive(Shadow {
         order: 0,
         blur_radius: ScaledPixels(4.0),
-        bounds: bounds(104.0, 98.0, 42.0, 40.0),
-        corner_radii: Corners::all(ScaledPixels(12.0)),
+        bounds: inset_bounds,
+        corner_radii: Corners::all(ScaledPixels(16.0)),
         content_mask,
         color: black.into(),
-        element_bounds: inset_bounds,
-        element_corner_radii: Corners::all(ScaledPixels(16.0)),
+        shape_bounds: bounds(104.0, 98.0, 42.0, 40.0),
+        shape_corner_radii: Corners::all(ScaledPixels(12.0)),
         inset: ShaderBool::Enabled,
         corner_smoothing: 1.0,
     });
@@ -641,4 +645,17 @@ fn content_mask_fades_quad_edges() {
     close(60, 2, 64);
     // The unfaded right edge still clips hard at the mask boundary.
     assert_eq!(pixel(101, 50)[0], 0);
+}
+
+/// A path filled with `color` inside `mask`, painted at scale factor 1.
+fn painted(
+    path: gpui::Path,
+    mask: ContentMask<ScaledPixels>,
+    color: gpui::Background,
+) -> gpui::PaintedPath {
+    let mask = ContentMask {
+        bounds: mask.bounds.map(|value| gpui::px(value.0)),
+        ..Default::default()
+    };
+    gpui::PaintedPath::new(path, 1.0, mask, color)
 }

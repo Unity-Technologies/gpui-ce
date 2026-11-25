@@ -8,18 +8,19 @@ use crate::{
     GlyphId, GlyphRenderMode, GpuSpecs, InputHandler, InputPreference, IntoElement, IsZero,
     KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId, Lerp,
     LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite, Motion, MouseButton,
-    MouseEvent, MouseMoveEvent, MouseUpEvent, PaintSurface, Path, PathHash, Pixels, PlatformAtlas,
-    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite,
-    Priority, PromptButton, PromptLevel, Quad, RasterizedGlyphFormat, Render, RenderGlyphParams,
-    RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, ResolvedDirection,
-    SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledFilter, ScaledPixels,
-    Scene, Shadow, SharedString, Size, SpriteAnimation, StrikethroughStyle, Style, SubpixelSprite,
-    Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task,
-    TextInputConfiguration, TextInputStateChange, TextRenderingMode, TextStyle,
-    TextStyleRefinement, ThermalState, TransformationMatrix, Transition, TransitionState,
-    Underline, UnderlineStyle, UnicodeBidi, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem,
-    WindowVisibility, downscale_bgra, downscaled_image_size,
+    MouseEvent, MouseMoveEvent, MouseUpEvent, PaintSurface, PaintedPath, Path, PathHash, Pixels,
+    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
+    PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, RasterizedGlyphFormat, Render,
+    RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge,
+    ResolvedDirection, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y,
+    ScaledFilter, ScaledPixels, Scene, Shadow, SharedString, Size, SpriteAnimation,
+    StrikethroughStyle, Style, SubpixelSprite, Subscription, SystemWindowTab,
+    SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextInputConfiguration,
+    TextInputStateChange, TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState,
+    TransformationMatrix, Transition, TransitionState, Underline, UnderlineStyle, UnicodeBidi,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations,
+    WindowOptions, WindowParams, WindowTextSystem, WindowVisibility, downscale_bgra,
+    downscaled_image_size,
     gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer},
     image_downscale_level,
     interactive::TouchEvent,
@@ -5284,28 +5285,20 @@ impl Window {
         });
     }
 
-    /// Creates a new painting layer for the specified bounds. A "layer" is a batch
-    /// of geometry that are non-overlapping and have the same draw order. This is typically used
+    /// Creates a new painting layer. A "layer" is a batch of geometry that are
+    /// non-overlapping and have the same draw order. This is typically used
     /// for performance reasons.
     ///
+    /// Layers painted inside `f` are drawn above this layer, including above
+    /// what `f` paints after them.
+    ///
     /// This method should only be called as part of the paint phase of element drawing.
-    pub fn paint_layer<R>(&mut self, bounds: Bounds<Pixels>, f: impl FnOnce(&mut Self) -> R) -> R {
+    pub fn paint_layer<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
         self.invalidator.debug_assert_paint();
 
-        let content_mask = self.content_mask();
-        let clipped_bounds = bounds.intersect(&content_mask.bounds);
-        if !clipped_bounds.is_empty() {
-            self.next_frame
-                .scene
-                .push_layer(self.cover_bounds(clipped_bounds));
-        }
-
+        self.next_frame.scene.push_layer();
         let result = f(self);
-
-        if !clipped_bounds.is_empty() {
-            self.next_frame.scene.pop_layer();
-        }
-
+        self.next_frame.scene.pop_layer();
         result
     }
 
@@ -5362,24 +5355,35 @@ impl Window {
                 shadow.spread_radius
             };
 
-            let shadow_bounds = (bounds + shadow.offset).dilate(spread);
+            let shape_bounds = self.cover_bounds((bounds + shadow.offset).dilate(spread));
+            if shape_bounds.is_empty() && !inset {
+                continue;
+            }
 
-            let shadow_radii = if inset {
+            let shape_radii = if inset {
                 // Large inset spreads must not produce negative radii in the shader.
                 corner_radii.map(|radius| (*radius - shadow.spread_radius).max(Pixels::ZERO))
             } else {
                 corner_radii
             };
 
+            let blur_radius = shadow.blur_radius.scale(scale_factor);
+            // `bounds` is the area the shadow paints: an inset shadow stays inside the
+            // element, and a drop shadow's blur reaches three standard deviations out.
+            let (paint_bounds, paint_corner_radii) = if inset {
+                (element_bounds, element_corner_radii)
+            } else {
+                (shape_bounds.dilate(blur_radius * 3.), Corners::default())
+            };
             self.next_frame.scene.insert_primitive(Shadow {
                 order: 0,
-                blur_radius: shadow.blur_radius.scale(scale_factor),
-                bounds: self.cover_bounds(shadow_bounds),
+                blur_radius,
+                bounds: paint_bounds,
                 content_mask,
-                corner_radii: shadow_radii.scale(scale_factor),
+                corner_radii: paint_corner_radii,
                 color: shadow.color,
-                element_bounds,
-                element_corner_radii,
+                shape_bounds,
+                shape_corner_radii: shape_radii.scale(scale_factor),
                 inset: inset.into(),
                 corner_smoothing,
             });
@@ -5595,17 +5599,17 @@ impl Window {
     /// Paint the given `Path` into the scene for the next frame at the current z-index.
     ///
     /// This method should only be called as part of the paint phase of element drawing.
-    pub fn paint_path(&mut self, mut path: Path<Pixels>, color: impl Into<Background>) {
+    pub fn paint_path(&mut self, path: Path, color: impl Into<Background>) {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
         let content_mask = self.content_mask();
-        path.content_mask = content_mask;
-        let color: Background = color.into();
-        path.color = color;
-        self.next_frame
-            .scene
-            .insert_primitive(path.scale(scale_factor));
+        self.next_frame.scene.insert_primitive(PaintedPath::new(
+            path,
+            scale_factor,
+            content_mask,
+            color.into(),
+        ));
     }
 
     /// Paint an underline into the scene for the next frame at the current z-index.
@@ -10703,11 +10707,14 @@ mod tests {
             Some(hsla(0.3, 0.7, 0.4, 0.4)),
             "shadow alpha stays intrinsic until the group composite"
         );
-        assert_eq!(drop_gradient.element_bounds, inset_gradient.element_bounds);
-        assert!(drop_gradient.bounds.size.width > drop_gradient.element_bounds.size.width);
-        assert!(drop_gradient.bounds.size.height > drop_gradient.element_bounds.size.height);
-        assert!(inset_gradient.bounds.size.width < inset_gradient.element_bounds.size.width);
-        assert!(inset_gradient.bounds.size.height < inset_gradient.element_bounds.size.height);
+        // An inset shadow paints the element; a drop shadow paints its blurred shape.
+        let element = inset_gradient.bounds;
+        assert!(drop_gradient.shape_bounds.size.width > element.size.width);
+        assert!(drop_gradient.shape_bounds.size.height > element.size.height);
+        assert!(drop_gradient.bounds.size.width >= drop_gradient.shape_bounds.size.width);
+        assert!(drop_gradient.bounds.size.height >= drop_gradient.shape_bounds.size.height);
+        assert!(inset_gradient.shape_bounds.size.width < element.size.width);
+        assert!(inset_gradient.shape_bounds.size.height < element.size.height);
         assert!(drop_gradient.order < inset_gradient.order);
     }
 

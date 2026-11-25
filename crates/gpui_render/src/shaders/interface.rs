@@ -37,6 +37,8 @@ pub fn slice_as_bytes<T: BufferData>(values: &[T]) -> &[u8] {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum DataLayout {
     Instances,
+    /// Path tiles at binding 0, indexing the frame's curves at 1 and paints at 2.
+    PathTiles,
     TexturedInstances,
     MonochromeSprites,
     SubpixelSprites,
@@ -100,8 +102,7 @@ define_pipelines! {
     SMOOTHED_QUADS: "smoothed_quads", vertex_smoothed_quad, fragment_smoothed_quad, TriangleStrip, Instances, Rectangle;
     SHADOWS: "shadows", vertex_shadow, fragment_shadow, TriangleStrip, Instances, Rectangle;
     SMOOTHED_SHADOWS: "smoothed_shadows", vertex_smoothed_shadow, fragment_smoothed_shadow, TriangleStrip, Instances, Rectangle;
-    PATH_RASTERIZATION: "path_rasterization", vertex_path_rasterization, fragment_path_rasterization, TriangleList, Instances, Dynamic;
-    PATHS: "paths", vertex_path, fragment_path, TriangleStrip, TexturedInstances, Rectangle;
+    PATH_TILES: "path_tiles", vertex_path_tile, fragment_path_tile, TriangleStrip, PathTiles, Rectangle;
     UNDERLINES: "underlines", vertex_underline, fragment_underline, TriangleStrip, Instances, Rectangle;
     MONOCHROME_SPRITES: "monochrome_sprites", vertex_monochrome_sprite, fragment_monochrome_sprite, TriangleStrip, MonochromeSprites, Rectangle;
     SUBPIXEL_SPRITES: "subpixel_sprites", vertex_subpixel_sprite, fragment_subpixel_sprite, TriangleStrip, SubpixelSprites, Rectangle;
@@ -128,6 +129,9 @@ pub const DATA_BIND_GROUP: u32 = 1;
 pub const GLOBAL_UNIFORMS_BINDING: u32 = 0;
 pub const FONT_RASTERIZATION_BINDING: u32 = 1;
 pub const DATA_BUFFER_BINDING: u32 = 0;
+/// Path tiles index the frame's curves and paints through these group-1 bindings.
+pub const PATH_CURVES_BINDING: u32 = 1;
+pub const PATH_PAINTS_BINDING: u32 = 2;
 pub const PRIMARY_TEXTURE_BINDING: u32 = 1;
 pub const SECONDARY_TEXTURE_BINDING: u32 = 2;
 pub const PRIMARY_SAMPLER_BINDING: u32 = 2;
@@ -154,6 +158,9 @@ buffer_data! {
     super::surface::SurfaceUniforms => "SurfaceUniforms",
     super::blur::BlurUniforms => "BlurUniforms",
     gpui::Quad => "Quad",
+    gpui::PathTile => "PathTile",
+    gpui::PathCurve => "PathCurve",
+    gpui::PathPaint => "PathPaint",
     gpui::Shadow => "Shadow",
     gpui::Underline => "Underline",
     gpui::MonochromeSprite => "MonochromeSprite",
@@ -163,6 +170,9 @@ buffer_data! {
 
 pub const SCENE_STORAGE_ABI: &[StorageAbi] = &[
     storage_abi::<gpui::Quad>(),
+    storage_abi::<gpui::PathTile>(),
+    storage_abi::<gpui::PathCurve>(),
+    storage_abi::<gpui::PathPaint>(),
     storage_abi::<gpui::Shadow>(),
     storage_abi::<gpui::Underline>(),
     storage_abi::<gpui::MonochromeSprite>(),
@@ -231,14 +241,5 @@ pub const RENDER_BUFFER_LAYOUTS: &[gpui::SceneBufferLayout] = &[
         padding0,
         padding1,
         padding2
-    ),
-    render_layout!(crate::path_types::PathSprite, "PathSprite", bounds),
-    render_layout!(
-        crate::path_types::PathRasterizationVertex,
-        "PathRasterizationVertex",
-        xy_position,
-        curve_position,
-        color,
-        bounds
     ),
 ];

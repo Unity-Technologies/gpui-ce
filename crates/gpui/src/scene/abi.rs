@@ -23,6 +23,29 @@ macro_rules! layout {
 
 #[doc(hidden)]
 pub const SCENE_BUFFER_LAYOUTS: &[SceneBufferLayout] = &[
+    layout!(PathCurve, "PathCurve", p0, p1, a, b, sign, pad),
+    layout!(
+        PathTile,
+        "PathTile",
+        paint,
+        curve_start,
+        curve_count,
+        backdrop,
+        top_left,
+        bottom_right,
+        reference,
+        curves_top_left,
+        curves_bottom_right
+    ),
+    layout!(
+        PathPaint,
+        "PathPaint",
+        bounds,
+        content_mask,
+        color,
+        even_odd,
+        pad
+    ),
     layout!(Bounds<ScaledPixels>, "Bounds", origin, size),
     layout!(Bounds<DevicePixels>, "AtlasBounds", origin, size),
     layout!(
@@ -79,8 +102,8 @@ pub const SCENE_BUFFER_LAYOUTS: &[SceneBufferLayout] = &[
         corner_radii,
         content_mask,
         color,
-        element_bounds,
-        element_corner_radii,
+        shape_bounds,
+        shape_corner_radii,
         inset,
         corner_smoothing
     ),

@@ -35,6 +35,7 @@ mod keymap;
 mod lerp;
 mod motion;
 mod path_builder;
+mod path_winding;
 mod platform;
 pub mod prelude;
 /// Profiling utilities for task, frame, and thread performance tracking.
@@ -161,6 +162,7 @@ pub use keymap::*;
 pub use lerp::*;
 pub use motion::*;
 pub use path_builder::*;
+pub(crate) use path_winding::*;
 pub use platform::*;
 pub use profiler::*;
 #[cfg(any(target_os = "windows", target_os = "linux", target_family = "wasm"))]
