@@ -1088,6 +1088,11 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn toggle_window_tab_overview(&self) {}
     fn set_tabbing_identifier(&self, _identifier: Option<String>) {}
 
+    fn native_window_state(&self) -> Option<Vec<u8>> {
+        None
+    }
+    fn restore_native_window_state(&self, _state: &[u8]) {}
+
     #[cfg(target_os = "windows")]
     fn get_raw_handle(&self) -> windows::Win32::Foundation::HWND;
 
