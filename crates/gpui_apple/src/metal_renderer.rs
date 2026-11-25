@@ -1,6 +1,6 @@
 use crate::metal_atlas::MetalAtlas;
 use anyhow::Result;
-use block::ConcreteBlock;
+use block2::RcBlock;
 use core_graphics::geometry::CGSize;
 use gpui::{
     AtlasTextureId, Bounds, Corners, DevicePixels, FilterRenderTarget, MAX_FILTER_GROUP_DEPTH,
@@ -27,6 +27,7 @@ use gpui_render::{
     feature = "render-to-image"
 ))]
 use image::RgbaImage;
+use objc2::runtime::AnyObject;
 
 use core_foundation::base::TCFType;
 use core_video::{
@@ -1066,12 +1067,15 @@ impl MetalRenderer {
     ) {
         let instance_buffer_pool = self.instance_buffer_pool.clone();
         let instance_buffer = Cell::new(Some(instance_buffer));
-        let block = ConcreteBlock::new(move |_| {
+        let block = RcBlock::new(move |_: ptr::NonNull<AnyObject>| {
             if let Some(instance_buffer) = instance_buffer.take() {
                 instance_buffer_pool.lock().release(instance_buffer);
             }
         });
-        command_buffer.add_completed_handler(&block.copy());
+        // SAFETY: Both pointee types are opaque views of the same Objective-C block pointer ABI.
+        unsafe {
+            command_buffer.add_completed_handler(&*RcBlock::as_ptr(&block).cast());
+        }
     }
 
     fn draw_primitives(

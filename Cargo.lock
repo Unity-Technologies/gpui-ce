@@ -2545,7 +2545,7 @@ name = "gpui_ce_apple"
 version = "0.4.0-unity.20261112"
 dependencies = [
  "anyhow",
- "block",
+ "block2 0.6.2",
  "core-foundation",
  "core-graphics",
  "core-video",

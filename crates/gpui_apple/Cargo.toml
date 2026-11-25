@@ -26,7 +26,7 @@ wgsl-rs.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 anyhow.workspace = true
-block.workspace = true
+block2.workspace = true
 collections.workspace = true
 core-foundation.workspace = true
 core-graphics.workspace = true
