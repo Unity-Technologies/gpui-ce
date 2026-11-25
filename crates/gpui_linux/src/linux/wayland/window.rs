@@ -1225,7 +1225,7 @@ impl WaylandWindowStatePtr {
             accepts_text_input
         } else {
             drop(state);
-            true
+            false
         };
         if Some(ime_enabled) == client.ime_enabled() {
             return;
