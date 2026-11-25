@@ -12,36 +12,35 @@ pub mod shadow {
         pub corner_radii: Corners,
         pub content_mask: ContentMask,
         pub color: Background,
-        pub element_bounds: Bounds,
-        pub element_corner_radii: Corners,
+        /// The shape that is blurred: a drop shadow's silhouette, or an inset shadow's hole.
+        pub shape_bounds: Bounds,
+        pub shape_corner_radii: Corners,
         pub inset: ShaderBool,
         pub corner_smoothing: f32,
     }
     storage!(group(1), binding(0), SHADOWS: RuntimeArray<Shadow>);
 
+    /// The area the shadow paints: the blurred extent of a drop shadow, or the
+    /// element an inset shadow is clipped to.
     pub fn shadow_geometry(shadow: Shadow) -> Bounds {
-        if is_enabled(shadow.inset) {
-            return shadow.element_bounds;
-        }
-
-        let margin = GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS * shadow.blur_radius;
-        Bounds {
-            origin: shadow.bounds.origin - vec2f(margin, margin),
-            size: shadow.bounds.size + vec2f(2.0 * margin, 2.0 * margin),
-        }
+        shadow.bounds
     }
 
     pub fn shadow_paint(shadow: Shadow) -> Paint {
-        let mut bounds = shadow.bounds;
+        let mut bounds = shadow.shape_bounds;
         if is_enabled(shadow.inset) {
-            bounds = shadow.element_bounds;
+            bounds = shadow.bounds;
         }
 
         Paint::new(shadow.color, bounds)
     }
 
     pub fn prepare_shadow_blur(shadow: Shadow) -> PreparedBlurredRectangle {
-        prepare_blurred_rectangle(shadow.bounds.size, shadow.corner_radii, shadow.blur_radius)
+        prepare_blurred_rectangle(
+            shadow.shape_bounds.size,
+            shadow.shape_corner_radii,
+            shadow.blur_radius,
+        )
     }
 
     pub fn blurred_shadow_coverage(
@@ -49,7 +48,7 @@ pub mod shadow {
         position: Vec2f,
         prepared: PreparedBlurredRectangle,
     ) -> f32 {
-        blurred_rectangle_coverage(position - Bounds::center(shadow.bounds), prepared)
+        blurred_rectangle_coverage(position - Bounds::center(shadow.shape_bounds), prepared)
     }
 
     pub fn shadow_coverage(
@@ -61,8 +60,8 @@ pub mod shadow {
         if shadow.blur_radius == 0.0 {
             coverage = antialiased_coverage(rounded_rectangle_signed_distance(
                 position,
-                shadow.bounds,
-                shadow.corner_radii,
+                shadow.shape_bounds,
+                shadow.shape_corner_radii,
             ));
         } else {
             coverage = blurred_shadow_coverage(shadow, position, prepared_blur);
@@ -72,8 +71,8 @@ pub mod shadow {
             coverage = (1.0 - coverage)
                 * antialiased_coverage(rounded_rectangle_signed_distance(
                     position,
-                    shadow.element_bounds,
-                    shadow.element_corner_radii,
+                    shadow.bounds,
+                    shadow.corner_radii,
                 ));
         }
         coverage
@@ -90,27 +89,27 @@ pub mod shadow {
         if shadow.blur_radius == 0.0 {
             coverage = antialiased_coverage(prepared_corner_signed_distance(
                 position,
-                shadow.bounds,
-                shadow.corner_radii,
+                shadow.shape_bounds,
+                shadow.shape_corner_radii,
                 shadow.corner_smoothing,
                 prepared,
             ));
-        } else if !Corners::is_zero(shadow.corner_radii) {
+        } else if !Corners::is_zero(shadow.shape_corner_radii) {
             let blur_limit = GAUSSIAN_CUTOFF_STANDARD_DEVIATIONS * shadow.blur_radius;
-            let half_size = Bounds::half_size(shadow.bounds);
-            let center_to_point = position - Bounds::center(shadow.bounds);
+            let half_size = Bounds::half_size(shadow.shape_bounds);
+            let center_to_point = position - Bounds::center(shadow.shape_bounds);
             let box_delta = abs(center_to_point) - half_size;
             let outside_delta = max(box_delta, vec2f(0.0, 0.0));
 
             if dot(outside_delta, outside_delta) <= blur_limit * blur_limit {
-                let local_point = position - shadow.bounds.origin;
+                let local_point = position - shadow.shape_bounds.origin;
                 let edge_depth = min(
-                    min(local_point.x, shadow.bounds.size.x - local_point.x),
-                    min(local_point.y, shadow.bounds.size.y - local_point.y),
+                    min(local_point.x, shadow.shape_bounds.size.x - local_point.x),
+                    min(local_point.y, shadow.shape_bounds.size.y - local_point.y),
                 );
                 let corner_candidate = figma_has_corner_candidate(
                     local_point,
-                    shadow.bounds.size,
+                    shadow.shape_bounds.size,
                     prepared.horizontal_reaches,
                     prepared.vertical_reaches,
                 );
@@ -120,8 +119,8 @@ pub mod shadow {
                 } else {
                     let distance = prepared_corner_signed_distance(
                         position,
-                        shadow.bounds,
-                        shadow.corner_radii,
+                        shadow.shape_bounds,
+                        shadow.shape_corner_radii,
                         shadow.corner_smoothing,
                         prepared,
                     );
@@ -136,8 +135,8 @@ pub mod shadow {
             coverage = (1.0 - coverage)
                 * antialiased_coverage(prepared_corner_signed_distance(
                     position,
-                    shadow.element_bounds,
-                    shadow.element_corner_radii,
+                    shadow.bounds,
+                    shadow.corner_radii,
                     shadow.corner_smoothing,
                     prepared_element,
                 ));
@@ -278,14 +277,14 @@ pub mod shadow {
         let shadow = get!(SHADOWS)[instance_id as usize];
         let vertex = prepare_shadow_vertex(vertex_id, instance_id, shadow);
         let prepared = prepare_corners(
-            shadow.bounds.size,
-            shadow.corner_radii,
+            shadow.shape_bounds.size,
+            shadow.shape_corner_radii,
             shadow.corner_smoothing,
             false,
         );
         let prepared_element = prepare_corners(
-            shadow.element_bounds.size,
-            shadow.element_corner_radii,
+            shadow.bounds.size,
+            shadow.corner_radii,
             shadow.corner_smoothing,
             false,
         );

@@ -102,8 +102,8 @@ pub const SCENE_BUFFER_LAYOUTS: &[SceneBufferLayout] = &[
         corner_radii,
         content_mask,
         color,
-        element_bounds,
-        element_corner_radii,
+        shape_bounds,
+        shape_corner_radii,
         inset,
         corner_smoothing
     ),

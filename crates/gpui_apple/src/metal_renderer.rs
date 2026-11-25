@@ -3121,15 +3121,15 @@ mod tests {
         shadow.insert_primitive(Shadow {
             order: 0,
             blur_radius: ScaledPixels(2.0),
-            bounds: box_bounds,
+            bounds: box_bounds.dilate(ScaledPixels(2.0) * 3.0),
             content_mask: ContentMask {
                 bounds: full,
                 ..Default::default()
             },
-            corner_radii: Corners::all(ScaledPixels(2.0)),
+            corner_radii: Corners::default(),
             color: hsla(0.7, 0.8, 0.3, 0.7).into(),
-            element_bounds: box_bounds,
-            element_corner_radii: Corners::all(ScaledPixels(2.0)),
+            shape_bounds: box_bounds,
+            shape_corner_radii: Corners::all(ScaledPixels(2.0)),
             inset: gpui::ShaderBool::Disabled,
             corner_smoothing: 0.0,
         });
