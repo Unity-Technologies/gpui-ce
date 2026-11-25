@@ -90,7 +90,7 @@ fn run_example() {
 
         for screen in cx.displays() {
             let bounds = Bounds {
-                origin: point(margin_offset, margin_offset),
+                origin: screen.bounds().origin + point(margin_offset, margin_offset),
                 size,
             };
 
@@ -149,7 +149,10 @@ fn run_example() {
             .unwrap();
 
             let bounds = Bounds {
-                origin: point(screen.bounds().center().x - size.center().x, margin_offset),
+                origin: point(
+                    screen.bounds().center().x - size.center().x,
+                    screen.bounds().top() + margin_offset,
+                ),
                 size,
             };
 
@@ -163,7 +166,10 @@ fn run_example() {
             .unwrap();
 
             let bounds = Bounds {
-                origin: point(margin_offset, screen.bounds().center().y - size.center().y),
+                origin: point(
+                    screen.bounds().left() + margin_offset,
+                    screen.bounds().center().y - size.center().y,
+                ),
                 size,
             };
 
@@ -195,7 +201,7 @@ fn run_example() {
 
             let bounds = Bounds {
                 origin: point(
-                    screen.bounds().size.width - size.width - margin_offset,
+                    screen.bounds().right() - size.width - margin_offset,
                     screen.bounds().center().y - size.center().y,
                 ),
                 size,
@@ -213,7 +219,7 @@ fn run_example() {
             let bounds = Bounds {
                 origin: point(
                     screen.bounds().center().x - size.center().x,
-                    screen.bounds().size.height - size.height - margin_offset,
+                    screen.bounds().bottom() - size.height - margin_offset,
                 ),
                 size,
             };
