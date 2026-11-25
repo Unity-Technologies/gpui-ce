@@ -29,7 +29,7 @@ use futures::channel::oneshot;
 use gpui_apple::display_link::MetalFrameSource;
 use gpui_util::ResultExt;
 use objc2::{
-    MainThreadMarker, class, msg_send,
+    AnyThread, MainThreadMarker, class, msg_send,
     rc::Retained,
     runtime::{AnyClass, AnyObject as Objc2Object, AnyProtocol, Bool, ClassBuilder, Sel},
     sel,
@@ -37,10 +37,11 @@ use objc2::{
 use objc2_app_kit::{
     NSAlert, NSAlertStyle, NSBackingStoreType, NSBeep, NSButton as Objc2NSButton,
     NSCursorFrameResizeDirections, NSCursorFrameResizePosition, NSEventModifierFlags, NSEventType,
-    NSRequestUserAttentionType, NSScreen, NSView as Objc2NSView, NSViewLayerContentsRedrawPolicy,
-    NSVisualEffectMaterial, NSVisualEffectState, NSWindow as Objc2NSWindow,
-    NSWindowButton as Objc2NSWindowButton, NSWindowCollectionBehavior, NSWindowOcclusionState,
-    NSWindowOrderingMode, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSRequestUserAttentionType, NSScreen, NSTrackingArea, NSTrackingAreaOptions,
+    NSView as Objc2NSView, NSViewLayerContentsRedrawPolicy, NSVisualEffectMaterial,
+    NSVisualEffectState, NSWindow as Objc2NSWindow, NSWindowButton as Objc2NSWindowButton,
+    NSWindowCollectionBehavior, NSWindowOcclusionState, NSWindowOrderingMode, NSWindowStyleMask,
+    NSWindowTitleVisibility,
 };
 use objc2_foundation::{
     NSInteger, NSNotFound, NSOperatingSystemVersion, NSPoint as Objc2NSPoint, NSRange,
@@ -303,14 +304,6 @@ const NSNormalWindowLevel: NSInteger = 0;
 const NSFloatingWindowLevel: NSInteger = 3;
 #[allow(non_upper_case_globals)]
 const NSPopUpWindowLevel: NSInteger = 101;
-#[allow(non_upper_case_globals)]
-const NSTrackingMouseEnteredAndExited: NSUInteger = 0x01;
-#[allow(non_upper_case_globals)]
-const NSTrackingMouseMoved: NSUInteger = 0x02;
-#[allow(non_upper_case_globals)]
-const NSTrackingActiveAlways: NSUInteger = 0x80;
-#[allow(non_upper_case_globals)]
-const NSTrackingInVisibleRect: NSUInteger = 0x200;
 #[allow(non_upper_case_globals)]
 const NSWindowAnimationBehaviorUtilityWindow: NSInteger = 4;
 #[allow(non_upper_case_globals)]
@@ -1509,15 +1502,29 @@ impl MacWindow {
             let main_window: ObjcId = msg_send![app, mainWindow];
             let mut sheet_parent = None;
 
+            // SAFETY: This is the live GPUIView (an NSView subclass) added to the
+            // content view above, and window creation runs on the main thread.
+            let tracking_view = &*native_view.cast::<Objc2NSView>();
+
             match kind {
                 WindowKind::Normal | WindowKind::Floating => {
                     if kind == WindowKind::Floating {
                         // Let the window float keep above normal windows.
                         native_window.setLevel_(NSFloatingWindowLevel);
+                        native_window.setAcceptsMouseMovedEvents_(Bool::new(true));
                     } else {
                         native_window.setLevel_(NSNormalWindowLevel);
+                        native_window.setAcceptsMouseMovedEvents_(Bool::new(false));
+                        add_mouse_tracking_area(
+                            tracking_view,
+                            NSTrackingAreaOptions::MouseEnteredAndExited
+                                | NSTrackingAreaOptions::MouseMoved
+                                // Track while this application is active, even if another
+                                // window in the application has focus.
+                                | NSTrackingAreaOptions::ActiveInActiveApp
+                                | NSTrackingAreaOptions::InVisibleRect,
+                        );
                     }
-                    native_window.setAcceptsMouseMovedEvents_(Bool::new(true));
 
                     if let Some(tabbing_identifier) = tabbing_identifier {
                         let tabbing_id = ns_string(tabbing_identifier.as_str());
@@ -1529,19 +1536,15 @@ impl MacWindow {
                 // `AnchoredPopup` is rejected in `MacPlatform::open_window`, grouped here only
                 // for exhaustiveness.
                 WindowKind::PopUp | WindowKind::AnchoredPopup(_) => {
-                    // Use a tracking area to allow receiving MouseMoved events even when
-                    // the window or application aren't active, which is often the case
-                    // e.g. for notification windows.
-                    let tracking_area: ObjcId = msg_send![class!(NSTrackingArea), alloc];
-                    let _: () = msg_send![
-                        tracking_area,
-                        initWithRect: Objc2NSRect::new(Objc2NSPoint::new(0., 0.), NSSize::new(0., 0.)),
-                        options: NSTrackingMouseEnteredAndExited | NSTrackingMouseMoved | NSTrackingActiveAlways | NSTrackingInVisibleRect,
-                        owner: native_view,
-                        userInfo: NIL
-                    ];
-                    let _: () =
-                        msg_send![native_view, addTrackingArea: tracking_area.autorelease()];
+                    add_mouse_tracking_area(
+                        tracking_view,
+                        NSTrackingAreaOptions::MouseEnteredAndExited
+                            | NSTrackingAreaOptions::MouseMoved
+                            // Track even when another application is active, e.g. so
+                            // notification windows can respond to hover.
+                            | NSTrackingAreaOptions::ActiveAlways
+                            | NSTrackingAreaOptions::InVisibleRect,
+                    );
 
                     native_window.setLevel_(NSPopUpWindowLevel);
                     let _: () = msg_send![
@@ -2912,6 +2915,21 @@ unsafe extern "C" fn dealloc_view(this: &Objc2Object, _: Sel) {
         drop_window_state(this);
         let _: () = msg_send![super(this, class!(NSView)), dealloc];
     }
+}
+
+fn add_mouse_tracking_area(native_view: &Objc2NSView, options: NSTrackingAreaOptions) {
+    // SAFETY: NSView provides the tracking-event callbacks, and the owner is
+    // the same view that retains the tracking area. No user info is supplied.
+    let tracking_area = unsafe {
+        NSTrackingArea::initWithRect_options_owner_userInfo(
+            NSTrackingArea::alloc(),
+            Objc2NSRect::ZERO,
+            options,
+            Some(native_view),
+            None,
+        )
+    };
+    native_view.addTrackingArea(&tracking_area);
 }
 
 unsafe extern "C" fn reset_cursor_rects(this: &Objc2Object, _: Sel) {
