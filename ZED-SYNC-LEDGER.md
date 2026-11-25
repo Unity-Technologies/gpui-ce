@@ -13,7 +13,7 @@
 | 4a217d5316 | #63776 | gpui_linux: Disable IME in project panel when no input handler on Wayland (#63776) | take | clean |
 | c8c07aea5c | #63580 | Add `disable_ai` check for "Agent Panel" `MenuItem` (#63580) | take | TestPlatform stores menus; import list merged |
 | 20fa2fa809 | #63882 | Reduce LLVM IR bloat one last time (#63882) | take | clean |
-| 5896274168 | #63934 | gpui: Replace shared asset futures with owning cache entries (#63934) | skip | DEFERRED: breaks fetch_asset/ImageCacheItem API that fork's fetch_asset docs and Hub scoped_image_cache use; needs a paired Hub migration |
+| 5896274168 | #63934 | gpui: Replace shared asset futures with owning cache entries (#63934) | adapt | fork's app.rs import layout and fetch_asset docs; asset_cache imports AppContext for notify; image_gallery example and Zed-only Cargo.toml hunks absent in fork; Hub's scoped_image_cache now keeps its own entries (paired Hub commit) |
 | 33c6212b05 | #58886 | Restore macOS windows to their original Space after restart (#58886) | adapt | macOS window state archive/restore rewritten for objc2 (fork has no cocoa) |
 | 450775244f | #53130 | gpui: Prevent idle sleep during AI response streaming (#53130) | adapt | fork import lists; macOS MacActivity on objc2 imports; web/windows parts kept |
 | 907b55f7ea | #63945 | gpui_macos: Migrate `register_url_scheme` to `objc2` (#63945) | skip | fork's gpui_macos already fully on objc2 |
