@@ -1869,6 +1869,50 @@ mod test {
     }
 
     #[gpui::test]
+    fn test_item_top_margin_does_not_move_it_off_its_slot(cx: &mut TestAppContext) {
+        let cx = cx.add_empty_window();
+        let state = ListState::new(3, crate::ListAlignment::Top, px(10.));
+        let tops: Rc<RefCell<Vec<(usize, Pixels)>>> = Rc::default();
+
+        struct TestView(ListState, Rc<RefCell<Vec<(usize, Pixels)>>>);
+        impl Render for TestView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let tops = self.1.clone();
+                list(self.0.clone(), move |ix, _, _| {
+                    let tops = tops.clone();
+                    // An item's root is laid out on its own, so its margin has no box to
+                    // push against: the item still occupies exactly the slot it measured.
+                    canvas(
+                        move |bounds, _, _| tops.borrow_mut().push((ix, bounds.top())),
+                        |_, _, _, _| {},
+                    )
+                    .mt(px(6.))
+                    .h(px(20.))
+                    .w_full()
+                    .into_any()
+                })
+                .w_full()
+                .h_full()
+            }
+        }
+
+        cx.draw(point(px(0.), px(0.)), size(px(100.), px(100.)), |_, cx| {
+            cx.new(|_| TestView(state.clone(), tops.clone()))
+                .into_any_element()
+        });
+
+        let tops = tops.borrow();
+        for ix in 0..3 {
+            let top = tops
+                .iter()
+                .rev()
+                .find(|(i, _)| *i == ix)
+                .map(|(_, top)| *top);
+            assert_eq!(top, Some(px(20. * ix as f32)), "item {ix}");
+        }
+    }
+
+    #[gpui::test]
     fn test_reset_after_paint_before_scroll(cx: &mut TestAppContext) {
         let cx = cx.add_empty_window();
 

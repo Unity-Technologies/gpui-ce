@@ -958,7 +958,7 @@ impl TaffyLayoutEngine {
 
         let absolute_outer_origin = match parent_origin {
             Some(parent_origin) => parent_origin + Point::from(layout_location),
-            None => Point::from(layout_location),
+            None => self.root_origin(id, &layout),
         };
         self.absolute_outer_origins
             .insert(id, absolute_outer_origin);
@@ -972,6 +972,24 @@ impl TaffyLayoutEngine {
         let bounds = (snapped_bounds / scale_factor).map(Pixels);
         self.absolute_layout_bounds.insert(id, bounds);
         bounds
+    }
+
+    /// Where a root's border box sits, ignoring its margin. Taffy 0.15 places a root's margin box
+    /// at the origin, which shifts the border box by the margin. Elements laid out as roots (list
+    /// items, `layout_as_root`) are placed by their caller at the origin it measured them for,
+    /// so the margin would push them past their measured slot.
+    fn root_origin(&self, id: LayoutId, layout: &taffy::Layout) -> Point<f32> {
+        let rtl =
+            self.taffy.style(id.0).expect(EXPECT_MESSAGE).direction == taffy::style::Direction::Rtl;
+        let x = if rtl {
+            layout.location.x + layout.margin.right
+        } else {
+            layout.location.x - layout.margin.left
+        };
+        Point {
+            x,
+            y: layout.location.y - layout.margin.top,
+        }
     }
 
     /// Returns bounds whose origin and size are snapped in the coordinate space of the parent.
