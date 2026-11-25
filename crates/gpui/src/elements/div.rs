@@ -806,6 +806,10 @@ impl Interactivity {
     /// Bind the given callback on the hover start and end events of this element. Note that the boolean
     /// passed to the callback is true when the hover starts and false when it ends.
     /// Transitions caused by layout changes under a stationary mouse also invoke the callback.
+    ///
+    /// By default, keyboard input suppresses hover until the next mouse move, mouse down, or touch. Set
+    /// [`HoverListenerMode::InputModalityIndependent`] with [`Self::hover_listener_mode`] to
+    /// continue hit-testing hover after keyboard input.
     /// The imperative API equivalent to [`StatefulInteractiveElement::on_hover`].
     ///
     /// See [`Context::listener`](crate::Context::listener) to get access to a view's state from this callback.
@@ -846,6 +850,16 @@ impl Interactivity {
                 project: Rc::new(project),
                 callback: Rc::new(listener),
             }));
+    }
+
+    /// Sets how [`Self::on_hover`] responds to key presses while the mouse is stationary.
+    /// This affects hover and hover-region listeners, not hover styles or tooltips. The imperative API
+    /// equivalent to [`StatefulInteractiveElement::hover_listener_mode`].
+    pub fn hover_listener_mode(&mut self, mode: HoverListenerMode)
+    where
+        Self: Sized,
+    {
+        self.hover_listener_mode = mode;
     }
 
     /// Use the given callback to construct a new tooltip view when the mouse hovers over this element.
@@ -2071,6 +2085,10 @@ pub trait StatefulInteractiveElement: InteractiveElement {
     /// Bind the given callback on the hover start and end events of this element. Note that the boolean
     /// passed to the callback is true when the hover starts and false when it ends.
     /// Transitions caused by layout changes under a stationary mouse also invoke the callback.
+    ///
+    /// By default, keyboard input suppresses hover until the next mouse move, mouse down, or touch. Set
+    /// [`HoverListenerMode::InputModalityIndependent`] with [`Self::hover_listener_mode`] to
+    /// continue hit-testing hover after keyboard input.
     /// The fluent API equivalent to [`Interactivity::on_hover`].
     ///
     /// See [`Context::listener`](crate::Context::listener) to get access to a view's state from this callback.
@@ -2079,6 +2097,17 @@ pub trait StatefulInteractiveElement: InteractiveElement {
         Self: Sized,
     {
         self.interactivity().on_hover(listener);
+        self
+    }
+
+    /// Sets how [`Self::on_hover`] responds to key presses while the mouse is stationary.
+    /// This affects hover and hover-region listeners, not hover styles or tooltips. The fluent API
+    /// equivalent to [`Interactivity::hover_listener_mode`].
+    fn hover_listener_mode(mut self, mode: HoverListenerMode) -> Self
+    where
+        Self: Sized,
+    {
+        self.interactivity().hover_listener_mode(mode);
         self
     }
 
@@ -2216,6 +2245,29 @@ impl<R: PartialEq + 'static> HoverRegionListener for TypedHoverRegionListener<R>
             drop(previous);
             callback(&next, window, cx);
         })
+    }
+}
+
+/// Controls how [`StatefulInteractiveElement::on_hover`] responds to key presses while the mouse
+/// is stationary.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum HoverListenerMode {
+    /// Use input-modality-aware hit testing. Keyboard input suppresses hover until the mouse moves
+    /// again, unless pointer capture or an active mouse-down interaction keeps the listener hovered.
+    #[default]
+    InputModalityAware,
+    /// Use hit testing even when the last input was from the keyboard. This changes only
+    /// keyboard-modality filtering; all other [`StatefulInteractiveElement::on_hover`] behavior
+    /// remains unchanged.
+    InputModalityIndependent,
+}
+
+impl HoverListenerMode {
+    fn is_hovered(self, hitbox: &Hitbox, window: &Window) -> bool {
+        match self {
+            Self::InputModalityAware => hitbox.is_hovered(window),
+            Self::InputModalityIndependent => hitbox.id.is_hovered_ignoring_last_input(window),
+        }
     }
 }
 
@@ -2895,6 +2947,7 @@ pub struct Interactivity {
     pub(crate) hover_region_listeners: Vec<Box<dyn HoverRegionListener>>,
     /// Resolves a cursor from the current pointer position and this element's bounds.
     pub(crate) cursor_style_resolver: Option<CursorStyleResolver>,
+    pub(crate) hover_listener_mode: HoverListenerMode,
     pub(crate) tooltip_builder: Option<TooltipBuilder>,
     pub(crate) tooltip_show_delay: Option<Duration>,
     pub(crate) window_control: Option<WindowControlArea>,
@@ -4011,6 +4064,7 @@ impl Interactivity {
             if !self.hover_region_listeners.is_empty() {
                 let states = &mut element_state.hover_region_states;
                 states.resize_with(self.hover_region_listeners.len(), HoverRegionState::default);
+                let hover_listener_mode = self.hover_listener_mode;
                 for (listener, state) in self.hover_region_listeners.iter().zip(states) {
                     let observe = listener.bind(state);
                     let region_hitbox = hitbox.clone();
@@ -4031,7 +4085,9 @@ impl Interactivity {
                             || !layout_changed && pending_mouse_down.borrow().is_some()
                         {
                             None
-                        } else if change.position.is_some() && !region_hitbox.is_hovered(window) {
+                        } else if change.position.is_some()
+                            && !hover_listener_mode.is_hovered(&region_hitbox, window)
+                        {
                             None
                         } else {
                             change.position
@@ -5769,7 +5825,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn hover_listeners_update_when_layout_changes_under_stationary_mouse(cx: &mut TestAppContext) {
+    fn default_hover_listener_updates_when_layout_changes_under_stationary_mouse(
+        cx: &mut TestAppContext,
+    ) {
         let hover_transitions = Rc::new(RefCell::new(Vec::new()));
         let window = cx.add_window({
             let hover_transitions = hover_transitions.clone();
@@ -5809,7 +5867,114 @@ mod tests {
     }
 
     #[gpui::test]
-    fn hover_listeners_remain_hovered_during_stationary_mouse_press(cx: &mut TestAppContext) {
+    fn default_hover_listener_ends_after_key_press(cx: &mut TestAppContext) {
+        let hover_transitions = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.add_window({
+            let hover_transitions = hover_transitions.clone();
+            move |_, _| HoverListenerLayoutTestView {
+                target_left: px(0.),
+                hover_transitions,
+            }
+        });
+        let any_window = AnyWindowHandle::from(window);
+
+        cx.update_window(any_window, |_, window, cx| {
+            window.draw(cx).clear(cx);
+            window.simulate_mouse_move(point(px(10.), px(10.)), cx);
+        })
+        .unwrap();
+        assert_eq!(*hover_transitions.borrow(), [true]);
+
+        key_down(cx, any_window, "a");
+        cx.update_window(any_window, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        assert_eq!(*hover_transitions.borrow(), [true, false]);
+    }
+
+    struct HoverListenerModeLayoutTestView {
+        target_left: Pixels,
+        hover_transitions: Rc<RefCell<Vec<bool>>>,
+    }
+
+    impl Render for HoverListenerModeLayoutTestView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let hover_transitions = self.hover_transitions.clone();
+            div().relative().size_full().child(
+                div()
+                    .id("hover-target")
+                    .absolute()
+                    .left(self.target_left)
+                    .top_0()
+                    .size(px(20.))
+                    .hover_listener_mode(HoverListenerMode::InputModalityIndependent)
+                    .on_hover(move |is_hovered, _, _| {
+                        hover_transitions.borrow_mut().push(*is_hovered);
+                    }),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn input_modality_independent_hover_listener_updates_after_key_press(cx: &mut TestAppContext) {
+        let hover_transitions = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.add_window({
+            let hover_transitions = hover_transitions.clone();
+            move |_, _| HoverListenerModeLayoutTestView {
+                target_left: px(40.),
+                hover_transitions,
+            }
+        });
+        let any_window = AnyWindowHandle::from(window);
+        let pointer_position = point(px(10.), px(10.));
+
+        cx.update_window(any_window, |_, window, cx| {
+            window.draw(cx).clear(cx);
+            window.simulate_mouse_move(pointer_position, cx);
+        })
+        .unwrap();
+        assert!(hover_transitions.borrow().is_empty());
+
+        key_down(cx, any_window, "a");
+        window
+            .update(cx, |view, _, cx| {
+                view.target_left = px(0.);
+                cx.notify();
+            })
+            .unwrap();
+        cx.update_window(any_window, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        assert_eq!(*hover_transitions.borrow(), [true]);
+
+        key_down(cx, any_window, "b");
+        cx.update_window(any_window, |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        assert_eq!(*hover_transitions.borrow(), [true]);
+
+        cx.update_window(any_window, |_, window, cx| {
+            window.simulate_mouse_move(point(px(30.), px(10.)), cx);
+        })
+        .unwrap();
+        assert_eq!(*hover_transitions.borrow(), [true, false]);
+
+        cx.update_window(any_window, |_, window, cx| {
+            window.simulate_mouse_move(pointer_position, cx);
+            window.dispatch_event(
+                MouseExitEvent {
+                    position: pointer_position,
+                    ..Default::default()
+                }
+                .to_platform_input(),
+                cx,
+            );
+        })
+        .unwrap();
+        assert_eq!(*hover_transitions.borrow(), [true, false, true, false]);
+    }
+
+    #[gpui::test]
+    fn default_hover_listener_remains_hovered_during_stationary_mouse_press(
+        cx: &mut TestAppContext,
+    ) {
         let hover_transitions = Rc::new(RefCell::new(Vec::new()));
         let window = cx.add_window({
             let hover_transitions = hover_transitions.clone();
