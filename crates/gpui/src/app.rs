@@ -1466,6 +1466,26 @@ impl App {
         self.pending_effects.push_back(Effect::RefreshWindows);
     }
 
+    /// Returns whether a window's last frame read this entity without drawing it as a view.
+    /// Notifying such an entity doesn't redraw the views that read it.
+    ///
+    /// A window that is being updated counts as such a read. `false` covers only the views
+    /// on the path from the entity's view node to the window root. A frame keeps one view
+    /// node per entity, so notifying doesn't redraw other cached views that read the entity
+    /// or draw it a second time.
+    pub fn is_read_without_view(&self, entity_id: EntityId) -> bool {
+        self.tracked_entities
+            .iter()
+            .filter(|(_, entities)| entities.contains(&entity_id))
+            .any(|(window_id, _)| {
+                let Some(Some(window)) = self.windows.get(*window_id) else {
+                    return true;
+                };
+                let dispatch_tree = &window.rendered_frame.dispatch_tree;
+                dispatch_tree.view_path_reversed(entity_id).next().is_none()
+            })
+    }
+
     #[inline(always)]
     pub(crate) fn update<R>(&mut self, update: impl FnOnce(&mut Self) -> R) -> R {
         self.start_update();
@@ -4632,5 +4652,37 @@ mod test {
         let (path, restart_arguments) = restart.await.expect("restart was not requested");
         assert_eq!(path, Some(restart_path));
         assert_eq!(restart_arguments, arguments);
+    }
+
+    #[gpui::test]
+    fn is_read_without_view_reports_entities_read_outside_a_view(cx: &mut TestAppContext) {
+        struct Reader {
+            model: crate::Entity<u32>,
+        }
+
+        impl Render for Reader {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let _ = self.model.read(cx);
+                Empty
+            }
+        }
+
+        let model = cx.new(|_| 0u32);
+        let unread = cx.new(|_| 0u32);
+        let window = cx.add_window({
+            let model = model.clone();
+            move |_, _| Reader { model }
+        });
+        cx.run_until_parked();
+        let reader = window.entity(cx).expect("window root");
+
+        cx.update(|cx| {
+            // The model is read while rendering the view, but is not drawn as a view.
+            assert!(cx.is_read_without_view(model.entity_id()));
+            // The root view is drawn as one, so notifying it redraws its readers.
+            assert!(!cx.is_read_without_view(reader.entity_id()));
+            // No window read this entity.
+            assert!(!cx.is_read_without_view(unread.entity_id()));
+        });
     }
 }
