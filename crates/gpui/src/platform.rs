@@ -4887,7 +4887,9 @@ mod image_tests {
         ];
 
         let image = Image::from_bytes(ImageFormat::Webp, ANIMATED_WEBP.to_vec());
-        let render_image = image.to_image_data(SvgRenderer::new(Arc::new(AssetRegistry::default()))).unwrap();
+        let render_image = image
+            .to_image_data(SvgRenderer::new(Arc::new(AssetRegistry::default())))
+            .unwrap();
 
         assert_eq!(render_image.frame_count(), 2);
         assert_eq!(render_image.size(0), size(1.into(), 1.into()));
