@@ -1,5 +1,6 @@
 use gpui::{DevicePixels, Size, get_gamma_correction_ratios};
 
+#[derive(Clone, Copy, Debug)]
 pub struct WgpuSurfaceConfig {
     pub size: Size<DevicePixels>,
     pub transparent: bool,

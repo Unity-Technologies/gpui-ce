@@ -74,6 +74,7 @@ impl WgpuRenderer {
         extra_requirements: Option<WgpuDeviceRequirements>,
     ) -> anyhow::Result<Self> {
         let mut context_slot = gpu_context.borrow_mut();
+        let surface_configured = context_slot.is_none();
         let (context, surface) = match context_slot.as_mut() {
             Some(context) => {
                 let surface = create_surface(&context.instance, surface_target)?;
@@ -84,6 +85,7 @@ impl WgpuRenderer {
                 let (context, surface) = initialize_context_and_surface(
                     display,
                     surface_target,
+                    &config,
                     compositor_gpu,
                     SoftwareAdapterPolicy::Allow,
                     extra_requirements.as_ref(),
@@ -97,6 +99,7 @@ impl WgpuRenderer {
             context,
             Some(surface),
             config,
+            surface_configured,
             compositor_gpu,
             extra_requirements,
             atlas,
@@ -150,6 +153,7 @@ impl WgpuRenderer {
             context,
             Some(surface),
             config,
+            false,
             None,
             None,
             Arc::new(WgpuAtlas::from_context(context)),
@@ -400,6 +404,7 @@ impl WgpuRenderer {
             self.faults.recovery_not_before = None;
         }
 
+        let config = self.target.recovery_config();
         let surface = if needs_new_context {
             log::warn!("GPU device lost, recreating context...");
             self.resources = None;
@@ -407,6 +412,7 @@ impl WgpuRenderer {
             let (new_context, surface) = match initialize_context_and_surface(
                 display,
                 surface_target,
+                &config,
                 self.compositor_gpu,
                 SoftwareAdapterPolicy::Reject,
                 self.extra_requirements.as_ref(),
@@ -429,7 +435,6 @@ impl WgpuRenderer {
             create_surface(instance, surface_target)?
         };
 
-        let config = self.target.recovery_config();
         let gpu_context = Rc::clone(gpu_context);
         let context_slot = gpu_context.borrow();
         let context = context_slot.as_ref().expect("context should exist");
@@ -443,6 +448,7 @@ impl WgpuRenderer {
             context,
             Some(surface),
             config,
+            needs_new_context,
             self.compositor_gpu,
             self.extra_requirements.clone(),
             Arc::clone(&self.atlas),
@@ -499,6 +505,7 @@ type DisplayHandleSource<'a> = &'a dyn Fn() -> Option<Box<dyn wgpu::wgt::WgpuHas
 fn initialize_context_and_surface(
     display: DisplayHandleSource<'_>,
     surface_target: NativeSurfaceTarget,
+    config: &WgpuSurfaceConfig,
     compositor_gpu: Option<CompositorGpuHint>,
     adapter_policy: SoftwareAdapterPolicy,
     extra_requirements: Option<&WgpuDeviceRequirements>,
@@ -510,6 +517,7 @@ fn initialize_context_and_surface(
         let context = WgpuContext::new_with_adapter_policy(
             instance,
             &surface,
+            config,
             compositor_gpu,
             adapter_policy,
             extra_requirements,
