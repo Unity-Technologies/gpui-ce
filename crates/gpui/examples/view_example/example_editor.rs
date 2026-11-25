@@ -322,14 +322,6 @@ struct EditorTextPrepaint {
     cursor: Option<PaintQuad>,
 }
 
-impl IntoElement for EditorText {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Element for EditorText {
     type RequestLayoutState = ();
     type PrepaintState = EditorTextPrepaint;

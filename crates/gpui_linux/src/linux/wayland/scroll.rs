@@ -5,7 +5,8 @@ use std::{
 
 use super::window::WaylandWindowStatePtr;
 use gpui::{
-    Modifiers, Pixels, PlatformInput, Point, ScrollDelta, ScrollWheelEvent, TouchPhase, point, px,
+    Modifiers, Pixels, PlatformInput, Point, ScrollDelta, ScrollEvent, ScrollSource, TouchPhase,
+    point, px,
 };
 
 const KINETIC_SCROLL_HISTORY_WINDOW: Duration = Duration::from_millis(150);
@@ -125,7 +126,7 @@ impl KineticScrollController {
 
         let finished = is_kinetic_scroll_stopped(kinetic_scroll.velocity);
 
-        let input = PlatformInput::ScrollWheel(ScrollWheelEvent {
+        let input = PlatformInput::Scroll(ScrollEvent {
             position: kinetic_scroll.position,
             delta: ScrollDelta::Pixels(delta),
             modifiers: kinetic_scroll.modifiers,
@@ -134,6 +135,7 @@ impl KineticScrollController {
             } else {
                 TouchPhase::Moved
             },
+            source: ScrollSource::Pointer,
         });
 
         let window = kinetic_scroll.window.clone();
@@ -159,11 +161,12 @@ impl KineticScrollController {
 
         Some((
             kinetic_scroll.window,
-            PlatformInput::ScrollWheel(ScrollWheelEvent {
+            PlatformInput::Scroll(ScrollEvent {
                 position: kinetic_scroll.position,
                 delta: ScrollDelta::Pixels(point(px(0.0), px(0.0))),
                 modifiers: kinetic_scroll.modifiers,
                 touch_phase: TouchPhase::Ended,
+                source: ScrollSource::Pointer,
             }),
         ))
     }
@@ -179,11 +182,12 @@ impl KineticScrollController {
         if is_kinetic_scroll_stopped(velocity) {
             return Some((
                 window,
-                PlatformInput::ScrollWheel(ScrollWheelEvent {
+                PlatformInput::Scroll(ScrollEvent {
                     position,
                     delta: ScrollDelta::Pixels(point(px(0.0), px(0.0))),
                     modifiers,
                     touch_phase: TouchPhase::Ended,
+                    source: ScrollSource::Pointer,
                 }),
             ));
         }

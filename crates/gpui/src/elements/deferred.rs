@@ -83,14 +83,6 @@ impl Element for Deferred {
     }
 }
 
-impl IntoElement for Deferred {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 impl Deferred {
     /// Configures the priority of the deferred element to be 1 greater than the previous
     /// deferred element (when this element is caused by another deferred element, even if indirectly).

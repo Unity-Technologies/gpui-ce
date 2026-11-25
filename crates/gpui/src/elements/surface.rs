@@ -1,8 +1,8 @@
 #[cfg(target_os = "windows")]
 use crate::WindowsScreenCaptureFrame;
 use crate::{
-    App, Bounds, DevicePixels, Element, ElementId, GlobalElementId, InspectorElementId,
-    IntoElement, LayoutId, ObjectFit, Pixels, Size, Style, StyleRefinement, Styled, Window,
+    App, Bounds, DevicePixels, Element, ElementId, GlobalElementId, InspectorElementId, LayoutId,
+    ObjectFit, Pixels, Size, Style, StyleRefinement, Styled, Window,
 };
 #[cfg(target_os = "macos")]
 use objc2_core_foundation::CFRetained;
@@ -188,14 +188,6 @@ impl Element for Surface {
         _window.with_element_opacity(style.opacity, |window| {
             window.paint_surface(new_bounds, self.source.clone());
         });
-    }
-}
-
-impl IntoElement for Surface {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
     }
 }
 

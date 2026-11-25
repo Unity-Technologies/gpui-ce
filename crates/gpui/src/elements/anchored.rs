@@ -4,8 +4,8 @@ use smallvec::SmallVec;
 
 use crate::{
     Anchor, AnyElement, App, Axis, Bounds, Display, Edges, Element, GlobalElementId,
-    InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels, Point, Position, Size, Style,
-    Window, point, px,
+    InspectorElementId, LayoutId, ParentElement, Pixels, Point, Position, Size, Style, Window,
+    point, px,
 };
 
 /// The state that the anchored element element uses to track its children.
@@ -304,14 +304,6 @@ impl Element for Anchored {
     }
 }
 
-impl IntoElement for Anchored {
-    type Element = Self;
-
-    fn into_element(self) -> Self::Element {
-        self
-    }
-}
-
 /// Which side of a box `anchor` is on along `axis`. `Less` is left or top, `Equal` is the
 /// center, and `Greater` is right or bottom.
 fn side_along(anchor: Anchor, axis: Axis) -> Ordering {
@@ -446,12 +438,12 @@ mod tests {
 
         window
             .update(cx, |_, window, cx| {
-                let event = gpui::ScrollWheelEvent {
+                let event = gpui::ScrollEvent {
                     position: point(px(400.), px(300.)),
                     delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-1000.))),
                     ..Default::default()
                 };
-                window.dispatch_event(PlatformInput::ScrollWheel(event), cx);
+                window.dispatch_event(PlatformInput::Scroll(event), cx);
             })
             .unwrap();
 

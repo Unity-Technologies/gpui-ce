@@ -1125,14 +1125,6 @@ struct LifecycleProbe {
     counts: Rc<[Cell<usize>; 4]>,
 }
 
-impl IntoElement for LifecycleProbe {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
 impl gpui::Element for LifecycleProbe {
     type RequestLayoutState = ();
     type PrepaintState = ();

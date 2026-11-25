@@ -176,6 +176,11 @@ impl AppContext for TestAppContext {
 }
 
 impl TestAppContext {
+    /// Sets the runtime identity used by this test's application.
+    pub fn set_platform_info(&mut self, platform_info: crate::PlatformInfo) {
+        self.test_platform.platform_info.set(platform_info);
+    }
+
     /// Creates a context that runs on `dispatcher`.
     ///
     /// `#[gpui::test]` calls this for you.
@@ -818,9 +823,10 @@ impl TestAppContext {
     ///
     /// Panics if any part isn't a valid keystroke.
     pub fn simulate_keystrokes(&mut self, window: AnyWindowHandle, keystrokes: &str) {
+        let os = self.read(|cx| cx.platform_info().os);
         for keystroke in keystrokes
             .split(' ')
-            .map(Keystroke::parse)
+            .map(|source| Keystroke::parse_with_os(source, os))
             .map(Result::unwrap)
         {
             self.dispatch_keystroke(window, keystroke);
@@ -837,7 +843,12 @@ impl TestAppContext {
     /// Splitting on an empty string also sends an empty keystroke before the first
     /// character and after the last. Don't rely on those.
     pub fn simulate_input(&mut self, window: AnyWindowHandle, input: &str) {
-        for keystroke in input.split("").map(Keystroke::parse).map(Result::unwrap) {
+        let os = self.read(|cx| cx.platform_info().os);
+        for keystroke in input
+            .split("")
+            .map(|source| Keystroke::parse_with_os(source, os))
+            .map(Result::unwrap)
+        {
             self.dispatch_keystroke(window, keystroke);
         }
 

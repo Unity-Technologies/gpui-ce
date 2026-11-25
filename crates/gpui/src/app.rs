@@ -19,11 +19,7 @@ use crate::{
 use anyhow::{Context as _, Result, anyhow};
 use collections::{FxHashMap, FxHashSet, HashMap, TypeIdHashMap, TypeIdHashSet, VecDeque};
 use derive_more::{Deref, DerefMut};
-use futures::{
-    Future, FutureExt,
-    channel::oneshot,
-    future::{LocalBoxFuture, Shared},
-};
+use futures::{Future, FutureExt, channel::oneshot, future::LocalBoxFuture};
 use gpui_util::{ResultExt, debug_panic};
 use itertools::Itertools;
 use parking_lot::RwLock;
@@ -75,6 +71,7 @@ pub use visual_test_context::*;
 use crate::InspectorElementRegistry;
 #[cfg(target_os = "macos")]
 use crate::MacActivationPolicy;
+use crate::asset_cache::CachedLoad;
 use crate::subscription::SingleSubscriberSet;
 
 /// The duration for which native applications wait for futures returned from
@@ -2570,6 +2567,11 @@ impl App {
         self.platform.compositor_name()
     }
 
+    /// Returns the host OS and application target reported by the backend.
+    pub fn platform_info(&self) -> crate::PlatformInfo {
+        self.platform.platform_info()
+    }
+
     /// Returns the path to a helper executable named `name` that ships with the app.
     ///
     /// See [`Application::path_for_auxiliary_executable`].
@@ -3888,29 +3890,28 @@ impl App {
         self.loading_assets.contains_key(&asset_id)
     }
 
-    /// Starts loading the asset `A` for `source` in the background, or returns the load already in progress.
+    /// Starts loading `source` for asset type `A` if it isn't cached, and returns the result
+    /// once it is available.
     ///
-    /// The result is a shared task that resolves to the asset output, and a flag that is
-    /// `true` only for the call that started the load. Concurrent calls for the same
-    /// `source` share one [`Asset::load`] and its cached result. Use
-    /// [`App::remove_asset`] to load it again.
-    pub fn fetch_asset<A: Asset>(&mut self, source: &A::Source) -> (Shared<Task<A::Output>>, bool) {
+    /// Concurrent calls for the same `source` share one [`Asset::load`]. Pending loads and
+    /// completed results stay cached until [`App::remove_asset`]. This does not subscribe a
+    /// view to completion; [`Window::use_asset`] does.
+    pub fn fetch_asset<A: Asset>(&mut self, source: &A::Source) -> Option<A::Output> {
+        self.asset_entry::<A>(source).get()
+    }
+
+    /// The cache entry for `source`, starting its load if there is none.
+    pub(crate) fn asset_entry<A: Asset>(&mut self, source: &A::Source) -> &CachedLoad<A::Output> {
         let asset_id = (TypeId::of::<A>(), hash(source));
-        let mut is_first = false;
-        let task = self
-            .loading_assets
-            .remove(&asset_id)
-            .map(|boxed_task| *boxed_task.downcast::<Shared<Task<A::Output>>>().unwrap())
-            .unwrap_or_else(|| {
-                is_first = true;
-                let future = A::load(source.clone(), self);
-
-                self.background_executor().spawn(future).shared()
-            });
-
-        self.loading_assets.insert(asset_id, Box::new(task.clone()));
-
-        (task, is_first)
+        if !self.loading_assets.contains_key(&asset_id) {
+            let future = A::load(source.clone(), self);
+            let entry = CachedLoad::new(future, self);
+            self.loading_assets.insert(asset_id, Box::new(entry));
+        }
+        self.loading_assets
+            .get(&asset_id)
+            .and_then(|entry| entry.downcast_ref())
+            .expect("asset cache entries are keyed by their asset type")
     }
 
     /// Creates a new [`FocusHandle`] for tracking keyboard focus.
