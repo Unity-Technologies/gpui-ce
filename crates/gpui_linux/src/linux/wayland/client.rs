@@ -1031,6 +1031,20 @@ impl WaylandClient {
                             client.cursor.set_size(size);
                         }
                     }
+                    XDPEvent::TextScaleFactor(scale) => {
+                        if let Some(client) = client.0.upgrade() {
+                            let callback = client.borrow_mut().common.set_text_scale_factor(scale);
+                            if let Some(mut callback) = callback {
+                                callback();
+                                client
+                                    .borrow_mut()
+                                    .common
+                                    .callbacks
+                                    .text_scale_factor_change
+                                    .get_or_insert(callback);
+                            }
+                        }
+                    }
                 }
             })
             .unwrap();

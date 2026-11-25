@@ -540,6 +540,10 @@ impl X11Client {
                             });
                         }
                     }
+                    XDPEvent::TextScaleFactor(_) => {
+                        // noop, the desktop already folds this into `Xft.dpi`, which
+                        // the scale factor comes from.
+                    }
                     XDPEvent::CursorTheme(_) | XDPEvent::CursorSize(_) => {
                         // noop, X11 manages this for us.
                     }

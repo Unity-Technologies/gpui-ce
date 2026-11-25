@@ -98,6 +98,7 @@ pub(crate) struct PlatformHandlers {
     pub(crate) validate_app_menu_command: Option<Box<dyn FnMut(&dyn Action) -> bool>>,
     pub(crate) keyboard_layout_change: Option<Box<dyn FnMut()>>,
     pub(crate) contrast_preference_change: Option<Box<dyn FnMut()>>,
+    pub(crate) text_scale_factor_change: Option<Box<dyn FnMut()>>,
     pub(crate) system_sleep: Option<Box<dyn FnMut()>>,
     pub(crate) system_wake: Option<Box<dyn FnMut()>>,
 }
@@ -120,6 +121,7 @@ pub(crate) struct LinuxCommon {
     pub(crate) text_system: Arc<dyn PlatformTextSystem>,
     pub(crate) appearance: WindowAppearance,
     pub(crate) contrast_preference: ContrastPreference,
+    pub(crate) text_scale_factor: f32,
     pub(crate) auto_hide_scrollbars: bool,
     pub(crate) button_layout: WindowButtonLayout,
     pub(crate) callbacks: PlatformHandlers,
@@ -174,6 +176,7 @@ impl LinuxCommon {
             text_system,
             appearance: WindowAppearance::Light,
             contrast_preference: ContrastPreference::NoPreference,
+            text_scale_factor: 1.0,
             auto_hide_scrollbars: false,
             button_layout: WindowButtonLayout::linux_default(),
             callbacks,
@@ -202,6 +205,17 @@ impl LinuxCommon {
         }
         self.contrast_preference = contrast;
         self.callbacks.contrast_preference_change.take()
+    }
+
+    /// Records a new text scale factor. Returns the change callback, taken out so the
+    /// caller can run it after releasing its borrow, when the value moved.
+    #[cfg_attr(not(feature = "wayland"), allow(dead_code))]
+    pub(crate) fn set_text_scale_factor(&mut self, scale: f32) -> Option<Box<dyn FnMut()>> {
+        if self.text_scale_factor == scale {
+            return None;
+        }
+        self.text_scale_factor = scale;
+        self.callbacks.text_scale_factor_change.take()
     }
 
     pub(crate) fn start_power_listener(&mut self) {
@@ -817,6 +831,15 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
 
     fn button_layout(&self) -> Option<WindowButtonLayout> {
         Some(self.inner.with_common(|common| common.button_layout))
+    }
+
+    fn text_scale_factor(&self) -> f32 {
+        self.inner.with_common(|common| common.text_scale_factor)
+    }
+
+    fn on_text_scale_factor_change(&self, callback: Box<dyn FnMut()>) {
+        self.inner
+            .with_common(|common| common.callbacks.text_scale_factor_change = Some(callback));
     }
 
     fn register_url_scheme(&self, _: &str) -> Task<anyhow::Result<()>> {
