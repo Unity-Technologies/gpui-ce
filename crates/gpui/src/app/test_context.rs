@@ -611,6 +611,12 @@ impl TestAppContext {
             .simulate_contrast_preference(contrast, None);
     }
 
+    /// Changes the power mode the test platform reports, as if the user
+    /// toggled Low Power Mode in the OS settings.
+    pub fn simulate_power_mode(&self, power_mode: crate::PowerMode) {
+        self.test_platform.simulate_power_mode(power_mode);
+    }
+
     /// Turns on [`ContrastPreference::Forced`] with `colors` as the palette, as
     /// if the user picked a Windows contrast theme.
     pub fn simulate_forced_colors(&self, colors: SystemColors) {

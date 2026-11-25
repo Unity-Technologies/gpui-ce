@@ -40,7 +40,11 @@ impl HeadlessClient {
         handle
             .insert_source(power_receiver, |event, _, client: &mut HeadlessClient| {
                 if let calloop::channel::Event::Msg(event) = event {
-                    client.with_common(|common| common.handle_system_power_event(event));
+                    LinuxCommon::handle_system_power_event(
+                        &client.0,
+                        |state| &mut state.common,
+                        event,
+                    );
                 }
             })
             .ok();

@@ -5,12 +5,12 @@ use crate::{
     DisplayEvent, DisplayId, EventEmitter, ExternalDragPayload, FocusHandle, FocusMap,
     ForegroundExecutor, Global, HapticFeedbackStyle, KeyBinding, KeyContext, Keymap, Keystroke,
     LayoutId, Menu, MenuItem, OwnedMenu, PathPromptOptions, Pixels, Platform, PlatformDisplay,
-    PlatformKeyboardLayout, PlatformKeyboardMapper, Point, Priority, PromptBuilder, PromptButton,
-    PromptHandle, PromptLevel, Render, RenderImage, RenderablePromptHandle, Reservation,
-    ScreenCaptureSource, SharedString, SubscriberSet, Subscription, SvgRenderer, SystemColors,
-    SystemNotification, SystemNotificationResponse, Task, TextRenderingMode, TextSystem,
-    ThermalState, Window, WindowAppearance, WindowBounds, WindowButtonLayout, WindowHandle,
-    WindowId, WindowInvalidator,
+    PlatformKeyboardLayout, PlatformKeyboardMapper, Point, PowerMode, Priority, PromptBuilder,
+    PromptButton, PromptHandle, PromptLevel, Render, RenderImage, RenderablePromptHandle,
+    Reservation, ScreenCaptureSource, SharedString, SubscriberSet, Subscription, SvgRenderer,
+    SystemColors, SystemNotification, SystemNotificationResponse, Task, TextRenderingMode,
+    TextSystem, ThermalState, Window, WindowAppearance, WindowBounds, WindowButtonLayout,
+    WindowHandle, WindowId, WindowInvalidator,
     colors::{Colors, GlobalColors},
     hash,
     http_client::{HttpClient, NullHttpClient},
@@ -1049,6 +1049,9 @@ pub struct App {
     pub(crate) reduce_motion: bool,
     /// Origin of the shared clock that phase-locks synced repeating animations.
     pub(crate) synced_animation_epoch: Instant,
+    /// Cached from the platform and refreshed by its power mode notification,
+    /// so the frame limiter reads it without a platform call per frame.
+    power_mode: PowerMode,
     /// Whether the app was created by [`Application::new_inaccessible`]. No
     /// accesskit APIs will be called when this flag is set.
     pub(crate) accessibility_force_disabled: bool,
@@ -1092,6 +1095,7 @@ impl App {
         let entities = EntityMap::new();
         let keyboard_layout = platform.keyboard_layout();
         let keyboard_mapper = platform.keyboard_mapper();
+        let power_mode = platform.power_mode();
 
         #[cfg(any(test, gpui_leak_detection))]
         let _ref_counts = entities.ref_counts_drop_handle();
@@ -1171,6 +1175,7 @@ impl App {
                 cursor_hide_mode: CursorHideMode::default(),
                 reduce_motion: false,
                 synced_animation_epoch,
+                power_mode,
                 accessibility_force_disabled: false,
                 accessibility_forced: false,
 
@@ -1223,6 +1228,16 @@ impl App {
                     cx.thermal_state_observers
                         .clone()
                         .retain(move |callback| (callback)(cx));
+                }
+            }
+        }));
+
+        platform.on_power_mode_change(Box::new({
+            let app = Rc::downgrade(&app);
+            move || {
+                if let Some(app) = app.upgrade() {
+                    let power_mode = app.borrow().platform.power_mode();
+                    app.borrow_mut().power_mode = power_mode;
                 }
             }
         }));
@@ -1940,7 +1955,8 @@ impl App {
         serde_json::json!({
             "compositor": self.platform.compositor_name(),
             "thermal_state": format!("{:?}", self.platform.thermal_state()),
-            "low_power_mode": self.platform.low_power_mode(),
+            "power_mode": format!("{:?}", self.power_mode),
+            "low_power_mode": self.low_power_mode(),
             "window_appearance": format!("{:?}", self.platform.window_appearance()),
             "cursor_visible": self.platform.is_cursor_visible(),
             "active_window_id": self
@@ -1976,11 +1992,18 @@ impl App {
         self.platform.prevent_idle_sleep(reason)
     }
 
-    /// Whether the system is in a low power mode (macOS Low Power Mode).
+    /// Returns the operating system's power mode, or [`PowerMode::Unknown`]
+    /// when the platform cannot determine it.
+    pub fn power_mode(&self) -> PowerMode {
+        self.power_mode
+    }
+
+    /// Whether the system asks apps to save energy (macOS Low Power Mode,
+    /// Windows battery saver, the Linux power-saver profile).
     ///
     /// The frame limiter caps presentation to ~30fps while it is on.
     pub fn low_power_mode(&self) -> bool {
-        self.platform.low_power_mode()
+        self.power_mode == PowerMode::LowPower
     }
 
     /// Calls `callback` when the system's thermal state changes.

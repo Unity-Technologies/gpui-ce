@@ -19,8 +19,8 @@ use gpui::{
     Action, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem, ContrastPreference,
     CursorStyle, ForegroundExecutor, KeyContext, Keymap, MacActivationPolicy, Menu, MenuItem,
     OsMenu, OwnedMenu, PathPromptOptions, Platform, PlatformDisplay, PlatformKeyboardLayout,
-    PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, Result, SystemMenuType, Task,
-    ThermalState, WindowAppearance, WindowKind, WindowParams, popup::PopupNotSupportedError,
+    PlatformKeyboardMapper, PlatformTextSystem, PlatformWindow, PowerMode, Result, SystemMenuType,
+    Task, ThermalState, WindowAppearance, WindowKind, WindowParams, popup::PopupNotSupportedError,
 };
 use gpui_util::{ResultExt, new_std_command};
 use itertools::Itertools;
@@ -170,6 +170,10 @@ define_class!(
         fn thermal_state_change(&self, _: &NSNotification) {
             on_thermal_state_change(self);
         }
+        #[unsafe(method(onPowerStateChange:))]
+        fn power_state_change(&self, _: &NSNotification) {
+            on_power_mode_change(self);
+        }
         #[unsafe(method(onScreenParametersChange:))]
         fn screen_parameters_change(&self, _: &NSNotification) {
             on_screen_parameters_change(self);
@@ -215,6 +219,7 @@ pub(crate) struct MacPlatformState {
     reopen: Option<Box<dyn FnMut()>>,
     on_keyboard_layout_change: Option<Box<dyn FnMut()>>,
     on_thermal_state_change: Option<Box<dyn FnMut()>>,
+    on_power_mode_change: Option<Box<dyn FnMut()>>,
     on_contrast_preference_change: Option<Box<dyn FnMut()>>,
     on_displays_changed: Option<Box<dyn FnMut()>>,
     on_system_sleep: Option<Box<dyn FnMut()>>,
@@ -269,6 +274,7 @@ impl MacPlatform {
             app_delegate: None,
             on_keyboard_layout_change: None,
             on_thermal_state_change: None,
+            on_power_mode_change: None,
             on_contrast_preference_change: None,
             on_displays_changed: None,
             on_system_sleep: None,
@@ -1045,6 +1051,10 @@ impl Platform for MacPlatform {
         self.0.lock().on_thermal_state_change = Some(callback);
     }
 
+    fn on_power_mode_change(&self, callback: Box<dyn FnMut()>) {
+        self.0.lock().on_power_mode_change = Some(callback);
+    }
+
     fn contrast_preference(&self) -> ContrastPreference {
         // `msg_send!` rather than the typed binding, which needs objc2-app-kit's
         // large `NSAccessibility` feature for this one getter.
@@ -1096,7 +1106,7 @@ impl Platform for MacPlatform {
                 .contains(NSApplicationOcclusionState::Visible),
             "key_window_number": window_number(key_window),
             "main_window_number": window_number(main_window),
-            "low_power_mode": self.low_power_mode(),
+            "power_mode": format!("{:?}", self.power_mode()),
         })
     }
 
@@ -1110,8 +1120,13 @@ impl Platform for MacPlatform {
         }
     }
 
-    fn low_power_mode(&self) -> bool {
-        NSProcessInfo::processInfo().isLowPowerModeEnabled()
+    fn power_mode(&self) -> PowerMode {
+        if NSProcessInfo::processInfo().isLowPowerModeEnabled() {
+            PowerMode::LowPower
+        } else {
+            // This API does not distinguish Automatic from High Power Mode on macOS.
+            PowerMode::Unknown
+        }
     }
 
     fn prevent_idle_sleep(&self, reason: &str) -> Task<Result<ActivityGuard>> {
@@ -1495,6 +1510,16 @@ fn did_finish_launching(this: &GPUIApplicationDelegate) {
             Some(&process_info),
         );
     }
+    // Low Power Mode toggles post this; the app caches the mode from it.
+    let power_state_name = ns_string("NSProcessInfoPowerStateDidChangeNotification");
+    unsafe {
+        notification_center.addObserver_selector_name_object(
+            as_any_object(this),
+            objc2::sel!(onPowerStateChange:),
+            Some(&power_state_name),
+            Some(&process_info),
+        );
+    }
 
     // AppKit posts this on the workspace center for every display option
     // (contrast, reduce motion, reduce transparency, invert colors...).
@@ -1610,6 +1635,30 @@ fn on_thermal_state_change(this: &GPUIApplicationDelegate) {
                 .0
                 .lock()
                 .on_thermal_state_change
+                .get_or_insert(callback);
+        }
+    }
+}
+
+fn on_power_mode_change(this: &GPUIApplicationDelegate) {
+    // Deferred like `on_thermal_state_change`: Foundation posts this on the
+    // thread that changed the state, possibly while the App is borrowed.
+    let platform = get_mac_platform(this);
+    let platform_ptr = platform as *const MacPlatform as *mut c_void;
+    unsafe {
+        DispatchQueue::main().exec_async_f(platform_ptr, on_power_mode_change);
+    }
+
+    extern "C" fn on_power_mode_change(context: *mut c_void) {
+        let platform = unsafe { &*(context as *const MacPlatform) };
+        let mut lock = platform.0.lock();
+        if let Some(mut callback) = lock.on_power_mode_change.take() {
+            drop(lock);
+            callback();
+            platform
+                .0
+                .lock()
+                .on_power_mode_change
                 .get_or_insert(callback);
         }
     }

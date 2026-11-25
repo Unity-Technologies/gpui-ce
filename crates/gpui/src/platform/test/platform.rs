@@ -2,7 +2,7 @@ use crate::{
     ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem, ContrastPreference,
     CursorStyle, DevicePixels, DisplayId, DummyKeyboardMapper, ForegroundExecutor, Keymap,
     OwnedMenu, Platform, PlatformDisplay, PlatformHeadlessRenderer, PlatformKeyboardLayout,
-    PlatformKeyboardMapper, PlatformTextSystem, PromptButton, ScreenCaptureFrame,
+    PlatformKeyboardMapper, PlatformTextSystem, PowerMode, PromptButton, ScreenCaptureFrame,
     ScreenCaptureSource, ScreenCaptureStream, SharedString, SourceMetadata, SystemColors,
     SystemNotification, SystemNotificationResponse, Task, TestDisplay, TestWindow, ThermalState,
     WindowAppearance, WindowParams, size,
@@ -54,6 +54,8 @@ pub(crate) struct TestPlatform {
     scale_factor: f32,
     contrast_preference: Cell<ContrastPreference>,
     contrast_preference_change: RefCell<Option<Box<dyn FnMut()>>>,
+    power_mode: Cell<PowerMode>,
+    power_mode_change: RefCell<Option<Box<dyn FnMut()>>>,
     forced_colors: Cell<Option<SystemColors>>,
     weak: Weak<Self>,
     menus: RefCell<Vec<OwnedMenu>>,
@@ -255,6 +257,8 @@ impl TestPlatform {
             scale_factor,
             contrast_preference: Cell::new(ContrastPreference::NoPreference),
             contrast_preference_change: RefCell::new(None),
+            power_mode: Cell::new(PowerMode::Unknown),
+            power_mode_change: RefCell::new(None),
             forced_colors: Cell::new(None),
             menus: Default::default(),
         })
@@ -457,6 +461,17 @@ impl TestPlatform {
         }
     }
 
+    /// Sets the power mode this platform reports, then fires the change
+    /// callback the way an OS power notification would.
+    pub(crate) fn simulate_power_mode(&self, power_mode: PowerMode) {
+        self.power_mode.set(power_mode);
+        let callback = self.power_mode_change.borrow_mut().take();
+        if let Some(mut callback) = callback {
+            callback();
+            self.power_mode_change.borrow_mut().get_or_insert(callback);
+        }
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn simulate_system_notification_response(
         &self,
@@ -504,6 +519,14 @@ impl Platform for TestPlatform {
 
     fn thermal_state(&self) -> ThermalState {
         ThermalState::Nominal
+    }
+
+    fn power_mode(&self) -> PowerMode {
+        self.power_mode.get()
+    }
+
+    fn on_power_mode_change(&self, callback: Box<dyn FnMut()>) {
+        *self.power_mode_change.borrow_mut() = Some(callback);
     }
 
     fn prevent_idle_sleep(&self, reason: &str) -> Task<Result<ActivityGuard>> {

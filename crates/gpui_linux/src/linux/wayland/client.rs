@@ -935,11 +935,11 @@ impl WaylandClient {
                 power_receiver,
                 |event, _, client: &mut WaylandClientStatePtr| {
                     if let calloop::channel::Event::Msg(event) = event {
-                        client
-                            .get_client()
-                            .borrow_mut()
-                            .common
-                            .handle_system_power_event(event);
+                        LinuxCommon::handle_system_power_event(
+                            &client.get_client(),
+                            |state| &mut state.common,
+                            event,
+                        );
                     }
                 },
             )

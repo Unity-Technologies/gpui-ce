@@ -4,6 +4,8 @@ mod dispatcher;
 mod headless;
 mod keyboard;
 mod platform;
+#[cfg(all(target_os = "linux", any(feature = "wayland", feature = "x11")))]
+mod power;
 mod system_notifications;
 #[cfg(feature = "wayland")]
 mod wayland;

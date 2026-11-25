@@ -416,12 +416,16 @@ pub trait Platform: 'static {
     }
 
     fn thermal_state(&self) -> ThermalState;
-    /// Whether the OS asks apps to save power (macOS Low Power Mode). Defaults to `false`.
-    fn low_power_mode(&self) -> bool {
-        false
-    }
     fn on_thermal_state_change(&self, callback: Box<dyn FnMut()>);
     fn prevent_idle_sleep(&self, reason: &str) -> Task<Result<ActivityGuard>>;
+
+    /// Returns the operating system's power mode, or [`PowerMode::Unknown`]
+    /// when the platform cannot determine it.
+    fn power_mode(&self) -> PowerMode {
+        PowerMode::Unknown
+    }
+    /// Registers a callback invoked when the reported power mode changes.
+    fn on_power_mode_change(&self, _callback: Box<dyn FnMut()>) {}
 
     /// Returns the user's system-wide contrast setting.
     fn contrast_preference(&self) -> ContrastPreference {
@@ -698,6 +702,20 @@ pub struct SystemColors {
     pub button_text: crate::Rgba,
     /// `GrayText`: disabled text.
     pub gray_text: crate::Rgba,
+}
+
+/// The operating system's preference for energy use versus performance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PowerMode {
+    /// The platform cannot determine the mode, or cannot distinguish the
+    /// active mode from other non-low-power modes.
+    Unknown,
+    /// The system prioritizes reducing energy use.
+    LowPower,
+    /// The system balances energy use and performance.
+    Balanced,
+    /// The system prioritizes performance over energy use.
+    HighPower,
 }
 
 /// Thermal state of the system

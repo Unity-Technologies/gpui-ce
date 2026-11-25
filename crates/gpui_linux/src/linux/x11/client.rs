@@ -361,11 +361,11 @@ impl X11Client {
         handle
             .insert_source(power_receiver, |event, _, client: &mut X11Client| {
                 if let calloop::channel::Event::Msg(event) = event {
-                    client
-                        .0
-                        .borrow_mut()
-                        .common
-                        .handle_system_power_event(event);
+                    LinuxCommon::handle_system_power_event(
+                        &client.0,
+                        |state| &mut state.common,
+                        event,
+                    );
                 }
             })
             .map_err(|err| {

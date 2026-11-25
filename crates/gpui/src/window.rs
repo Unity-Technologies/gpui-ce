@@ -168,17 +168,6 @@ struct FrameDirtyAccumulator {
     invalidations: u64,
 }
 
-/// Why GPUI capped a window's frame rate.
-#[derive(Clone, Copy)]
-enum FrameRateLimit {
-    /// The window isn't focused.
-    Inactive,
-    /// The system is under thermal pressure.
-    Thermal,
-    /// The scene's animations ask for fewer frames.
-    Animation,
-}
-
 #[derive(Clone)]
 pub(crate) struct WindowInvalidator {
     inner: Rc<RefCell<WindowInvalidatorInner>>,
@@ -2095,11 +2084,11 @@ impl Window {
                 let force_render =
                     mem::take(&mut deferred_force_render) || request_frame_options.force_render;
 
-                let thermal_state = handle
-                    .update(&mut cx, |_, _, cx| cx.thermal_state())
+                let power_state = handle
+                    .update(&mut cx, |_, _, cx| (cx.thermal_state(), cx.power_mode()))
                     .log_err();
 
-                // Throttle frame rate; see `frame_throttle_interval`.
+                // Throttle frame rate; see `minimum_frame_interval`.
                 let wants_frame = !(request_frame_options.require_presentation
                     || (!request_frame_options.force_render
                         && next_frame_callbacks.borrow().is_empty()));
@@ -2111,44 +2100,31 @@ impl Window {
                     && !invalidator.is_dirty()
                     && !needs_present.get()
                     && !input_rate_tracker.borrow_mut().is_high_rate();
-                let low_power_mode = handle
-                    .update(&mut cx, |_, _, cx| cx.low_power_mode())
-                    .unwrap_or(false);
-                let min_frame_interval = if wants_frame || animation_only {
-                    let high_rate_input = input_rate_tracker.borrow_mut().is_high_rate();
-                    frame_throttle_interval(
-                        active.get(),
-                        high_rate_input,
-                        inactive_frame_interval,
-                        thermal_state,
-                        low_power_mode,
-                    )
-                    .map(|interval| {
-                        // Low Power Mode shares the thermal skip reason.
-                        let limit = if !active.get() && !high_rate_input {
-                            FrameRateLimit::Inactive
-                        } else {
-                            FrameRateLimit::Thermal
-                        };
-                        (interval, limit)
-                    })
-                } else {
-                    None
-                };
+                let should_throttle = wants_frame || animation_only;
+                let inactive_without_high_rate_input = should_throttle
+                    && !active.get()
+                    && !input_rate_tracker.borrow_mut().is_high_rate();
+                let (thermal_state, power_mode) =
+                    power_state.unwrap_or((ThermalState::Nominal, crate::PowerMode::Unknown));
+                let min_frame_interval = minimum_frame_interval(
+                    should_throttle,
+                    inactive_without_high_rate_input,
+                    inactive_frame_interval,
+                    thermal_state,
+                    power_mode,
+                );
                 let animation_frame_interval = scene_animation_interval
                     .get()
                     .filter(|interval| animation_only && !interval.is_zero());
-                let min_frame_interval = match (min_frame_interval, animation_frame_interval) {
-                    (Some((interval, _)), Some(animation)) if animation > interval => {
-                        Some((animation, FrameRateLimit::Animation))
-                    }
-                    (None, Some(animation)) => Some((animation, FrameRateLimit::Animation)),
-                    (min_frame_interval, _) => min_frame_interval,
-                };
+                let min_frame_interval = min_frame_interval.max(animation_frame_interval);
+                // Animation limits only apply without other demand, so no input
+                // or invalidation waits on them.
+                #[cfg_attr(not(feature = "profiler"), expect(unused_variables))]
+                let animation_limited = animation_frame_interval.is_some()
+                    && animation_frame_interval == min_frame_interval;
 
                 let now = Instant::now();
-                #[cfg_attr(not(feature = "profiler"), expect(unused_variables))]
-                if let Some((min_interval, limit)) = min_frame_interval {
+                if let Some(min_interval) = min_frame_interval {
                     if let Some(last_frame) = last_frame_time.get()
                         && frame_arrived_too_soon(now.duration_since(last_frame), min_interval)
                     {
@@ -2157,10 +2133,8 @@ impl Window {
                         // Deferred by throttling: ask demand-driven platforms to retry.
                         handle
                             .update(&mut cx, |_, window, _| {
-                                // Animation limits only apply without other demand,
-                                // so no input or invalidation waits on them.
                                 #[cfg(feature = "profiler")]
-                                if !matches!(limit, FrameRateLimit::Animation) {
+                                if !animation_limited {
                                     window.window_profiler.record_frame_throttled();
                                 }
                                 window.platform_window.schedule_frame();
@@ -2175,16 +2149,14 @@ impl Window {
                         profiler::journal::record_frame_skipped(
                             window_id,
                             Instant::now(),
-                            match limit {
-                                FrameRateLimit::Inactive => {
-                                    profiler::journal::FrameSkipReason::InactiveFrameRateLimit
-                                }
-                                FrameRateLimit::Thermal => {
-                                    profiler::journal::FrameSkipReason::ThermalFrameRateLimit
-                                }
-                                FrameRateLimit::Animation => {
-                                    profiler::journal::FrameSkipReason::AnimationFrameRateLimit
-                                }
+                            if animation_limited {
+                                profiler::journal::FrameSkipReason::AnimationFrameRateLimit
+                            } else if inactive_without_high_rate_input {
+                                profiler::journal::FrameSkipReason::InactiveFrameRateLimit
+                            } else if power_mode == crate::PowerMode::LowPower {
+                                profiler::journal::FrameSkipReason::LowPowerFrameRateLimit
+                            } else {
+                                profiler::journal::FrameSkipReason::ThermalFrameRateLimit
                             },
                         );
                         return;
@@ -9229,8 +9201,9 @@ mod pointer_tests;
 /// presents at half the intended rate.
 const FRAME_INTERVAL_TOLERANCE: Duration = Duration::from_millis(1);
 
-/// Frame interval while the system is thermally constrained or in Low Power Mode.
+/// Frame interval under thermal pressure (~60fps).
 const CONSTRAINED_FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
+/// Frame interval in Low Power Mode (~30fps).
 const LOW_POWER_FRAME_INTERVAL: Duration = Duration::from_micros(33_333);
 
 fn frame_arrived_too_soon(elapsed: Duration, min_interval: Duration) -> bool {
@@ -9238,21 +9211,34 @@ fn frame_arrived_too_soon(elapsed: Duration, min_interval: Duration) -> bool {
 }
 
 /// The minimum interval between presented frames, or `None` for no cap.
-/// - Inactive window without high-rate input: `inactive_interval` (~30fps).
+/// - Inactive window without high-rate input: `inactive_frame_interval`,
+///   never faster than the Low Power Mode cap while that mode is on.
 /// - Low Power Mode: ~30fps.
 /// - Thermal pressure (Serious/Critical): ~60fps.
-fn frame_throttle_interval(
-    active: bool,
-    high_rate_input: bool,
-    inactive_interval: Option<Duration>,
-    thermal_state: Option<ThermalState>,
-    low_power_mode: bool,
+fn minimum_frame_interval(
+    should_throttle: bool,
+    inactive_without_high_rate_input: bool,
+    inactive_frame_interval: Option<Duration>,
+    thermal_state: ThermalState,
+    power_mode: crate::PowerMode,
 ) -> Option<Duration> {
-    if !active && !high_rate_input {
-        inactive_interval
-    } else if low_power_mode {
+    let low_power_mode_enabled = power_mode == crate::PowerMode::LowPower;
+    if !should_throttle {
+        None
+    } else if inactive_without_high_rate_input {
+        match (inactive_frame_interval, low_power_mode_enabled) {
+            (Some(inactive_frame_interval), true) => {
+                Some(inactive_frame_interval.max(LOW_POWER_FRAME_INTERVAL))
+            }
+            (inactive_frame_interval, false) => inactive_frame_interval,
+            (None, true) => Some(LOW_POWER_FRAME_INTERVAL),
+        }
+    } else if low_power_mode_enabled {
         Some(LOW_POWER_FRAME_INTERVAL)
-    } else if let Some(ThermalState::Critical | ThermalState::Serious) = thermal_state {
+    } else if matches!(
+        thermal_state,
+        ThermalState::Critical | ThermalState::Serious
+    ) {
         Some(CONSTRAINED_FRAME_INTERVAL)
     } else {
         None
@@ -9272,37 +9258,99 @@ mod frame_limiter_tests {
     }
 
     #[test]
-    fn low_power_mode_caps_an_active_window_to_30fps() {
-        let inactive = Some(Duration::from_micros(33_333));
-        assert_eq!(
-            frame_throttle_interval(true, false, inactive, None, true),
-            Some(Duration::from_micros(33_333))
-        );
-        assert_eq!(
-            frame_throttle_interval(true, false, inactive, None, false),
-            None
-        );
+    fn frame_throttle_accepts_display_link_rounding() {
+        assert!(!frame_arrived_too_soon(
+            Duration::from_micros(16_666),
+            CONSTRAINED_FRAME_INTERVAL,
+        ));
+        assert!(!frame_arrived_too_soon(
+            Duration::from_micros(33_332),
+            LOW_POWER_FRAME_INTERVAL,
+        ));
     }
 
     #[test]
-    fn low_power_mode_wins_over_thermal_cap_and_inactive_rules_hold() {
-        let inactive = Some(Duration::from_micros(40_000));
-        let serious = Some(ThermalState::Serious);
+    fn frame_throttle_rejects_an_extra_display_refresh() {
+        assert!(frame_arrived_too_soon(
+            Duration::from_micros(8_333),
+            CONSTRAINED_FRAME_INTERVAL,
+        ));
+        assert!(frame_arrived_too_soon(
+            Duration::from_micros(16_666),
+            LOW_POWER_FRAME_INTERVAL,
+        ));
+    }
+
+    #[test]
+    fn power_modes_preserve_frame_limits() {
+        for (power_mode, active_interval, thermal_interval) in [
+            (
+                crate::PowerMode::LowPower,
+                Some(LOW_POWER_FRAME_INTERVAL),
+                LOW_POWER_FRAME_INTERVAL,
+            ),
+            (crate::PowerMode::Unknown, None, CONSTRAINED_FRAME_INTERVAL),
+            (crate::PowerMode::Balanced, None, CONSTRAINED_FRAME_INTERVAL),
+            (
+                crate::PowerMode::HighPower,
+                None,
+                CONSTRAINED_FRAME_INTERVAL,
+            ),
+        ] {
+            assert_eq!(
+                minimum_frame_interval(true, false, None, ThermalState::Nominal, power_mode),
+                active_interval,
+            );
+            assert_eq!(
+                minimum_frame_interval(true, false, None, ThermalState::Serious, power_mode),
+                Some(thermal_interval),
+            );
+            let inactive_interval = Duration::from_millis(100);
+            assert_eq!(
+                minimum_frame_interval(
+                    true,
+                    true,
+                    Some(inactive_interval),
+                    ThermalState::Nominal,
+                    power_mode,
+                ),
+                Some(inactive_interval),
+            );
+        }
+    }
+
+    #[test]
+    fn low_power_mode_never_lets_an_inactive_window_run_faster() {
+        let fast_inactive = Some(Duration::from_millis(10));
         assert_eq!(
-            frame_throttle_interval(true, false, inactive, serious, true),
-            Some(Duration::from_micros(33_333))
+            minimum_frame_interval(
+                true,
+                true,
+                fast_inactive,
+                ThermalState::Nominal,
+                crate::PowerMode::LowPower,
+            ),
+            Some(LOW_POWER_FRAME_INTERVAL),
         );
         assert_eq!(
-            frame_throttle_interval(true, false, inactive, serious, false),
-            Some(Duration::from_micros(16_667))
+            minimum_frame_interval(
+                true,
+                true,
+                None,
+                ThermalState::Nominal,
+                crate::PowerMode::LowPower,
+            ),
+            Some(LOW_POWER_FRAME_INTERVAL),
         );
         assert_eq!(
-            frame_throttle_interval(false, false, inactive, None, true),
-            inactive
-        );
-        assert_eq!(
-            frame_throttle_interval(false, true, inactive, None, true),
-            Some(Duration::from_micros(33_333))
+            minimum_frame_interval(
+                false,
+                true,
+                fast_inactive,
+                ThermalState::Critical,
+                crate::PowerMode::LowPower,
+            ),
+            None,
         );
     }
 }
@@ -10649,6 +10697,50 @@ mod tests {
             test_window.frame_wake_count() > baseline,
             "scheduling a next-frame callback in an idle window must wake the frame source"
         );
+    }
+
+    /// Low Power Mode caps an active window at ~30fps. The mode reaches the
+    /// limiter through the platform's power mode notification.
+    #[gpui::test]
+    fn test_low_power_mode_defers_frames_of_an_active_window(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| EmptyView);
+        let test_window = cx.test_window(window.into());
+        test_window.simulate_active_status_change(true);
+        test_window.simulate_frame_request(RequestFrameOptions::default());
+
+        let frames = Rc::new(Cell::new(0));
+        let schedule = |cx: &mut TestAppContext| {
+            let frames = frames.clone();
+            window
+                .update(cx, |_, window, _| {
+                    window.on_next_frame(move |_, _| frames.set(frames.get() + 1))
+                })
+                .unwrap();
+        };
+        // The frames below arrive microseconds apart, far inside the ~33ms
+        // Low Power Mode interval, so only that limit can defer one.
+        schedule(cx);
+        test_window.simulate_frame_request(RequestFrameOptions::default());
+        assert_eq!(
+            frames.get(),
+            1,
+            "an active window is not limited by default"
+        );
+
+        cx.simulate_power_mode(crate::PowerMode::LowPower);
+        assert_eq!(cx.update(|cx| cx.power_mode()), crate::PowerMode::LowPower);
+        assert!(cx.update(|cx| cx.low_power_mode()));
+        schedule(cx);
+        test_window.simulate_frame_request(RequestFrameOptions::default());
+        assert_eq!(
+            frames.get(),
+            1,
+            "a frame right after the last one waits for the Low Power Mode interval"
+        );
+
+        cx.simulate_power_mode(crate::PowerMode::Balanced);
+        test_window.simulate_frame_request(RequestFrameOptions::default());
+        assert_eq!(frames.get(), 2, "leaving Low Power Mode lifts the cap");
     }
 
     /// A frame request that arrives while next-frame callbacks are pending
