@@ -187,12 +187,15 @@ fn to_wide_nul_terminated(text: &str) -> Vec<u16> {
 }
 
 fn write_string(item: &ClipboardString) -> Result<()> {
-    let wide = to_wide_nul_terminated(&item.text);
+    // `text` is what `read_string` returns: NULs scrubbed, line endings as LF.
+    let text = item.text.replace('\0', " ").replace("\r\n", "\n");
+    // Windows applications expect CRLF line endings in CF_UNICODETEXT.
+    let wide = to_wide_nul_terminated(&text.replace('\n', "\r\n"));
     set_clipboard_bytes(&wide, CF_UNICODETEXT.0 as u32)?;
 
     if let Some(metadata) = item.metadata.as_ref() {
-        // Hash what was written, since reading back yields the scrubbed text.
-        let hash_bytes = ClipboardString::text_hash(&item.text.replace('\0', " ")).to_ne_bytes();
+        // Hash what reading back yields, so the metadata still matches.
+        let hash_bytes = ClipboardString::text_hash(&text).to_ne_bytes();
         set_clipboard_bytes(&hash_bytes, *CLIPBOARD_HASH_FORMAT)?;
 
         let wide = to_wide_nul_terminated(metadata);
@@ -237,7 +240,8 @@ fn convert_to_png(bytes: &[u8], format: ImageFormat) -> Option<Vec<u8>> {
 }
 
 fn read_string() -> Option<ClipboardEntry> {
-    let text = get_clipboard_string(CF_UNICODETEXT.0 as u32)?;
+    // Normalize to LF so apps see the same line endings on every platform.
+    let text = get_clipboard_string(CF_UNICODETEXT.0 as u32)?.replace("\r\n", "\n");
     let metadata = read_clipboard_metadata(&text);
     Some(ClipboardEntry::String(ClipboardString { text, metadata }))
 }
@@ -395,6 +399,12 @@ impl Drop for LockedGlobal {
     fn drop(&mut self) {
         unsafe { GlobalUnlock(self.global).ok() };
     }
+}
+
+#[cfg(test)]
+pub(crate) fn read_raw_clipboard_text() -> Option<String> {
+    let _clip = ClipboardGuard::open()?;
+    get_clipboard_string(CF_UNICODETEXT.0 as u32)
 }
 
 #[cfg(test)]
