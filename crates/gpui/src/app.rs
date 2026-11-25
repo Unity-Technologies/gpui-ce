@@ -2858,6 +2858,7 @@ impl App {
     /// The callback runs after action and event handling has finished, so it sees the
     /// keystrokes that were not handled earlier. Use [`App::intercept_keystrokes`] to
     /// see keystrokes before they are dispatched. Keep the returned [`Subscription`] alive.
+    /// A standalone modifier keystroke is observed when it is released.
     pub fn observe_keystrokes(
         &mut self,
         mut f: impl FnMut(&KeystrokeEvent, &mut Window, &mut App) + 'static,

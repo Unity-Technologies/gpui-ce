@@ -797,6 +797,7 @@ impl<'a, T: 'static> Context<'a, T> {
     /// The keystroke's `action` is set when a key binding handled it. The callback doesn't run when a
     /// focused element's listener stops propagation. Keep the returned [`Subscription`] alive for as long
     /// as you want the callback to run.
+    /// A standalone modifier keystroke is observed when it is released.
     pub fn observe_keystrokes(
         &mut self,
         mut f: impl FnMut(&mut T, &KeystrokeEvent, &mut Window, &mut Context<T>) + 'static,
