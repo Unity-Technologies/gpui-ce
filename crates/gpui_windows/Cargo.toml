@@ -50,6 +50,7 @@ log.workspace = true
 parking_lot.workspace = true
 rand.workspace = true
 raw-window-handle.workspace = true
+scheduler.workspace = true
 smallvec.workspace = true
 uuid.workspace = true
 # `Win32_UI_Accessibility` for `HIGHCONTRASTW`; accesskit_windows already enables it.

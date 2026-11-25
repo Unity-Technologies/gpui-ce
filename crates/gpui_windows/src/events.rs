@@ -1445,9 +1445,15 @@ impl WindowsWindowInner {
             // After device-loss recovery, force a render that rebuilds atlas textures.
             self.state.renderer.borrow_mut().mark_drawable();
         }
+        let (signal_at, signal_source) = self.state.frame_signal.take().map_or(
+            (None, FrameRequestSource::NativeCallback),
+            |(at, source)| (Some(at), source),
+        );
         request_frame(RequestFrameOptions {
             require_presentation: false,
             force_render,
+            signal_at,
+            signal_source,
         });
 
         self.state.callbacks.request_frame.set(Some(request_frame));

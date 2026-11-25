@@ -9,12 +9,12 @@ use block2::RcBlock;
 use dispatch2::DispatchQueue;
 use gpui::{
     AnyWindowHandle, BackgroundExecutor, Bounds, Capslock, CursorStyle, ExternalDragPayload,
-    ExternalPaths, FileDropEvent, ForegroundExecutor, KeyDownEvent, Keystroke, Modifiers,
-    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
-    PromptButton, PromptLevel, RequestFrameOptions, SharedString, Size, SystemWindowTab,
-    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind,
-    WindowParams, WindowVisibility, point, px, size,
+    ExternalPaths, FileDropEvent, ForegroundExecutor, FrameRequestSource, KeyDownEvent, Keystroke,
+    Modifiers, ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, PlatformAtlas, PlatformDisplay, PlatformFrameSignal, PlatformInput,
+    PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
+    SharedString, Size, SystemWindowTab, WindowAppearance, WindowBackgroundAppearance,
+    WindowBounds, WindowControlArea, WindowKind, WindowParams, WindowVisibility, point, px, size,
 };
 #[cfg(any(test, feature = "test-support", feature = "render-to-image"))]
 use image::RgbaImage;
@@ -3607,6 +3607,7 @@ unsafe extern "C" fn window_did_change_screen(this: &Objc2Object, _: Sel, _: Obj
 }
 
 unsafe extern "C" fn window_did_change_key_status(this: &Objc2Object, selector: Sel, _: ObjcId) {
+    let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
     let window_state = unsafe { get_window_state(this) };
     let lock = window_state.lock();
     let is_active = unsafe { lock.native_window.isKeyWindow() == Bool::new(true) };
@@ -3661,7 +3662,11 @@ unsafe extern "C" fn window_did_change_key_status(this: &Objc2Object, selector: 
                 lock.stop_display_link();
                 let request = lock.next_frame_request();
                 drop(lock);
-                callback(request);
+                callback(RequestFrameOptions {
+                    signal_at,
+                    signal_source: FrameRequestSource::NativeCallback,
+                    ..request
+                });
 
                 let mut lock = window_state.lock();
                 lock.request_frame_callback = Some(callback);
@@ -3778,6 +3783,7 @@ unsafe extern "C" fn set_frame_size(this: &Objc2Object, _: Sel, size: NSSize) {
 }
 
 unsafe extern "C" fn display_layer(this: &Objc2Object, _: Sel, _: ObjcId) {
+    let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.lock();
     if let Some(mut callback) = lock.request_frame_callback.take() {
@@ -3785,7 +3791,11 @@ unsafe extern "C" fn display_layer(this: &Objc2Object, _: Sel, _: ObjcId) {
         lock.stop_display_link();
         let request = lock.next_frame_request();
         drop(lock);
-        callback(request);
+        callback(RequestFrameOptions {
+            signal_at,
+            signal_source: FrameRequestSource::NativeCallback,
+            ..request
+        });
 
         let mut lock = window_state.lock();
         lock.request_frame_callback = Some(callback);
@@ -3801,9 +3811,20 @@ extern "C" fn step(view: *mut c_void) {
         let mut lock = window_state.lock();
 
         if let Some(mut callback) = lock.request_frame_callback.take() {
+            let (signal_at, signal_source) = match &lock.frame_source {
+                FrameSource::DisplayLink(Some(source)) => source.take_signal(),
+                _ => None,
+            }
+            .map_or((None, FrameRequestSource::NativeCallback), |(at, source)| {
+                (Some(at), source)
+            });
             let request = lock.next_frame_request();
             drop(lock);
-            callback(request);
+            callback(RequestFrameOptions {
+                signal_at,
+                signal_source,
+                ..request
+            });
             window_state.lock().request_frame_callback = Some(callback);
         }
     }
