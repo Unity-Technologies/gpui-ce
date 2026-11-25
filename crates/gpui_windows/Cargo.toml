@@ -59,5 +59,8 @@ windows-core.workspace = true
 windows-numerics.workspace = true
 windows-registry.workspace = true
 
+# `cfg(test)` here does not reach gpui's own cfg-gated platform APIs, so the
+# dev-dependency enables them for test builds, as on macOS and Linux.
 [target.'cfg(target_os = "windows")'.dev-dependencies]
+gpui = { workspace = true, features = ["test-support"], default-features = false }
 gpui_fonts = { path = "../gpui_ce_fonts", package = "gpui-ce-fonts" }
