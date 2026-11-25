@@ -376,9 +376,9 @@ mod tests {
     use gpui::{
         AppContext, Bounds, Context, Div, Element as _, Entity, InteractiveElement,
         InteractivityPrepaint, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers,
-        MouseButton, ParentElement, Pixels, Render, RenderOnce, StatefulInteractiveElement, Styled,
-        TestAppContext, VisualTestContext, Window, accesskit, canvas, div, point,
-        prelude::FluentBuilder, px,
+        MouseButton, ParentElement, Pixels, Render, RenderOnce, Stateful,
+        StatefulInteractiveElement, Styled, TestAppContext, VisualTestContext, Window, accesskit,
+        canvas, div, point, prelude::FluentBuilder, px,
     };
 
     struct SwitchHarness {
@@ -687,8 +687,8 @@ mod tests {
                             switch
                                 .render(window, cx)
                                 .into_any_element()
-                                .downcast_mut::<Div>()
-                                .expect("control should render a div")
+                                .downcast_mut::<Stateful<Div>>()
+                                .expect("control should render a stateful div")
                                 .write_a11y_info(&mut node);
 
                             node
