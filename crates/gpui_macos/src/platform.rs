@@ -29,10 +29,9 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSAppearance, NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
-    NSApplicationOcclusionState,
-    NSControlStateValueOn, NSCursor, NSDocumentController, NSEventModifierFlags, NSMenu,
-    NSMenuDelegate, NSMenuItem, NSModalResponseOK, NSOpenPanel, NSResponder, NSSavePanel,
-    NSScroller, NSWorkspace,
+    NSApplicationOcclusionState, NSControlStateValueOn, NSCursor, NSDocumentController,
+    NSEventModifierFlags, NSMenu, NSMenuDelegate, NSMenuItem, NSModalResponseOK, NSOpenPanel,
+    NSResponder, NSSavePanel, NSScroller, NSWorkspace,
 };
 use objc2_foundation::NSActivityOptions;
 use objc2_foundation::NSOperatingSystemVersion;

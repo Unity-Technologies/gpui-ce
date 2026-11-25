@@ -9959,9 +9959,7 @@ mod tests {
                 }),
             }
         });
-        window
-            .update(cx, |_, window, _| window.activate())
-            .unwrap();
+        window.update(cx, |_, window, _| window.activate()).unwrap();
 
         let new_size = size(px(400.), px(300.));
         cx.simulate_window_resize(window.into(), new_size);
