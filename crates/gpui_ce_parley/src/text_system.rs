@@ -2103,6 +2103,27 @@ impl ParleyTextSystem {
             layout
         };
 
+        // Parley aligns while it breaks lines, so set it first. An empty paragraph stays
+        // start-aligned here and gets its offset from `empty_alignment` below.
+        let alignment = if text.is_empty() && inline_boxes.is_empty() {
+            Alignment::Start
+        } else {
+            match text_align {
+                TextAlign::Start => Alignment::Start,
+                TextAlign::End => Alignment::End,
+                TextAlign::Left => Alignment::Left,
+                TextAlign::Center => Alignment::Center,
+                TextAlign::Right => Alignment::Right,
+            }
+        };
+        layout.set_alignment(
+            alignment,
+            AlignmentOptions {
+                align_when_overflowing: true,
+                last_line_alignment: None,
+            },
+        );
+
         if let Some((wrap_width, max_lines)) = wrap {
             if let Some(max_lines) = max_lines {
                 let mut breaker = layout.break_lines();
@@ -2155,24 +2176,6 @@ impl ParleyTextSystem {
                 _ => Pixels::ZERO,
             }
         });
-
-        if empty_alignment.is_none() {
-            let alignment = match text_align {
-                TextAlign::Start => Alignment::Start,
-                TextAlign::End => Alignment::End,
-                TextAlign::Left => Alignment::Left,
-                TextAlign::Center => Alignment::Center,
-                TextAlign::Right => Alignment::Right,
-            };
-
-            layout.align(
-                alignment,
-                AlignmentOptions {
-                    align_when_overflowing: true,
-                    last_line_alignment: None,
-                },
-            );
-        }
 
         let paragraph_direction = if layout.is_rtl() {
             ResolvedDirection::RightToLeft
