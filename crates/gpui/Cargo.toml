@@ -36,6 +36,11 @@ test-support = [
 # Exposes `Window::render_to_image` without the rest of `test-support`, which
 # also changes how windows schedule and draw frames.
 render-to-image = []
+# Records `debug_selector` bounds in every profile, not only debug builds
+# with `test-support`. For test suites that must run optimized (a release
+# test lane that also asserts frame cost) and still look elements up by
+# selector. Costs a string clone per selector per frame, so never ship it.
+debug-selectors = []
 bench-support = ["profiler", "dep:criterion"]
 # Preserve the published feature name while consumers migrate to `bench-support`.
 bench = ["bench-support"]
