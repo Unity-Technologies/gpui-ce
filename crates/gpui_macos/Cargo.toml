@@ -45,6 +45,8 @@ ctor.workspace = true
 dispatch2.workspace = true
 etagere.workspace = true
 font-kit.workspace = true
+font-kit-core-graphics.workspace = true
+foreign-types.workspace = true
 futures.workspace = true
 gpui_apple.workspace = true
 gpui_parley = { workspace = true, features = ["system-fonts"] }
