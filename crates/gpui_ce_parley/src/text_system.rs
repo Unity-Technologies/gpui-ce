@@ -576,6 +576,12 @@ fn prepare_bidi_text(
         backend_to_source.extend(std::iter::repeat_n(source_idx, character.len_utf8()));
     };
 
+    // A box off a character boundary keeps `usize::MAX`, which the layout rejects.
+    let mut box_backend_indices = vec![usize::MAX; inline_boxes.len()];
+    let mut box_order = (0..inline_boxes.len()).collect::<Vec<_>>();
+    box_order.sort_by_key(|&box_idx| inline_boxes[box_idx].index);
+    let mut next_box = 0;
+
     if let Some(root_direction) = root_direction {
         let marker = match root_direction {
             ResolvedDirection::LeftToRight => '\u{200e}',
@@ -603,6 +609,25 @@ fn prepare_bidi_text(
         }
 
         source_to_backend[source_idx] = prepared.len();
+
+        // Parley wants each in-flow box at a U+FFFC of its own. The character is synthetic,
+        // so the source map hides it and callers keep their own offsets.
+        while let Some(&box_idx) = box_order.get(next_box) {
+            let box_source_idx = inline_boxes[box_idx].index;
+            if box_source_idx > source_idx {
+                break;
+            }
+            if box_source_idx == source_idx {
+                box_backend_indices[box_idx] = prepared.len();
+                append_synthetic(
+                    '\u{fffc}',
+                    source_idx,
+                    &mut prepared,
+                    &mut backend_to_source,
+                );
+            }
+            next_box += 1;
+        }
 
         if source_idx == text.len() {
             break;
@@ -649,8 +674,9 @@ fn prepare_bidi_text(
         .collect();
     let inline_boxes = inline_boxes
         .iter()
-        .map(|inline_box| InlineBoxRequest {
-            index: map.backend_index(inline_box.index),
+        .zip(box_backend_indices)
+        .map(|(inline_box, index)| InlineBoxRequest {
+            index,
             ..*inline_box
         })
         .collect();
@@ -1900,7 +1926,10 @@ impl ParleyTextSystem {
         let text_styles = prepared.text_styles.as_slice();
         let inline_boxes = prepared.inline_boxes.as_slice();
         let run_ranges = run_ranges(runs);
-        let line_height = if text.is_empty() {
+        // The caller's text, not the prepared one: synthetic characters such as a box's
+        // U+FFFC don't count, and an empty paragraph's styles still cover all of it.
+        let source_is_empty = source_text_len == 0;
+        let line_height = if source_is_empty {
             text_styles
                 .last()
                 .map(|style| style.line_height)
@@ -1950,6 +1979,13 @@ impl ParleyTextSystem {
                             .collect::<Vec<_>>()
                     })
                     .collect::<Vec<_>>();
+            // Text no run covers, like the U+FFFC of a box-only paragraph, still needs a
+            // font: parley places an in-flow box only on a shaped cluster.
+            let default_families = self
+                .fallback_families
+                .iter()
+                .map(|family| FontFamilyName::Named(Cow::Borrowed(family.as_str())))
+                .collect::<Vec<_>>();
             let feature_lists = runs
                 .iter()
                 .map(|run| {
@@ -1990,6 +2026,11 @@ impl ParleyTextSystem {
             let mut builder = layout_context.ranged_builder(font_context, text, 1.0, false);
             builder.set_line_break_override(Some(CHROMIUM_LINE_BREAK_OVERRIDE));
             builder.push_default(StyleProperty::FontSize(f32::from(font_size)));
+            if !default_families.is_empty() {
+                builder.push_default(StyleProperty::FontFamily(FontFamily::from(
+                    default_families.as_slice(),
+                )));
+            }
             if let Some(word_break) = parley_word_break(word_break) {
                 builder.push_default(StyleProperty::WordBreak(word_break));
             }
@@ -2011,7 +2052,7 @@ impl ParleyTextSystem {
             }
 
             let mut push_style = |property, range| {
-                if text.is_empty() {
+                if source_is_empty {
                     builder.push_default(property);
                 } else {
                     builder.push(property, range);
@@ -2021,7 +2062,7 @@ impl ParleyTextSystem {
             for (run_index, run) in runs.iter().enumerate() {
                 let descriptor = &run.font;
                 let range = run_ranges[run_index].clone();
-                if range.is_empty() && !text.is_empty() {
+                if range.is_empty() && !source_is_empty {
                     continue;
                 }
 
@@ -2103,6 +2144,27 @@ impl ParleyTextSystem {
             layout
         };
 
+        // Parley aligns while it breaks lines, so set it first. An empty paragraph stays
+        // start-aligned here and gets its offset from `empty_alignment` below.
+        let alignment = if text.is_empty() && inline_boxes.is_empty() {
+            Alignment::Start
+        } else {
+            match text_align {
+                TextAlign::Start => Alignment::Start,
+                TextAlign::End => Alignment::End,
+                TextAlign::Left => Alignment::Left,
+                TextAlign::Center => Alignment::Center,
+                TextAlign::Right => Alignment::Right,
+            }
+        };
+        layout.set_alignment(
+            alignment,
+            AlignmentOptions {
+                align_when_overflowing: true,
+                last_line_alignment: None,
+            },
+        );
+
         if let Some((wrap_width, max_lines)) = wrap {
             if let Some(max_lines) = max_lines {
                 let mut breaker = layout.break_lines();
@@ -2155,24 +2217,6 @@ impl ParleyTextSystem {
                 _ => Pixels::ZERO,
             }
         });
-
-        if empty_alignment.is_none() {
-            let alignment = match text_align {
-                TextAlign::Start => Alignment::Start,
-                TextAlign::End => Alignment::End,
-                TextAlign::Left => Alignment::Left,
-                TextAlign::Center => Alignment::Center,
-                TextAlign::Right => Alignment::Right,
-            };
-
-            layout.align(
-                alignment,
-                AlignmentOptions {
-                    align_when_overflowing: true,
-                    last_line_alignment: None,
-                },
-            );
-        }
 
         let paragraph_direction = if layout.is_rtl() {
             ResolvedDirection::RightToLeft
@@ -3269,6 +3313,50 @@ mod tests {
             .platform_layout
             .selection_bounds(0..text.len(), px(24.0));
         assert!(!selection.is_empty());
+    }
+
+    #[test]
+    fn inline_box_object_characters_stay_out_of_source_offsets() {
+        let system = test_system();
+        let text = "ab";
+        let runs = [text_run(text, "IBM Plex Sans")];
+        let boxes = [1, 1].map(|id| InlineBoxRequest {
+            id,
+            index: 1,
+            size: size(px(10.0), px(12.0)),
+            vertical_align: VerticalAlign::Baseline,
+        });
+        let layout = system.layout_inline(InlineLayoutRequest {
+            text,
+            font_size: px(16.0),
+            runs: &runs,
+            boxes: &boxes,
+            text_styles: &[],
+            line_height: px(24.0),
+            text_metrics: InlineTextMetrics::default(),
+            options: TextLayoutOptions::default(),
+            bidi_scopes: &[],
+        });
+        let native = &layout.layout.platform_layout;
+
+        assert_eq!(layout.boxes.len(), 2);
+        assert_eq!(layout.layout.len, text.len());
+        assert_eq!(native.len(), text.len());
+        let between = CaretPosition::attached_to_next_cluster(1);
+        assert_eq!(native.logical_cluster_before(between), Some(0..1));
+        assert_eq!(native.logical_cluster_after(between), Some(1..2));
+        assert_eq!(
+            native
+                .adjacent_visual_caret(between, VisualDirection::Right)
+                .map(|caret| caret.index),
+            Some(2)
+        );
+        assert_eq!(
+            native
+                .adjacent_visual_caret(between, VisualDirection::Left)
+                .map(|caret| caret.index),
+            Some(0)
+        );
     }
 
     #[test]
