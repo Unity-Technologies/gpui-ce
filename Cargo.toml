@@ -130,8 +130,8 @@ block2 = "0.6"
 cbindgen = { version = "0.29.0", default-features = false }
 core-foundation = "0.10"
 core-foundation-sys = "0.8.6"
-core-graphics = "0.24"
-core-text = "21"
+core-graphics = "0.25"
+core-text = "22"
 objc = "0.2"
 objc2 = "0.6"
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std"] }
@@ -308,6 +308,11 @@ dispatch2 = "0.3.1"
 embed-resource = "3.0"
 filedescriptor = "0.8.2"
 font-kit = { package = "zed-font-kit", version = "0.14.1-zed" }
+# zed-font-kit still builds on core-graphics 0.24. `gpui_macos` hands it a
+# CGFont through this alias, by pointer, so our own core-graphics can move on.
+# Drop it once a font-kit release takes the same core-graphics as `core-graphics`.
+font-kit-core-graphics = { package = "core-graphics", version = "0.24" }
+foreign-types = "0.5"
 futures-lite = "2.6.1"
 getrandom = "0.4.3"
 globset = "0.4"

@@ -94,5 +94,20 @@
       matchPackageNames: ['skrifa'],
       allowedVersions: '<0.45',
     },
+    // font-kit-core-graphics is the core-graphics zed-font-kit builds on, so
+    // it moves only when font-kit does.
+    {
+      matchManagers: ['cargo'],
+      matchDepNames: ['font-kit-core-graphics'],
+      enabled: false,
+    },
+    // gpui_windows implements and calls `windows` crate interfaces with these,
+    // so they stay on the line that `windows` itself uses (0.62 / 0.3) until a
+    // `windows` release moves to 0.100.
+    {
+      matchManagers: ['cargo'],
+      matchPackageNames: ['windows-core', 'windows-numerics'],
+      allowedVersions: '<0.100',
+    },
   ],
 }

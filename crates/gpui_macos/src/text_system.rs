@@ -548,7 +548,9 @@ mod rasterizer {
 
             let has_default_variations = face.has_default_variations()?;
             let core_text_font = font::new_from_descriptor(&descriptor, 0.0);
-            let font = FontKitFont::from_core_graphics_font(core_text_font.copy_to_CGFont());
+            let font = FontKitFont::from_core_graphics_font(font_kit_cg_font(
+                core_text_font.copy_to_CGFont(),
+            ));
 
             Ok(Self {
                 descriptor,
@@ -558,6 +560,15 @@ mod rasterizer {
                 _source_data: source_data,
             })
         }
+    }
+
+    /// font-kit builds on an older core-graphics, whose `CGFont` is a different
+    /// Rust type over the same `CGFontRef`. Move our reference across as is.
+    fn font_kit_cg_font(font: core_graphics::font::CGFont) -> font_kit_core_graphics::font::CGFont {
+        use foreign_types::ForeignType as _;
+        // SAFETY: both types own one retained `CGFontRef`; `into_ptr` gives up
+        // ours without a release and `from_ptr` takes it over.
+        unsafe { font_kit_core_graphics::font::CGFont::from_ptr(font.into_ptr().cast()) }
     }
 
     fn source_from_bytes(bytes: Vec<u8>) -> Arc<SendCFData> {
